@@ -39,16 +39,18 @@ use crate::{
         lines::draw_lines_and_routes_system,
         markers::{
             MarkerWorldBounds, animate_markers_system, current_auth, map_interaction_system,
-            selection_gizmo_system, setup_selection_highlight_system, sync_markers_system,
+            normalize_skinned_mesh_weights_system, selection_gizmo_system,
+            setup_selection_highlight_system, sync_markers_system,
         },
         media_preview::{MediaPreviewPlayer, media_preview_audio_system},
         playback::{PlaybackOverrides, playback_system},
         polygon_edit::PolygonEditState,
+        route_edit::RouteEditState,
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
     },
     state::{
         AppScreen, AppState, AssetFormMode, MediaFormMode, OperasiModalMode, PlaybackState,
-        SelectedEntity, SkenarioModalMode, UiPointerState,
+        SelectedEntity, SkenarioModalMode, ToolMode, UiPointerState,
     },
     ui::{
         egui_root_system,
@@ -116,6 +118,7 @@ fn main() {
         .init_resource::<PlaybackOverrides>()
         .init_resource::<TransformGizmoState>()
         .init_resource::<PolygonEditState>()
+        .init_resource::<RouteEditState>()
         .init_resource::<SkyboxManager>()
         .init_resource::<MarkerWorldBounds>()
         .init_resource::<BasicMeshTextureCache>()
@@ -171,6 +174,10 @@ fn main() {
                 draw_lines_and_routes_system,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            normalize_skinned_mesh_weights_system.before(bevy::asset::AssetEventSystems),
         )
         .add_systems(EguiPrimaryContextPass, egui_root_system)
         .run();
@@ -655,6 +662,7 @@ fn process_net_events_system(
                 state.particles = bundle.particles;
                 state.alurs = bundle.alurs;
                 state.anims = bundle.anims;
+                state.sort_anims_by_order();
                 state.selected = SelectedEntity::None;
                 state.marker_edit = None;
                 state.building_edit = None;
@@ -666,6 +674,7 @@ fn process_net_events_system(
                 state.hidden_entity_ids.clear();
                 state.locked_entity_ids.clear();
                 state.pending_delete_entity = None;
+                state.picking_marker_for_anim_id = None;
                 state.clear_all_dirty();
                 playback.stop_play_test();
                 playback.play_all_anims = true;
@@ -818,21 +827,43 @@ fn process_net_events_system(
                 }
             }
             ApiEvent::AnimCreated(a) => {
-                playback.active_anim_id = Some(a.id);
-                state.selected = SelectedEntity::Anim(a.id);
+                let anim_id = a.id;
+                let anim_name = a.name.clone();
+                let is_multi = twg_shared::route_formation::is_multi_route_anim(&a);
+                let needs_marker_pick =
+                    twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
+                playback.active_anim_id = Some(anim_id);
+                state.selected = SelectedEntity::Anim(anim_id);
                 state.anim_edit = Some(a.clone());
                 state.marker_edit = None;
                 state.building_edit = None;
                 state.line_edit = None;
                 state.text_edit = None;
                 state.anims.push(a);
-                state.status_banner = Some("Rute animasi disimpan — tekan Play Skenario untuk test!".into());
+                state.sort_anims_by_order();
+                if needs_marker_pick {
+                    state.picking_marker_for_anim_id = Some(anim_id);
+                    state.tool_mode = ToolMode::PickRouteMarker;
+                    state.status_banner = Some(if is_multi {
+                        format!(
+                            "Garis '{anim_name}' dibuat! Klik beberapa Model 3D / Unit di peta untuk dimasukkan ke formasi (Enter / Esc selesai)."
+                        )
+                    } else {
+                        format!(
+                            "Garis '{anim_name}' dibuat! Sekarang klik Model 3D / Unit di peta untuk mengikat rute ini."
+                        )
+                    });
+                } else {
+                    state.status_banner =
+                        Some("Rute animasi disimpan — tekan Play Skenario untuk test!".into());
+                }
             }
             ApiEvent::AnimUpdated(a) => {
                 state.dirty_anim_ids.remove(&a.id);
                 if let Some(existing) = state.anims.iter_mut().find(|x| x.id == a.id) {
                     *existing = a.clone();
                 }
+                state.sort_anims_by_order();
                 if state.anim_edit.as_ref().is_some_and(|e| e.id == a.id) {
                     state.anim_edit = Some(a);
                 }
@@ -1160,24 +1191,54 @@ fn process_net_events_system(
                         }
                     }
                     "play_anim" => {
+                        let target_aid = msg
+                            .payload
+                            .get("anim_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+                        let play_all = msg
+                            .payload
+                            .get("play_all")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if let Some(aid) = target_aid {
+                            if playback.track_status(aid) == state::AnimRunStatus::Paused {
+                                playback.resume_anim(aid);
+                            } else {
+                                playback.play_anim(aid);
+                            }
+                        } else if play_all {
+                            playback.play_all_routes(&state.anims);
+                        } else {
+                            playback.enter_play_mode();
+                        }
+                    }
+                    "pause_anim" => {
                         if let Some(aid) = msg
                             .payload
                             .get("anim_id")
                             .and_then(|v| v.as_str())
                             .and_then(|s| uuid::Uuid::parse_str(s).ok())
                         {
-                            playback.active_anim_id = Some(aid);
+                            playback.pause_anim(aid);
+                        } else {
+                            let ids: Vec<uuid::Uuid> = playback.tracks.keys().copied().collect();
+                            for aid in ids {
+                                playback.pause_anim(aid);
+                            }
                         }
-                        if let Some(all) = msg.payload.get("play_all").and_then(|v| v.as_bool()) {
-                            playback.play_all_anims = all;
-                        }
-                        playback.start_play_test();
-                    }
-                    "pause_anim" => {
-                        playback.playing = false;
                     }
                     "stop_anim" => {
-                        playback.stop_play_test();
+                        if let Some(aid) = msg
+                            .payload
+                            .get("anim_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                        {
+                            playback.stop_anim(aid);
+                        } else {
+                            playback.stop_all_routes(&state.anims);
+                        }
                     }
                     "camera_sync" => {
                         if let Ok(mut tcam) = cam_q.single_mut() {

@@ -4,7 +4,12 @@ use twg_shared::{
         CreateMarkerRequest, UpdateAnimRequest, UpdateBuildingRequest, UpdateMarkerRequest,
         UpdatePlotLineRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest,
     },
+    geo::haversine_distance_m,
     models::{BaseLayer, MapMode, MediaAssetType},
+    route_formation::{
+        FormationCornerMode, RouteFormationKind, anim_bound_marker_ids, anim_is_playable,
+        is_multi_route_anim, parse_multi_route_config, write_multi_route_config,
+    },
     ws::TacticalCommand,
 };
 use uuid::Uuid;
@@ -22,12 +27,17 @@ use crate::{
         },
         markers::{MAX_OBJECT_3D_SCALE, MIN_OBJECT_3D_SCALE, current_auth, finish_active_draft},
         media_preview::MediaPreviewPlayer,
+        playback::{route_estimated_duration_sec, route_total_length_m},
         polygon_edit::{
             PolygonEditState, ensure_editable_polygon_points, insert_midpoint_after,
         },
+        route_edit::{RouteEditState, insert_route_midpoint_after},
     },
     state::{AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode},
-    ui::spinner::{SpinnerConfig, numeric_spinner, numeric_spinner_i32, numeric_spinner_u32_w},
+    ui::{
+        formation_pad::draw_formation_pad,
+        spinner::{SpinnerConfig, numeric_spinner, numeric_spinner_u32_w},
+    },
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +48,7 @@ pub fn draw_right_panel(
     tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
     poly_edit: &mut PolygonEditState,
+    route_edit: &mut RouteEditState,
     media_player: &mut MediaPreviewPlayer,
     api: &ApiClientBridge,
     ws: &WsClientBridge,
@@ -169,7 +180,7 @@ pub fn draw_right_panel(
                             draw_text_inspector(ui, state, tcam, playback, api)
                         }
                         SelectedEntity::Anim(_) => {
-                            draw_anim_inspector(ui, state, playback, api)
+                            draw_anim_inspector(ui, state, tcam, playback, route_edit, api)
                         }
                         SelectedEntity::None => {
                             draw_skenario_inspector(ui, state, tcam, playback, api)
@@ -421,80 +432,172 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
             });
         }
         ToolMode::DrawRoute => {
-            inspector_card(ui, "Tool: Draw Route Animation", true, |ui| {
+            let card_title = if state.new_route_is_multi {
+                "Langkah 1/2: Gambar Garis Rute (Multiple)"
+            } else {
+                "Langkah 1/2: Gambar Garis Rute (Tunggal)"
+            };
+            inspector_card(ui, card_title, true, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Tipe:")
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    if ui
+                        .selectable_label(!state.new_route_is_multi, "Unit Tunggal")
+                        .clicked()
+                    {
+                        state.new_route_is_multi = false;
+                    }
+                    if ui
+                        .selectable_label(state.new_route_is_multi, "Unit Multiple")
+                        .clicked()
+                    {
+                        state.new_route_is_multi = true;
+                    }
+                });
+                ui.add_space(4.0);
                 ui.label("Nama Animasi Rute:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.new_route_name)
                         .desired_width(f32::INFINITY),
                 );
                 ui.add_space(4.0);
-                let target_label = state
-                    .route_target_marker_id
-                    .and_then(|id| state.markers.iter().find(|m| m.id == id))
-                    .map(|m| m.name.clone())
-                    .unwrap_or_else(|| "(Pilih Unit 3D)".to_string());
-                let markers_list: Vec<(Uuid, String)> = state
-                    .markers
-                    .iter()
-                    .map(|m| (m.id, m.name.clone()))
-                    .collect();
                 ui.horizontal(|ui| {
-                    ui.label("Unit:");
-                    egui::ComboBox::from_id_salt("route_tool_target_marker")
-                        .selected_text(target_label)
-                        .width(190.0)
-                        .show_ui(ui, |ui| {
-                            for (mid, mname) in &markers_list {
-                                ui.selectable_value(
-                                    &mut state.route_target_marker_id,
-                                    Some(*mid),
-                                    mname,
-                                );
-                            }
-                        });
-                });
-                ui.add_space(3.0);
-                ui.columns(2, |cols| {
-                    cols[0].label(egui::RichText::new("Durasi (s)").size(10.5).color(egui::Color32::LIGHT_GRAY));
-                    numeric_spinner(
-                        &mut cols[0],
-                        "tool_route_dur",
-                        &mut state.new_route_duration,
-                        SpinnerConfig {
-                            min: 1.0,
-                            max: 600.0,
-                            step: 1.0,
-                            drag_speed: 0.5,
-                            decimals: 1,
-                            suffix: " s",
-                            wrap_around: false,
-                        },
+                    ui.label(
+                        egui::RichText::new("Kecepatan (m/s):")
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
                     );
-                    cols[1].label(egui::RichText::new("Speed").size(10.5).color(egui::Color32::LIGHT_GRAY));
                     numeric_spinner(
-                        &mut cols[1],
+                        ui,
                         "tool_route_speed",
                         &mut state.new_route_speed,
                         SpinnerConfig {
-                            min: 1.0,
+                            min: 0.5,
                             max: 200.0,
-                            step: 1.0,
-                            drag_speed: 0.5,
+                            step: 0.5,
+                            drag_speed: 0.25,
                             decimals: 1,
-                            suffix: "",
+                            suffix: " m/s",
                             wrap_around: false,
                         },
                     );
                 });
-                ui.checkbox(&mut state.new_route_loop, "Loop / Ulangi");
+                ui.checkbox(&mut state.new_route_loop, "Repeat / Ulangi dari Awal");
+                ui.add_space(3.0);
+
+                let pt_count = state.draft_points_lnglat.len();
+                let draft_len_m: f64 = state
+                    .draft_points_lnglat
+                    .windows(2)
+                    .map(|w| haversine_distance_m(w[0][0], w[0][1], w[1][0], w[1][1]))
+                    .sum();
                 ui.label(
                     egui::RichText::new(format!(
-                        "Waypoints: {} (min 2, tekan Enter / Finish di toolbar)",
-                        state.draft_points_lnglat.len()
+                        "Titik rute: {pt_count}  •  Panjang: {draft_len_m:.1} m"
                     ))
                     .size(11.0)
+                    .strong()
                     .color(egui::Color32::from_rgb(110, 231, 183)),
                 );
+                ui.label(
+                    egui::RichText::new(if state.new_route_is_multi {
+                        "Klik titik-titik rute di peta (min 2). Setelah selesai, klik beberapa Model 3D di peta untuk dimasukkan ke formasi."
+                    } else {
+                        "Klik titik-titik rute di peta (min 2). Setelah selesai, klik Model 3D di peta untuk mengikat rute."
+                    })
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(pt_count > 0, egui::Button::new("Undo").small())
+                        .on_hover_text("Hapus titik terakhir (Backspace)")
+                        .clicked()
+                    {
+                        state.draft_points_lnglat.pop();
+                    }
+                    let fin = egui::Button::new(
+                        egui::RichText::new("Selesai & Pilih Unit ->")
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105))
+                    .small();
+                    if ui.add_enabled(pt_count >= 2, fin).clicked() {
+                        finish_active_draft(state, api);
+                    }
+                    if ui.small_button("Batal").clicked() {
+                        state.draft_points_lnglat.clear();
+                        state.tool_mode = ToolMode::Select;
+                    }
+                });
+            });
+        }
+        ToolMode::PickRouteMarker => {
+            let picked_anim = state
+                .picking_marker_for_anim_id
+                .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                .cloned();
+            let is_multi = picked_anim.as_ref().is_some_and(is_multi_route_anim);
+            let title = if is_multi {
+                "Langkah 2/2: Pilih Beberapa Unit di Peta"
+            } else {
+                "Langkah 2/2: Pilih Model 3D di Peta"
+            };
+            inspector_card(ui, title, true, |ui| {
+                let route_title = picked_anim
+                    .as_ref()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "Rute Baru".to_string());
+                ui.label(
+                    egui::RichText::new(format!("Rute: {route_title}"))
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                );
+                ui.add_space(3.0);
+                if is_multi {
+                    let count = picked_anim
+                        .as_ref()
+                        .map(|a| anim_bound_marker_ids(a).len())
+                        .unwrap_or(0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Terpilih: {count} unit. Klik Model 3D di peta untuk menambah/melepas unit dari formasi."
+                        ))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                    );
+                    ui.add_space(6.0);
+                    let done_btn = egui::Button::new(
+                        egui::RichText::new("Selesai Pilih Unit (Enter)")
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105))
+                    .min_size(egui::vec2(ui.available_width(), 26.0));
+                    if ui.add(done_btn).clicked() {
+                        state.picking_marker_for_anim_id = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Klik langsung pada Model 3D / Unit di peta untuk menjadikan objek tersebut target animasi rute ini.",
+                        )
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                    );
+                    ui.add_space(6.0);
+                    if ui.small_button("Batal / Lewati (Esc)").clicked() {
+                        state.picking_marker_for_anim_id = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                }
             });
         }
         _ => {}
@@ -1078,6 +1181,8 @@ fn draw_marker_inspector(
                                                                     egui::Align::Center,
                                                                 ),
                                                                 |ui| {
+                                                                    // Clear right margin so floating scrollbar never overlaps delete button
+                                                                    ui.add_space(14.0);
                                                                     if ui
                                                                         .add_enabled(
                                                                             can_delete,
@@ -2138,7 +2243,9 @@ fn draw_text_inspector(
 fn draw_anim_inspector(
     ui: &mut egui::Ui,
     state: &mut AppState,
+    tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
+    route_edit: &mut RouteEditState,
     api: &ApiClientBridge,
 ) {
     let Some(orig) = state.anim_edit.clone() else {
@@ -2148,7 +2255,26 @@ fn draw_anim_inspector(
     let is_locked = state.locked_entity_ids.contains(&a.id);
     let editable = !playback.play_test_mode && !is_locked;
 
-    ui.label(egui::RichText::new(&a.name).size(13.5).strong().color(egui::Color32::WHITE));
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(&a.name)
+                .size(13.5)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(!a.geom.is_empty(), egui::Button::new("Focus").small())
+                .clicked()
+                && let Some(first) = a.geom.first()
+            {
+                let local = state
+                    .geo_anchor
+                    .lng_lat_alt_to_local(first[0], first[1], 0.0);
+                tcam.target_local = bevy::math::Vec2::new(local[0], local[2]);
+            }
+        });
+    });
     ui.add_space(6.0);
 
     if is_locked && draw_locked_banner(ui, !playback.play_test_mode) {
@@ -2161,75 +2287,868 @@ fn draw_anim_inspector(
         .iter()
         .map(|m| (m.id, m.name.clone()))
         .collect();
+    let is_multi = is_multi_route_anim(&a);
     let linked_name = a
         .marker_id
         .and_then(|mid| markers_list.iter().find(|(id, _)| *id == mid))
-        .map(|(_, n)| n.clone())
-        .unwrap_or_else(|| "(Tidak terikat unit)".to_string());
+        .map(|(_, n)| n.clone());
 
-    inspector_card(ui, "Route Animation Track", true, |ui| {
+    let settings_title = if is_multi {
+        "Rute Unit Multiple — Pengaturan"
+    } else {
+        "Rute Unit Tunggal — Pengaturan"
+    };
+    inspector_card(ui, settings_title, true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
-            ui.label("Name:");
+            ui.label("Nama Animasi:");
             ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
-            ui.add_space(4.0);
+            ui.add_space(6.0);
 
-            ui.horizontal(|ui| {
-                ui.label("Target Unit:");
+            if !is_multi {
+                // Single-unit target 3D Marker with direct map-pick button + dropdown fallback
+                ui.label(
+                    egui::RichText::new("Target Model 3D / Unit:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                ui.add_space(2.0);
+                let is_picking_this = state.tool_mode == ToolMode::PickRouteMarker
+                    && state.picking_marker_for_anim_id == Some(a.id);
+                let pick_btn = egui::Button::new(
+                    egui::RichText::new(if is_picking_this {
+                        "Klik Model 3D di Peta... (Batal)"
+                    } else if linked_name.is_some() {
+                        "Ganti / Pilih Unit di Peta"
+                    } else {
+                        "Pilih Unit / Model 3D di Peta"
+                    })
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+                )
+                .fill(if is_picking_this {
+                    egui::Color32::from_rgb(180, 83, 9)
+                } else {
+                    egui::Color32::from_rgb(14, 116, 144)
+                })
+                .min_size(egui::vec2(ui.available_width(), 26.0));
+                if ui.add(pick_btn).clicked() {
+                    if is_picking_this {
+                        state.tool_mode = ToolMode::Select;
+                        state.picking_marker_for_anim_id = None;
+                    } else {
+                        route_edit.clear();
+                        state.picking_marker_for_anim_id = Some(a.id);
+                        state.tool_mode = ToolMode::PickRouteMarker;
+                        state.status_banner = Some(format!(
+                            "Klik Model 3D / Unit di peta untuk mengikat rute '{}' (Esc untuk batal).",
+                            a.name
+                        ));
+                    }
+                }
+                ui.add_space(3.0);
                 egui::ComboBox::from_id_salt("anim_inspector_marker")
-                    .selected_text(linked_name)
-                    .width(175.0)
+                    .selected_text(
+                        linked_name
+                            .clone()
+                            .unwrap_or_else(|| "(Belum pilih Model 3D)".to_string()),
+                    )
+                    .width(ui.available_width())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut a.marker_id, None, "(Tidak terikat)");
+                        ui.selectable_value(&mut a.marker_id, None, "(Belum terikat)");
                         for (mid, mname) in &markers_list {
                             ui.selectable_value(&mut a.marker_id, Some(*mid), mname);
                         }
                     });
-            });
-            ui.add_space(4.0);
-            ui.columns(2, |cols| {
-                cols[0].label(egui::RichText::new("Durasi (s)").size(10.5).color(egui::Color32::LIGHT_GRAY));
-                numeric_spinner(
-                    &mut cols[0],
-                    ("anim_dur", a.id),
-                    &mut a.duration_sec,
-                    SpinnerConfig {
-                        min: 1.0,
-                        max: 600.0,
-                        step: 1.0,
-                        drag_speed: 0.5,
-                        decimals: 1,
-                        suffix: " s",
-                        wrap_around: false,
-                    },
+                ui.add_space(6.0);
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Kecepatan (m/s):")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
                 );
-                cols[1].label(egui::RichText::new("Speed").size(10.5).color(egui::Color32::LIGHT_GRAY));
-                numeric_spinner(
-                    &mut cols[1],
+                if numeric_spinner(
+                    ui,
                     ("anim_speed", a.id),
                     &mut a.speed,
                     SpinnerConfig {
                         min: 0.5,
                         max: 200.0,
-                        step: 1.0,
-                        drag_speed: 0.5,
+                        step: 0.5,
+                        drag_speed: 0.25,
                         decimals: 1,
-                        suffix: "",
+                        suffix: " m/s",
                         wrap_around: false,
                     },
-                );
+                ) {
+                    a.duration_sec = route_estimated_duration_sec(&a.geom, a.speed);
+                }
             });
             ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                ui.label("Sort Order:");
-                numeric_spinner_i32(ui, ("anim_sort", a.id), &mut a.sort_order, 0, 9999, 1);
-            });
-            ui.checkbox(&mut a.replay, "Loop / Replay");
-            ui.checkbox(&mut a.autoplay, "Autoplay");
+            ui.checkbox(&mut a.replay, "Repeat / Ulangi dari Awal");
+            ui.add_space(3.0);
+            let order_pos = state
+                .anims
+                .iter()
+                .position(|x| x.id == a.id)
+                .map(|i| i + 1)
+                .unwrap_or(a.sort_order.max(1) as usize);
             ui.label(
-                egui::RichText::new(format!("Waypoints: {}", a.geom.len()))
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(110, 231, 183)),
+                egui::RichText::new(format!(
+                    "Urutan Skenario: #{order_pos}  (atur cepat via Up / Down di tab Animasi)"
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
             );
+
+            let len_m = route_total_length_m(&a.geom);
+            let est_s = route_estimated_duration_sec(&a.geom, a.speed);
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Panjang: {len_m:.1} m  •  Estimasi: {est_s:.1} dtk  •  {} titik",
+                    a.geom.len()
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(110, 231, 183)),
+            );
+        });
+    });
+
+    // Multi-Unit Formation Cards (Unit List + Formation Settings + 2D Interactive Formation Pad)
+    if is_multi {
+        let mut cfg = parse_multi_route_config(&a);
+        let mut cfg_changed = false;
+
+        let unit_card_title = format!("Daftar Unit Formasi ({} unit)", cfg.marker_ids.len());
+        inspector_card(ui, &unit_card_title, true, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                let is_picking_this = state.tool_mode == ToolMode::PickRouteMarker
+                    && state.picking_marker_for_anim_id == Some(a.id);
+                let pick_btn = egui::Button::new(
+                    egui::RichText::new(if is_picking_this {
+                        "Selesai Pilih Unit di Peta (Enter)"
+                    } else {
+                        "+ Pilih / Ubah Unit di Peta"
+                    })
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+                )
+                .fill(if is_picking_this {
+                    egui::Color32::from_rgb(5, 150, 105)
+                } else {
+                    egui::Color32::from_rgb(14, 116, 144)
+                })
+                .min_size(egui::vec2(ui.available_width(), 26.0));
+                if ui.add(pick_btn).clicked() {
+                    if is_picking_this {
+                        state.tool_mode = ToolMode::Select;
+                        state.picking_marker_for_anim_id = None;
+                    } else {
+                        route_edit.clear();
+                        state.picking_marker_for_anim_id = Some(a.id);
+                        state.tool_mode = ToolMode::PickRouteMarker;
+                        state.status_banner = Some(format!(
+                            "Klik beberapa Model 3D / Unit di peta untuk dimasukkan/dilepas dari '{}' (Enter / Esc selesai).",
+                            a.name
+                        ));
+                    }
+                }
+
+                // Quick dropdown to add a marker without leaving Inspector
+                let unadded: Vec<(Uuid, String)> = markers_list
+                    .iter()
+                    .filter(|(id, _)| !cfg.marker_ids.contains(id))
+                    .cloned()
+                    .collect();
+                if !unadded.is_empty() {
+                    ui.add_space(3.0);
+                    let mut add_from_dropdown: Option<Uuid> = None;
+                    egui::ComboBox::from_id_salt(("multi_route_add_unit", a.id))
+                        .selected_text("+ Tambah Unit dari Daftar...")
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (mid, mname) in &unadded {
+                                if ui.selectable_label(false, mname).clicked() {
+                                    add_from_dropdown = Some(*mid);
+                                }
+                            }
+                        });
+                    if let Some(new_mid) = add_from_dropdown {
+                        cfg.toggle_marker(new_mid);
+                        state.formation_pad_selected_marker = Some(new_mid);
+                        cfg_changed = true;
+                    }
+                }
+
+                ui.add_space(5.0);
+                if cfg.marker_ids.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Belum ada unit terpilih. Klik '+ Pilih / Ubah Unit di Peta' lalu klik beberapa Model 3D.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                    );
+                } else {
+                    let mut move_action: Option<(Uuid, bool)> = None;
+                    let mut remove_mid: Option<Uuid> = None;
+                    let unit_cnt = cfg.marker_ids.len();
+                    let ids_snapshot = cfg.marker_ids.clone();
+                    egui::ScrollArea::vertical()
+                        .id_salt(("multi_route_units_list", a.id))
+                        .max_height(135.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (idx, mid) in ids_snapshot.iter().enumerate() {
+                                let uname = markers_list
+                                    .iter()
+                                    .find(|(id, _)| id == mid)
+                                    .map(|(_, n)| n.as_str())
+                                    .unwrap_or("(Unit terhapus)");
+                                let is_sel_unit =
+                                    state.formation_pad_selected_marker == Some(*mid);
+                                ui.horizontal(|ui| {
+                                    let role_tag = if idx == 0 {
+                                        format!("#1 {uname} (Lead)")
+                                    } else {
+                                        format!("#{} {uname}", idx + 1)
+                                    };
+                                    if ui
+                                        .selectable_label(
+                                            is_sel_unit,
+                                            egui::RichText::new(role_tag).size(10.5).color(
+                                                if is_sel_unit {
+                                                    egui::Color32::from_rgb(253, 224, 71)
+                                                } else if idx == 0 {
+                                                    egui::Color32::from_rgb(103, 232, 249)
+                                                } else {
+                                                    egui::Color32::from_rgb(226, 232, 240)
+                                                },
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.formation_pad_selected_marker = Some(*mid);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(14.0);
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x")
+                                                            .size(10.0)
+                                                            .strong()
+                                                            .color(egui::Color32::from_rgb(
+                                                                254, 202, 202,
+                                                            )),
+                                                    )
+                                                    .fill(egui::Color32::from_rgb(110, 28, 28))
+                                                    .small(),
+                                                )
+                                                .on_hover_text("Lepas unit dari rute")
+                                                .clicked()
+                                            {
+                                                remove_mid = Some(*mid);
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    idx + 1 < unit_cnt,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("v").size(9.5),
+                                                    )
+                                                    .small(),
+                                                )
+                                                .on_hover_text("Turunkan urutan unit")
+                                                .clicked()
+                                            {
+                                                move_action = Some((*mid, false));
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    idx > 0,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("^").size(9.5),
+                                                    )
+                                                    .small(),
+                                                )
+                                                .on_hover_text("Naikkan urutan unit")
+                                                .clicked()
+                                            {
+                                                move_action = Some((*mid, true));
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                    if let Some((mid, up)) = move_action
+                        && cfg.move_marker_order(mid, up)
+                    {
+                        cfg_changed = true;
+                    }
+                    if let Some(mid) = remove_mid {
+                        cfg.toggle_marker(mid);
+                        cfg_changed = true;
+                    }
+                }
+            });
+        });
+
+        inspector_card(ui, "Formasi & Posisi Unit", true, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                // Formation Preset Selector (5 Tactical Formations)
+                let prev_formation = cfg.formation;
+                ui.label(
+                    egui::RichText::new("Tipe Formasi:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                egui::ComboBox::from_id_salt(("multi_route_formation_kind", a.id))
+                    .selected_text(cfg.formation.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for &kind in RouteFormationKind::ALL {
+                            ui.selectable_value(&mut cfg.formation, kind, kind.label());
+                        }
+                    });
+                if cfg.formation != prev_formation {
+                    if cfg.formation == RouteFormationKind::Custom {
+                        cfg.ensure_custom_offsets_seeded(prev_formation);
+                    }
+                    cfg_changed = true;
+                }
+
+                ui.add_space(4.0);
+                // Corner Behavior Mode Selector (Follow-Path vs Rigid)
+                let prev_corner = cfg.corner_mode;
+                ui.label(
+                    egui::RichText::new("Gerak di Tikungan:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                egui::ComboBox::from_id_salt(("multi_route_corner_mode", a.id))
+                    .selected_text(cfg.corner_mode.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for &cm in FormationCornerMode::ALL {
+                            ui.selectable_value(&mut cfg.corner_mode, cm, cm.label());
+                        }
+                    });
+                if cfg.corner_mode != prev_corner {
+                    cfg_changed = true;
+                }
+
+                ui.add_space(5.0);
+                // Dynamic parameters based on active formation
+                match cfg.formation {
+                    RouteFormationKind::Grid => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jumlah Kolom:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner_u32_w(
+                                ui,
+                                ("multi_cols", a.id),
+                                &mut cfg.columns,
+                                92.0,
+                                1,
+                                64,
+                                1,
+                                0.2,
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Samping:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner(
+                                ui,
+                                ("multi_sx", a.id),
+                                &mut cfg.spacing_x_m,
+                                SpinnerConfig {
+                                    min: 0.5,
+                                    max: 100.0,
+                                    step: 0.5,
+                                    drag_speed: 0.15,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Belakang:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner(
+                                ui,
+                                ("multi_sz", a.id),
+                                &mut cfg.spacing_z_m,
+                                SpinnerConfig {
+                                    min: 0.5,
+                                    max: 100.0,
+                                    step: 0.5,
+                                    drag_speed: 0.15,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                    }
+                    RouteFormationKind::Wedge | RouteFormationKind::Staggered => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Samping:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner(
+                                ui,
+                                ("multi_sx_ws", a.id),
+                                &mut cfg.spacing_x_m,
+                                SpinnerConfig {
+                                    min: 0.5,
+                                    max: 100.0,
+                                    step: 0.5,
+                                    drag_speed: 0.15,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Belakang:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner(
+                                ui,
+                                ("multi_sz_ws", a.id),
+                                &mut cfg.spacing_z_m,
+                                SpinnerConfig {
+                                    min: 0.5,
+                                    max: 100.0,
+                                    step: 0.5,
+                                    drag_speed: 0.15,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                    }
+                    RouteFormationKind::VipEscort => {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Radius Kawal:")
+                                    .size(11.0)
+                                    .color(egui::Color32::LIGHT_GRAY),
+                            );
+                            if numeric_spinner(
+                                ui,
+                                ("multi_vip_r", a.id),
+                                &mut cfg.vip_radius_m,
+                                SpinnerConfig {
+                                    min: 1.0,
+                                    max: 100.0,
+                                    step: 0.5,
+                                    drag_speed: 0.15,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            ) {
+                                cfg_changed = true;
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Unit #1 (Lead) berada di tengah, unit lain melingkar mengawal.",
+                            )
+                            .size(9.5)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                        );
+                    }
+                    RouteFormationKind::Custom => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let cap_btn = egui::Button::new(
+                                egui::RichText::new("Ambil dari Peta")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105))
+                            .small();
+                            if ui
+                                .add_enabled(!cfg.marker_ids.is_empty() && a.geom.len() >= 2, cap_btn)
+                                .on_hover_text(
+                                    "Rekam posisi relatif unit-unit di peta saat ini sebagai formasi kustom",
+                                )
+                                .clicked()
+                            {
+                                let n = cfg.capture_custom_from_map(&state.markers, &a.geom);
+                                if n > 0 {
+                                    cfg_changed = true;
+                                    state.status_banner = Some(format!(
+                                        "Posisi {n} unit dari peta berhasil direkam ke Formasi Bebas!"
+                                    ));
+                                }
+                            }
+
+                            let rnd_btn = egui::Button::new(
+                                egui::RichText::new("Acak Rapi")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(124, 58, 237))
+                            .small();
+                            if ui
+                                .add_enabled(!cfg.marker_ids.is_empty(), rnd_btn)
+                                .on_hover_text("Sebar acak posisi unit tanpa tumpang tindih")
+                                .clicked()
+                            {
+                                state.formation_random_seed =
+                                    state.formation_random_seed.wrapping_add(1);
+                                let mix = state.formation_random_seed
+                                    ^ (a.id.as_u128() as u64);
+                                cfg.randomize_custom_offsets(mix);
+                                cfg_changed = true;
+                            }
+
+                            if ui
+                                .add_enabled(
+                                    !cfg.marker_ids.is_empty(),
+                                    egui::Button::new(
+                                        egui::RichText::new("Reset Grid").size(10.0),
+                                    )
+                                    .small(),
+                                )
+                                .on_hover_text("Atur ulang posisi bebas ke susunan Grid rapi")
+                                .clicked()
+                            {
+                                cfg.copy_preset_into_custom(RouteFormationKind::Grid);
+                                cfg_changed = true;
+                            }
+                        });
+                    }
+                }
+
+                ui.add_space(6.0);
+                // Interactive 2D Formation Pad (Drag-and-Drop in Custom, Live Diagram in Presets)
+                if draw_formation_pad(
+                    ui,
+                    a.id,
+                    &mut cfg,
+                    &state.markers,
+                    &mut state.formation_pad_selected_marker,
+                    &mut state.formation_pad_snap_m,
+                    editable,
+                ) {
+                    cfg_changed = true;
+                }
+            });
+        });
+
+        if cfg_changed {
+            write_multi_route_config(&mut a, &cfg);
+        }
+    }
+
+    // Card 2: Interactive Route Polyline & Waypoint Editor (Auto-active on map + Inspector Spinners)
+    inspector_card(ui, "Edit Garis Rute (Peta & Titik)", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            let is_editing_map = route_edit.is_editing(a.id);
+            if !is_editing_map {
+                let edit_btn = egui::Button::new(
+                    egui::RichText::new("Aktifkan Edit Titik di Peta")
+                        .size(11.5)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(37, 99, 235))
+                .min_size(egui::vec2(ui.available_width(), 27.0));
+                if ui.add(edit_btn).clicked() {
+                    route_edit.editing_anim_id = Some(a.id);
+                    route_edit.selected_waypoint = None;
+                    route_edit.add_point_on_map_mode = false;
+                    state.tool_mode = ToolMode::Select;
+                    state.picking_marker_for_anim_id = None;
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "• Tarik langsung titik (#1..#N) di peta, atau klik untuk Move Gizmo (X / Alt / Z)\n• Klik (+) hijau di garis untuk belokan baru, atau klik (x) merah / Del untuk hapus titik",
+                    )
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(4.0);
+                let add_active = route_edit.add_point_on_map_mode;
+                let add_btn = egui::Button::new(
+                    egui::RichText::new(if add_active {
+                        "+ Klik Peta untuk Tambah Titik [AKTIF]"
+                    } else {
+                        "+ Tambah Titik di Ujung (Klik Peta)"
+                    })
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+                )
+                .fill(if add_active {
+                    egui::Color32::from_rgb(16, 185, 129)
+                } else {
+                    egui::Color32::from_rgb(30, 58, 138)
+                })
+                .min_size(egui::vec2(ui.available_width(), 24.0));
+                if ui.add(add_btn).clicked() {
+                    route_edit.add_point_on_map_mode = !route_edit.add_point_on_map_mode;
+                }
+            }
+
+            // Selected waypoint precision coordinate spinners + quick Delete button
+            let mut remove_selected_idx: Option<usize> = None;
+            if let Some(wi) = route_edit.selected_waypoint
+                && wi < a.geom.len()
+            {
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(15, 23, 38))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                    .corner_radius(5.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("Koordinat Titik #{}", wi + 1))
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(125, 211, 252)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let del_sel = egui::Button::new(
+                                        egui::RichText::new("Hapus Titik")
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(254, 202, 202)),
+                                    )
+                                    .fill(egui::Color32::from_rgb(127, 29, 29))
+                                    .small();
+                                    if ui
+                                        .add_enabled(a.geom.len() > 2, del_sel)
+                                        .on_hover_text(
+                                            "Hapus titik terpilih (bisa juga klik (x) merah di peta atau tekan Del)",
+                                        )
+                                        .clicked()
+                                    {
+                                        remove_selected_idx = Some(wi);
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(3.0);
+                        let mut pt = a.geom[wi];
+                        let mut pt_changed = false;
+                        ui.horizontal(|ui| {
+                            axis_badge(ui, "Lng", egui::Color32::from_rgb(185, 28, 28));
+                            pt_changed |= numeric_spinner(
+                                ui,
+                                ("route_wp_lng", a.id, wi),
+                                &mut pt[0],
+                                SpinnerConfig {
+                                    min: -180.0,
+                                    max: 180.0,
+                                    step: 0.00001,
+                                    drag_speed: 0.000005,
+                                    decimals: 6,
+                                    suffix: "",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            axis_badge(ui, "Lat", egui::Color32::from_rgb(29, 78, 216));
+                            pt_changed |= numeric_spinner(
+                                ui,
+                                ("route_wp_lat", a.id, wi),
+                                &mut pt[1],
+                                SpinnerConfig {
+                                    min: -85.0,
+                                    max: 85.0,
+                                    step: 0.00001,
+                                    drag_speed: 0.000005,
+                                    decimals: 6,
+                                    suffix: "",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            axis_badge(ui, "Alt", egui::Color32::from_rgb(21, 128, 61));
+                            pt_changed |= numeric_spinner(
+                                ui,
+                                ("route_wp_alt", a.id, wi),
+                                &mut pt[2],
+                                SpinnerConfig {
+                                    min: -50.0,
+                                    max: 2000.0,
+                                    step: 0.5,
+                                    drag_speed: 0.2,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                        if pt_changed {
+                            a.geom[wi] = pt;
+                            a.duration_sec = route_estimated_duration_sec(&a.geom, a.speed);
+                        }
+                    });
+            }
+
+            // Waypoint list with insert (+) and delete (x)
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!("Daftar Titik ({} waypoints):", a.geom.len()))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(2.0);
+            let mut insert_after: Option<usize> = None;
+            let mut remove_idx: Option<usize> = remove_selected_idx;
+            let wp_count = a.geom.len();
+            egui::ScrollArea::vertical()
+                .id_salt(("route_wp_list", a.id))
+                .max_height(155.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, pt) in a.geom.iter().enumerate() {
+                        let is_wp_sel =
+                            route_edit.is_editing(a.id) && route_edit.selected_waypoint == Some(i);
+                        ui.horizontal(|ui| {
+                            let label = if pt[2].abs() > 0.05 {
+                                format!("#{}  {:.5}, {:.5} ({:.0}m)", i + 1, pt[1], pt[0], pt[2])
+                            } else {
+                                format!("#{}  {:.5}, {:.5}", i + 1, pt[1], pt[0])
+                            };
+                            if ui
+                                .selectable_label(
+                                    is_wp_sel,
+                                    egui::RichText::new(label).size(10.0).color(if is_wp_sel {
+                                        egui::Color32::from_rgb(253, 224, 71)
+                                    } else {
+                                        egui::Color32::from_rgb(203, 213, 225)
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                route_edit.editing_anim_id = Some(a.id);
+                                route_edit.selected_waypoint = Some(i);
+                                state.tool_mode = ToolMode::Select;
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Reserve right-side space so the vertical scrollbar never overlaps the 'x' button!
+                                    ui.add_space(14.0);
+                                    if ui
+                                        .add_enabled(
+                                            wp_count > 2,
+                                            egui::Button::new(
+                                                egui::RichText::new("x")
+                                                    .size(10.0)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(254, 202, 202)),
+                                            )
+                                            .fill(if wp_count > 2 {
+                                                egui::Color32::from_rgb(110, 28, 28)
+                                            } else {
+                                                egui::Color32::from_rgb(35, 44, 60)
+                                            })
+                                            .small(),
+                                        )
+                                        .on_hover_text("Hapus titik ini (min 2 titik)")
+                                        .clicked()
+                                    {
+                                        remove_idx = Some(i);
+                                    }
+                                    if i + 1 < wp_count
+                                        && ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("+")
+                                                        .size(10.0)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(
+                                                            110, 231, 183,
+                                                        )),
+                                                )
+                                                .small(),
+                                            )
+                                            .on_hover_text(format!(
+                                                "Sisipkan titik baru setelah #{}",
+                                                i + 1
+                                            ))
+                                            .clicked()
+                                    {
+                                        insert_after = Some(i);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                });
+
+            if let Some(seg) = insert_after {
+                let new_i = insert_route_midpoint_after(&mut a.geom, seg);
+                route_edit.editing_anim_id = Some(a.id);
+                route_edit.selected_waypoint = Some(new_i);
+                a.duration_sec = route_estimated_duration_sec(&a.geom, a.speed);
+            }
+            if let Some(idx) = remove_idx
+                && a.geom.len() > 2
+                && idx < a.geom.len()
+            {
+                a.geom.remove(idx);
+                if let Some(sel) = route_edit.selected_waypoint {
+                    if sel == idx {
+                        route_edit.selected_waypoint = Some(idx.min(a.geom.len() - 1));
+                    } else if sel > idx {
+                        route_edit.selected_waypoint = Some(sel - 1);
+                    }
+                }
+                a.duration_sec = route_estimated_duration_sec(&a.geom, a.speed);
+            }
         });
     });
 
@@ -2240,7 +3159,9 @@ fn draw_anim_inspector(
             || (a.speed - orig.speed).abs() > 1e-6
             || a.sort_order != orig.sort_order
             || a.replay != orig.replay
-            || a.autoplay != orig.autoplay;
+            || a.autoplay != orig.autoplay
+            || a.geom != orig.geom
+            || a.data != orig.data;
         if a_changed {
             if let Some(existing) = state.anims.iter_mut().find(|x| x.id == a.id) {
                 *existing = a.clone();
@@ -2250,17 +3171,25 @@ fn draw_anim_inspector(
         }
     }
 
+    let can_play = anim_is_playable(&a, &state.markers);
     ui.horizontal(|ui| {
         let test_btn = egui::Button::new(
-            egui::RichText::new("Test Rute")
+            egui::RichText::new("Play di Skenario")
                 .strong()
                 .color(egui::Color32::WHITE),
         )
-        .fill(egui::Color32::from_rgb(5, 150, 105));
-        if ui.add(test_btn).clicked() {
-            playback.play_all_anims = false;
-            playback.active_anim_id = Some(a.id);
-            playback.restart_play_test();
+        .fill(if can_play {
+            egui::Color32::from_rgb(5, 150, 105)
+        } else {
+            egui::Color32::from_rgb(51, 65, 85)
+        });
+        if ui
+            .add_enabled(can_play, test_btn)
+            .on_disabled_hover_text("Pilih Model 3D dan minimal 2 titik rute terlebih dahulu")
+            .clicked()
+        {
+            route_edit.clear();
+            playback.play_single_immediately(a.id);
         }
 
         if editable {
@@ -2270,26 +3199,32 @@ fn draw_anim_inspector(
                     .color(egui::Color32::WHITE),
             )
             .fill(egui::Color32::from_rgb(14, 116, 144));
-            if ui.add(save_btn).clicked()
-                && !state.offline_preview
-                && let Some(auth) = current_auth(state)
-            {
-                api.send(ApiCommand::UpdateAnim {
-                    auth,
-                    id: a.id,
-                    req: UpdateAnimRequest {
-                        marker_id: a.marker_id,
-                        name: a.name,
-                        anim_type: a.anim_type,
-                        sort_order: a.sort_order,
-                        speed: a.speed,
-                        duration_sec: a.duration_sec,
-                        replay: a.replay,
-                        autoplay: a.autoplay,
-                        geom: a.geom,
-                        data: a.data,
-                    },
-                });
+            if ui.add(save_btn).clicked() {
+                if !state.offline_preview
+                    && let Some(auth) = current_auth(state)
+                {
+                    api.send(ApiCommand::UpdateAnim {
+                        auth,
+                        id: a.id,
+                        req: UpdateAnimRequest {
+                            marker_id: a.marker_id,
+                            name: a.name.clone(),
+                            anim_type: a.anim_type.clone(),
+                            sort_order: a.sort_order,
+                            speed: a.speed,
+                            duration_sec: a.duration_sec,
+                            replay: a.replay,
+                            autoplay: a.autoplay,
+                            geom: a.geom.clone(),
+                            data: a.data.clone(),
+                        },
+                    });
+                    state.dirty_anim_ids.remove(&a.id);
+                } else {
+                    state.dirty_anim_ids.remove(&a.id);
+                    state.status_banner =
+                        Some(format!("Animasi rute '{}' disimpan (Offline).", a.name));
+                }
             }
 
             let del_btn = egui::Button::new(

@@ -8,7 +8,9 @@ use twg_shared::geo::{
 };
 
 use crate::{
-    scene::{gizmo::TransformGizmoState, polygon_edit::PolygonEditState},
+    scene::{
+        gizmo::TransformGizmoState, polygon_edit::PolygonEditState, route_edit::RouteEditState,
+    },
     state::{AppScreen, AppState, UiPointerState},
 };
 
@@ -94,6 +96,7 @@ pub fn camera_control_system(
     ui_state: Res<UiPointerState>,
     gizmo_state: Res<TransformGizmoState>,
     poly_edit: Res<PolygonEditState>,
+    route_edit: Res<RouteEditState>,
     mut state: ResMut<AppState>,
     mut cam_q: Query<(&mut TacticalCamera, &mut Transform, &Camera, &GlobalTransform)>,
 ) {
@@ -229,6 +232,7 @@ pub fn camera_control_system(
             || (state.tool_mode.is_transform_tool()
                 && !gizmo_state.is_dragging()
                 && !poly_edit.is_dragging()
+                && !route_edit.is_dragging()
                 && !gizmo_state.suppress_camera_pan
                 && state.dragging_catalog_entry.is_none()
                 && state.dragging_basic_mesh.is_none()

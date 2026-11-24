@@ -7,6 +7,7 @@ pub mod markers;
 pub mod media_preview;
 pub mod playback;
 pub mod polygon_edit;
+pub mod route_edit;
 pub mod skybox;
 
 pub fn parse_hex_color(hex: &str, alpha: f32) -> bevy::prelude::Color {

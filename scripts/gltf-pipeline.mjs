@@ -112,6 +112,97 @@ function stripUnusedTexCoords(doc) {
   }
 }
 
+function normalizeSkinJointWeights(doc) {
+  const visited = new Set();
+  const tmp = [0, 0, 0, 0];
+
+  for (const mesh of doc.getRoot().listMeshes()) {
+    for (const prim of mesh.listPrimitives()) {
+      const acc = prim.getAttribute("WEIGHTS_0");
+      if (!acc || visited.has(acc)) continue;
+      visited.add(acc);
+
+      const count = acc.getCount();
+      if (count === 0 || acc.getElementSize() !== 4) continue;
+
+      const curArr = acc.getArray();
+      const isFloat32 = curArr instanceof Float32Array && !acc.getNormalized();
+      let needsFix = !isFloat32;
+
+      if (!needsFix) {
+        for (let i = 0; i < count; i++) {
+          const base = i * 4;
+          const w0 = curArr[base];
+          const w1 = curArr[base + 1];
+          const w2 = curArr[base + 2];
+          const w3 = curArr[base + 3];
+          if (
+            !Number.isFinite(w0) ||
+            !Number.isFinite(w1) ||
+            !Number.isFinite(w2) ||
+            !Number.isFinite(w3) ||
+            w0 < 0 ||
+            w1 < 0 ||
+            w2 < 0 ||
+            w3 < 0 ||
+            Math.abs(w0 + w1 + w2 + w3 - 1.0) > 1e-6
+          ) {
+            needsFix = true;
+            break;
+          }
+        }
+      }
+
+      if (!needsFix) continue;
+
+      const out = new Float32Array(count * 4);
+      for (let i = 0; i < count; i++) {
+        acc.getElement(i, tmp);
+        let w0 = Number.isFinite(tmp[0]) && tmp[0] >= 0 ? tmp[0] : 0;
+        let w1 = Number.isFinite(tmp[1]) && tmp[1] >= 0 ? tmp[1] : 0;
+        let w2 = Number.isFinite(tmp[2]) && tmp[2] >= 0 ? tmp[2] : 0;
+        let w3 = Number.isFinite(tmp[3]) && tmp[3] >= 0 ? tmp[3] : 0;
+
+        const sum = w0 + w1 + w2 + w3;
+        const base = i * 4;
+        if (sum <= 1e-8) {
+          out[base] = 1.0;
+          out[base + 1] = 0.0;
+          out[base + 2] = 0.0;
+          out[base + 3] = 0.0;
+          continue;
+        }
+
+        const inv = 1.0 / sum;
+        const vals = [
+          Math.fround(w0 * inv),
+          Math.fround(w1 * inv),
+          Math.fround(w2 * inv),
+          Math.fround(w3 * inv),
+        ];
+
+        // Snap the largest component so the 4 Float32 weights sum to exact 1.0
+        let maxIdx = 0;
+        for (let k = 1; k < 4; k++) {
+          if (vals[k] > vals[maxIdx]) maxIdx = k;
+        }
+        let others = 0;
+        for (let k = 0; k < 4; k++) {
+          if (k !== maxIdx) others = Math.fround(others + vals[k]);
+        }
+        vals[maxIdx] = Math.fround(Math.max(0, 1.0 - others));
+
+        out[base] = vals[0];
+        out[base + 1] = vals[1];
+        out[base + 2] = vals[2];
+        out[base + 3] = vals[3];
+      }
+
+      acc.setNormalized(false).setArray(out);
+    }
+  }
+}
+
 function computeSmoothNormals(doc) {
   const buf = doc.getRoot().listBuffers()[0] || doc.createBuffer();
   for (const mesh of doc.getRoot().listMeshes()) {
@@ -366,12 +457,14 @@ export async function initGltfPipeline() {
     const hasAnim = initialAnimCount > 0;
 
     // --- LOD0: Bevy-ready full quality (Draco decoded, deduped, welded, resampled, MIME fixed) ---
+    normalizeSkinJointWeights(doc);
     await doc.transform(
       dedup(),
       resample({ tolerance: 0.001 }),
       weld(),
       prune()
     );
+    normalizeSkinJointWeights(doc);
     await normalizeLod0Textures(doc);
     stripUnsupportedExtensions(doc);
     fixTextureMimes(doc);
@@ -436,6 +529,7 @@ export async function initGltfPipeline() {
       }
       await compressTexturesForLod2(doc2, 256);
       await doc2.transform(prune());
+      normalizeSkinJointWeights(doc2);
       stripUnsupportedExtensions(doc2);
       fixTextureMimes(doc2);
 
@@ -453,6 +547,7 @@ export async function initGltfPipeline() {
       docFb.setLogger(new Logger(Logger.Verbosity.SILENT));
       await compressTexturesForLod2(docFb, 256);
       await docFb.transform(dedup(), prune());
+      normalizeSkinJointWeights(docFb);
       stripUnsupportedExtensions(docFb);
       fixTextureMimes(docFb);
       lod2Buf = await io.writeBinary(docFb);

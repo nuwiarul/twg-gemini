@@ -337,6 +337,162 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
     Ok(())
 }
 
+/// Idempotent startup repair: ensures every `.glb` file stored on the server has normalized
+/// `WEIGHTS_0` skinning weights (`sum == 1.0`).
+///
+/// Whenever any `.glb` is repaired (or its on-disk SHA-256 differs from PostgreSQL), this updates
+/// `model_assets` (`*_sha256`, `*_size_bytes`, `version = version + 1`) and rewrites
+/// `assets/catalog/models.json`. All connected desktop clients (`AssetSyncBridge`) then detect the
+/// new SHA-256 in `/api/v1/assets/models/manifest` and automatically download the clean `.glb`s.
+pub async fn repair_unnormalized_skin_weights_if_needed(
+    db: &PgPool,
+    assets_dir: &Path,
+) -> anyhow::Result<()> {
+    let models = fetch_all_models(db)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed loading model_assets for skin weight check: {e}"))?;
+    if models.is_empty() {
+        return Ok(());
+    }
+
+    // Collect every unique GLB path referenced in model_assets
+    let mut unique_paths: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for m in &models {
+        for f in m.all_files() {
+            if f.rel_path.to_ascii_lowercase().ends_with(".glb")
+                && seen.insert(f.rel_path.clone())
+            {
+                unique_paths.push(f.rel_path.clone());
+            }
+        }
+    }
+
+    let mut actual_meta: HashMap<String, (String, i64)> = HashMap::with_capacity(unique_paths.len());
+    let mut repaired_files = 0usize;
+    let mut repaired_vertices = 0usize;
+
+    for rel_path in unique_paths {
+        let abs = assets_dir.join(&rel_path);
+        if !abs.exists() {
+            continue;
+        }
+        let bytes = match tokio::fs::read(&abs).await {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(path = %abs.display(), ?err, "Skipping unreadable GLB during skin-weight check");
+                continue;
+            }
+        };
+
+        let final_bytes = match twg_shared::glb_skin::normalize_glb_joint_weights(&bytes) {
+            Ok((Some(patched), report)) => {
+                let tmp = PathBuf::from(format!("{}.norm.tmp", abs.display()));
+                tokio::fs::write(&tmp, &patched).await?;
+                if tokio::fs::rename(&tmp, &abs).await.is_err() {
+                    tokio::fs::copy(&tmp, &abs).await?;
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                }
+                repaired_files += 1;
+                repaired_vertices += report.repaired_vertices;
+                patched
+            }
+            Ok((None, _)) => bytes,
+            Err(err) => {
+                tracing::warn!(path = %abs.display(), %err, "Skipping GLB weight normalization check");
+                bytes
+            }
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(&final_bytes);
+        let sha = hex::encode(hasher.finalize());
+        actual_meta.insert(rel_path, (sha, final_bytes.len() as i64));
+    }
+
+    // Update any DB rows whose stored SHA-256 or file size no longer matches disk
+    let mut updated_rows = 0usize;
+    for m in &models {
+        let resolve_slot = |f: &ModelFileMeta| -> (String, i64, bool) {
+            if let Some((sha, sz)) = actual_meta.get(&f.rel_path) {
+                let changed = sha != &f.sha256 || *sz != f.size_bytes;
+                (sha.clone(), *sz, changed)
+            } else {
+                (f.sha256.clone(), f.size_bytes, false)
+            }
+        };
+        let resolve_opt_slot = |opt: Option<&ModelFileMeta>| -> (Option<String>, i64, bool) {
+            match opt {
+                Some(f) => {
+                    let (sha, sz, ch) = resolve_slot(f);
+                    (Some(sha), sz, ch)
+                }
+                None => (None, 0, false),
+            }
+        };
+
+        let (m_sha, m_sz, m_ch) = resolve_slot(&m.model_file);
+        let (l2_sha, l2_sz, l2_ch) = resolve_opt_slot(m.lod2_file.as_ref());
+        let (w_sha, w_sz, w_ch) = resolve_opt_slot(m.walk_file.as_ref());
+        let (wl2_sha, wl2_sz, wl2_ch) = resolve_opt_slot(m.walk_lod2_file.as_ref());
+
+        if !(m_ch || l2_ch || w_ch || wl2_ch) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE model_assets
+            SET
+                model_sha256 = $2,
+                model_size_bytes = $3,
+                lod2_sha256 = $4,
+                lod2_size_bytes = $5,
+                walk_sha256 = $6,
+                walk_size_bytes = $7,
+                walk_lod2_sha256 = $8,
+                walk_lod2_size_bytes = $9,
+                version = version + 1,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(m.id)
+        .bind(&m_sha)
+        .bind(m_sz)
+        .bind(&l2_sha)
+        .bind(l2_sz)
+        .bind(&w_sha)
+        .bind(w_sz)
+        .bind(&wl2_sha)
+        .bind(wl2_sz)
+        .execute(db)
+        .await?;
+
+        updated_rows += 1;
+    }
+
+    if updated_rows > 0 {
+        let _ = write_catalog_snapshot(db, assets_dir).await;
+        tracing::info!(
+            repaired_files,
+            repaired_vertices,
+            updated_rows,
+            "Normalized unnormalized GLB skinning weights on server and bumped sync manifest hashes"
+        );
+    } else if repaired_files > 0 {
+        tracing::info!(
+            repaired_files,
+            repaired_vertices,
+            "Normalized unnormalized GLB skinning weights on disk"
+        );
+    } else {
+        tracing::info!("All server GLB skinning weights verified normalized");
+    }
+
+    Ok(())
+}
+
 async fn resolve_optional_file(
     assets_dir: &Path,
     path_opt: Option<String>,
@@ -1620,7 +1776,12 @@ async fn convert_uploaded_model(
     let _ = tokio::fs::remove_file(&tmp_in).await;
 
     match result {
-        Ok((s0, s2)) => {
+        Ok((mut s0, mut s2)) => {
+            // Final pure-Rust safety net: guarantee both LOD0 and LOD2 have exact unit WEIGHTS_0
+            // before publishing to assets_dir & PostgreSQL (covers both Node and Rust paths).
+            ensure_glb_file_normalized(&tmp_lod0, &mut s0).await?;
+            ensure_glb_file_normalized(&tmp_lod2, &mut s2).await?;
+
             if let Some(p) = lod0_out.parent() {
                 tokio::fs::create_dir_all(p)
                     .await
@@ -1636,6 +1797,32 @@ async fn convert_uploaded_model(
             Err(err)
         }
     }
+}
+
+async fn ensure_glb_file_normalized(
+    path: &Path,
+    stats: &mut ConverterFileStats,
+) -> AppResult<()> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let (patched_opt, report) = twg_shared::glb_skin::normalize_glb_joint_weights(&bytes)
+        .map_err(|e| AppError::BadRequest(format!("GLB skinning data tidak valid: {e}")))?;
+    if let Some(patched) = patched_opt {
+        tokio::fs::write(path, &patched)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&patched);
+        stats.sha256 = hex::encode(hasher.finalize());
+        stats.size_bytes = patched.len() as i64;
+        tracing::info!(
+            path = %path.display(),
+            repaired_vertices = report.repaired_vertices,
+            "Normalized unnormalized skinning WEIGHTS_0 on uploaded GLB"
+        );
+    }
+    Ok(())
 }
 
 async fn move_file(src: &Path, dst: &Path) -> AppResult<()> {
@@ -1695,19 +1882,29 @@ async fn rust_glb_fallback(
         ));
     }
 
-    tokio::fs::write(lod0_out, bytes)
+    let (patched_opt, report) = twg_shared::glb_skin::normalize_glb_joint_weights(bytes)
+        .map_err(|e| AppError::BadRequest(format!("GLB skinning data tidak valid: {e}")))?;
+    let final_bytes: &[u8] = patched_opt.as_deref().unwrap_or(bytes);
+    if report.repaired_vertices > 0 {
+        tracing::info!(
+            repaired_vertices = report.repaired_vertices,
+            "Normalized unnormalized skinning WEIGHTS_0 in uploaded GLB (Rust fallback)"
+        );
+    }
+
+    tokio::fs::write(lod0_out, final_bytes)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-    tokio::fs::write(lod2_out, bytes)
+    tokio::fs::write(lod2_out, final_bytes)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
 
     let mut hasher = Sha256::new();
-    hasher.update(bytes);
+    hasher.update(final_bytes);
     let sha = hex::encode(hasher.finalize());
     let stats = ConverterFileStats {
         sha256: sha,
-        size_bytes: bytes.len() as i64,
+        size_bytes: final_bytes.len() as i64,
         tris: 0,
     };
     Ok((

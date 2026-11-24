@@ -6,9 +6,9 @@ use crate::{
         basic_mesh::BasicMeshShape,
         markers::MarkerWorldBounds,
         parse_hex_color,
-        playback::{PlaybackOverrides, scenario_total_duration},
+        playback::PlaybackOverrides,
     },
-    state::{AppState, PlaybackState, ToolMode},
+    state::{AnimRunStatus, AppState, PlaybackState, ToolMode},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -51,7 +51,8 @@ pub fn draw_projected_labels(
         }
     }
 
-    if state.show_unit_labels {
+    // Hide all unit/object name labels during Play Skenario (keep only placed TextMarkers)
+    if state.show_unit_labels && !playback.play_test_mode {
         for m in &state.markers {
             if !m.is_spawn {
                 continue;
@@ -90,12 +91,24 @@ pub fn draw_projected_labels(
         }
     }
 
-    // Play Test Mode viewport border & floating HUD badge (Unity/Godot style)
+    // Play Skenario Mode viewport border & floating HUD badge
     if playback.play_test_mode {
-        let border_col = if playback.playing {
-            egui::Color32::from_rgba_unmultiplied(16, 185, 129, 210)
+        let playing_cnt = playback
+            .tracks
+            .values()
+            .filter(|t| t.status == AnimRunStatus::Playing)
+            .count();
+        let paused_cnt = playback
+            .tracks
+            .values()
+            .filter(|t| t.status == AnimRunStatus::Paused)
+            .count();
+        let border_col = if playing_cnt > 0 {
+            egui::Color32::from_rgba_unmultiplied(16, 185, 129, 215)
+        } else if paused_cnt > 0 {
+            egui::Color32::from_rgba_unmultiplied(245, 158, 11, 215)
         } else {
-            egui::Color32::from_rgba_unmultiplied(245, 158, 11, 210)
+            egui::Color32::from_rgba_unmultiplied(56, 189, 248, 185)
         };
         painter.rect_stroke(
             clip_rect.shrink(1.5),
@@ -104,26 +117,36 @@ pub fn draw_projected_labels(
             egui::StrokeKind::Inside,
         );
 
-        let total_dur = scenario_total_duration(state, playback);
-        let status = if playback.playing {
-            "PLAY TEST MODE"
+        let hud_text = if playing_cnt > 0 {
+            format!(
+                "PLAY SKENARIO  •  {playing_cnt} Animasi Berjalan  ({:.2}x)",
+                playback.speed_multiplier
+            )
+        } else if paused_cnt > 0 {
+            format!(
+                "PLAY SKENARIO  •  {paused_cnt} Animasi Pause  ({:.2}x)",
+                playback.speed_multiplier
+            )
         } else {
-            "PLAY TEST PAUSED"
+            format!(
+                "PLAY SKENARIO  •  Siap ({} Animasi)  ({:.2}x)",
+                state.anims.len(),
+                playback.speed_multiplier
+            )
         };
-        let hud_text = format!(
-            "{status}  •  {:.1}s / {:.1}s  ({:.2}x)",
-            playback.elapsed_sec, total_dur, playback.speed_multiplier
-        );
         let top_center = egui::pos2(clip_rect.center().x, clip_rect.top() + 20.0);
         let font = egui::FontId::proportional(12.5);
         let galley = painter.layout_no_wrap(hud_text, font, egui::Color32::WHITE);
         let pad = egui::vec2(12.0, 5.0);
         let pill_rect = egui::Rect::from_center_size(top_center, galley.size() + pad * 2.0);
-        painter.rect_filled(
-            pill_rect,
-            12.0,
-            egui::Color32::from_rgba_unmultiplied(6, 78, 59, 230),
-        );
+        let pill_fill = if playing_cnt > 0 {
+            egui::Color32::from_rgba_unmultiplied(6, 78, 59, 230)
+        } else if paused_cnt > 0 {
+            egui::Color32::from_rgba_unmultiplied(120, 53, 15, 230)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(15, 23, 42, 230)
+        };
+        painter.rect_filled(pill_rect, 12.0, pill_fill);
         painter.rect_stroke(
             pill_rect,
             12.0,
@@ -168,9 +191,10 @@ pub fn draw_projected_labels(
                 state.new_text_label
             ),
             ToolMode::DrawRoute => format!(
-                "Mode Draw Route Anim: {} waypoint — Min 2 titik, Enter selesai, Esc batal",
+                "Langkah 1/2 Gambar Garis Rute: {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
                 state.draft_points_lnglat.len()
             ),
+            ToolMode::PickRouteMarker => String::new(),
             ToolMode::Measure => format!(
                 "Mode Measure: {} titik — Klik untuk ukur jarak (Esc batal)",
                 state.measure_points_lnglat.len()

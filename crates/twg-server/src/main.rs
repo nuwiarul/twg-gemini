@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
 
     seed::run_seed_if_empty(&db).await?;
     routes::model_assets::seed_model_assets_if_empty(&db, &config.assets_dir).await?;
+    routes::model_assets::repair_unnormalized_skin_weights_if_needed(&db, &config.assets_dir)
+        .await?;
 
     let tokens = Arc::new(TokenService::new(
         &config.paseto_key,

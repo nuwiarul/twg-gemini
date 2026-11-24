@@ -1,5 +1,10 @@
 use bevy_egui::egui;
-use twg_shared::api::UpdateMarkerRequest;
+use twg_shared::{
+    api::UpdateMarkerRequest,
+    route_formation::{
+        anim_bound_marker_ids, anim_is_playable, is_multi_route_anim, parse_multi_route_config,
+    },
+};
 
 use crate::{
     map::camera::TacticalCamera,
@@ -7,10 +12,11 @@ use crate::{
     scene::{
         basic_mesh::{BasicMeshShape, is_basic_mesh_marker, parse_basic_mesh_config},
         markers::{current_auth, spawn_basic_mesh_at_map_center, spawn_marker_at_map_center},
+        playback::route_total_length_m,
     },
     state::{
-        AppState, LayerLockFilter, LayerVisibilityFilter, LeftTab, PlaybackState, SelectedEntity,
-        ToolMode,
+        AnimCategory, AppState, LayerLockFilter, LayerVisibilityFilter, LeftTab, PlaybackState,
+        SelectedEntity, ToolMode,
     },
 };
 
@@ -23,9 +29,9 @@ pub fn draw_left_panel(
 ) -> f32 {
     egui::Panel::left("editor_left_dock")
         .resizable(true)
-        .default_size(290.0)
-        .min_size(230.0)
-        .max_size(430.0)
+        .default_size(310.0)
+        .min_size(255.0)
+        .max_size(440.0)
         .frame(
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(17, 23, 35))
@@ -33,17 +39,18 @@ pub fn draw_left_panel(
                 .inner_margin(egui::Margin::same(8)),
         )
         .show(viewport_ui, |ui| {
-            // Godot / Unity Dock Tab Bar: Layers | 3D Catalog | Basic Mesh
+            // Godot / Unity Dock Tab Bar: Layers | Catalog | Mesh | Animasi
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(12, 17, 27))
                 .corner_radius(5.0)
                 .inner_margin(egui::Margin::same(3))
                 .show(ui, |ui| {
-                    ui.columns(3, |cols| {
+                    ui.columns(4, |cols| {
                         for (idx, (tab, title, active_fill)) in [
                             (LeftTab::Layers, "Layers", egui::Color32::from_rgb(14, 116, 144)),
-                            (LeftTab::Catalog, "3D Catalog", egui::Color32::from_rgb(14, 116, 144)),
-                            (LeftTab::BasicMesh, "Basic Mesh", egui::Color32::from_rgb(109, 40, 217)),
+                            (LeftTab::Catalog, "Catalog", egui::Color32::from_rgb(14, 116, 144)),
+                            (LeftTab::BasicMesh, "Mesh", egui::Color32::from_rgb(109, 40, 217)),
+                            (LeftTab::Animations, "Animasi", egui::Color32::from_rgb(5, 150, 105)),
                         ]
                         .into_iter()
                         .enumerate()
@@ -51,7 +58,7 @@ pub fn draw_left_panel(
                             let is_active = state.left_tab == tab;
                             let btn = egui::Button::new(
                                 egui::RichText::new(title)
-                                    .size(11.0)
+                                    .size(10.5)
                                     .strong()
                                     .color(if is_active {
                                         egui::Color32::WHITE
@@ -78,6 +85,7 @@ pub fn draw_left_panel(
                 LeftTab::Layers => draw_layers_tab(ui, state, tcam, playback, api),
                 LeftTab::Catalog => draw_catalog_tab(ui, state, tcam, playback, api),
                 LeftTab::BasicMesh => draw_basic_mesh_tab(ui, state, tcam, playback, api),
+                LeftTab::Animations => draw_animations_tab(ui, state, tcam, playback),
             }
         })
         .response
@@ -1439,9 +1447,7 @@ fn draw_layers_tab(
         state.request_delete_entity(SelectedEntity::Anim(id));
     }
     if let Some(aid) = quick_play_anim_id {
-        playback.play_all_anims = false;
-        playback.active_anim_id = Some(aid);
-        playback.restart_play_test();
+        playback.play_single_immediately(aid);
     }
 
     if let Some((lng, lat)) = fly_to {
@@ -1935,5 +1941,717 @@ fn draw_basic_mesh_tab(
             state.status_banner =
                 Some("Hentikan Play Mode (Stop) untuk menambahkan objek baru.".into());
         }
+    }
+}
+
+fn draw_reorder_arrow_btn(ui: &mut egui::Ui, up: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), sense);
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let bg = if !enabled {
+            egui::Color32::from_rgb(18, 25, 38)
+        } else if resp.hovered() {
+            egui::Color32::from_rgb(30, 64, 110)
+        } else {
+            egui::Color32::from_rgb(26, 36, 54)
+        };
+        let border = if !enabled {
+            egui::Color32::from_rgb(35, 46, 66)
+        } else if resp.hovered() {
+            egui::Color32::from_rgb(56, 189, 248)
+        } else {
+            egui::Color32::from_rgb(51, 65, 85)
+        };
+        p.rect_filled(rect, 3.0, bg);
+        p.rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+        let col = if !enabled {
+            egui::Color32::from_rgb(71, 85, 105)
+        } else if resp.hovered() {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgb(186, 230, 253)
+        };
+        let c = rect.center();
+        let tri = if up {
+            vec![
+                egui::pos2(c.x, c.y - 3.6),
+                egui::pos2(c.x - 4.2, c.y + 3.0),
+                egui::pos2(c.x + 4.2, c.y + 3.0),
+            ]
+        } else {
+            vec![
+                egui::pos2(c.x, c.y + 3.6),
+                egui::pos2(c.x - 4.2, c.y - 3.0),
+                egui::pos2(c.x + 4.2, c.y - 3.0),
+            ]
+        };
+        p.add(egui::Shape::convex_polygon(tri, col, egui::Stroke::NONE));
+    }
+    resp
+}
+
+fn draw_animations_tab(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    tcam: &mut TacticalCamera,
+    playback: &mut PlaybackState,
+) {
+    let editable = !playback.play_test_mode;
+    ui.label(
+        egui::RichText::new("Animasi Skenario")
+            .size(13.0)
+            .strong()
+            .color(egui::Color32::WHITE),
+    );
+    ui.label(
+        egui::RichText::new("Buat animasi berdasarkan kategori, lalu atur urutannya di daftar bawah.")
+            .size(10.5)
+            .color(egui::Color32::from_rgb(110, 231, 183)),
+    );
+    ui.add_space(5.0);
+
+    // Section 1: Create new animation by Category (2x2 selector + creation card)
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(12, 17, 27))
+        .corner_radius(5.0)
+        .inner_margin(egui::Margin::same(4))
+        .show(ui, |ui| {
+            let rows = [
+                [AnimCategory::Route, AnimCategory::Shoot],
+                [AnimCategory::SpawnHide, AnimCategory::Other],
+            ];
+            for (r_idx, row) in rows.iter().enumerate() {
+                ui.columns(2, |cols| {
+                    for (c_idx, cat) in row.iter().enumerate() {
+                        let active = state.anim_category_filter == *cat;
+                        let btn = egui::Button::new(
+                            egui::RichText::new(cat.label())
+                                .size(10.5)
+                                .strong()
+                                .color(if active {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_rgb(148, 163, 184)
+                                }),
+                        )
+                        .fill(if active {
+                            match cat {
+                                AnimCategory::Route => egui::Color32::from_rgb(5, 150, 105),
+                                AnimCategory::Shoot => egui::Color32::from_rgb(185, 28, 28),
+                                AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
+                                AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
+                            }
+                        } else {
+                            egui::Color32::from_rgb(22, 30, 45)
+                        })
+                        .min_size(egui::vec2(cols[c_idx].available_width(), 22.0));
+                        if cols[c_idx].add(btn).clicked() {
+                            state.anim_category_filter = *cat;
+                        }
+                    }
+                });
+                if r_idx == 0 {
+                    ui.add_space(3.0);
+                }
+            }
+        });
+
+    ui.add_space(6.0);
+
+    match state.anim_category_filter {
+        AnimCategory::Route => draw_route_create_card(ui, state, editable),
+        AnimCategory::Shoot => {
+            draw_coming_soon_anim_card(
+                ui,
+                "Kategori: Shoot / Tembakan",
+                "Segera hadir: animasi tembakan senjata, proyektil, muzzle flash, dan garis bidik antar unit.",
+                egui::Color32::from_rgb(248, 113, 113),
+            );
+        }
+        AnimCategory::SpawnHide => {
+            draw_coming_soon_anim_card(
+                ui,
+                "Kategori: Spawn & Hide",
+                "Segera hadir: memunculkan (spawn) atau menyembunyikan (hide) unit/objek pada momen tertentu.",
+                egui::Color32::from_rgb(196, 181, 253),
+            );
+        }
+        AnimCategory::Other => {
+            draw_coming_soon_anim_card(
+                ui,
+                "Kategori: Lainnya",
+                "Segera hadir: rotasi turret/radar, efek ledakan & asap taktis, dan perubahan warna zona.",
+                egui::Color32::from_rgb(125, 211, 252),
+            );
+        }
+    }
+
+    ui.add_space(7.0);
+    ui.separator();
+    ui.add_space(5.0);
+
+    // Section 2: Master Ordered Animation List (Global 'Semua' default + Category Filters + Up/Down Sort!)
+    draw_ordered_animation_list(ui, state, tcam, playback, editable);
+}
+
+fn draw_coming_soon_anim_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    desc: &str,
+    accent: egui::Color32,
+) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(22, 30, 45))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 62, 88)))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).size(11.5).strong().color(accent));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(51, 65, 85))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("Segera")
+                                    .size(9.0)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                            );
+                        });
+                });
+            });
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(desc)
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+        });
+}
+
+fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
+    let is_drawing_route = state.tool_mode == ToolMode::DrawRoute;
+    let is_picking_unit = state.tool_mode == ToolMode::PickRouteMarker;
+    let picking_is_multi = is_picking_unit
+        && state
+            .picking_marker_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+            .is_some_and(is_multi_route_anim);
+
+    egui::Frame::new()
+        .fill(if is_drawing_route || is_picking_unit {
+            egui::Color32::from_rgb(6, 56, 46)
+        } else {
+            egui::Color32::from_rgb(22, 30, 45)
+        })
+        .stroke(egui::Stroke::new(
+            1.2,
+            if is_drawing_route || is_picking_unit {
+                egui::Color32::from_rgb(16, 185, 129)
+            } else {
+                egui::Color32::from_rgb(42, 60, 86)
+            },
+        ))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Buat Animasi Rute")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(5, 150, 105))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("RUTE")
+                                    .size(9.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                        });
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "1) Gambar garis di peta -> 2) Pilih 1 atau beberapa Model 3D di peta. Klik garis rute kapan saja untuk edit titik.",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(186, 230, 253)),
+            );
+            ui.add_space(5.0);
+
+            if is_drawing_route {
+                let mode_tag = if state.new_route_is_multi {
+                    "Rute Unit Multiple"
+                } else {
+                    "Rute Unit Tunggal"
+                };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Menggambar: {mode_tag} ({} titik)",
+                        state.draft_points_lnglat.len()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(110, 231, 183)),
+                );
+                ui.add_space(3.0);
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new("Batal Gambar Garis (Esc)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(180, 83, 9))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(cancel_btn).clicked() {
+                    state.tool_mode = ToolMode::Select;
+                    state.draft_points_lnglat.clear();
+                }
+            } else if is_picking_unit {
+                let done_lbl = if picking_is_multi {
+                    "Selesai Pilih Unit Formasi (Enter / Esc)"
+                } else {
+                    "Batal Pilih Unit di Peta (Esc)"
+                };
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new(done_lbl)
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(if picking_is_multi {
+                    egui::Color32::from_rgb(5, 150, 105)
+                } else {
+                    egui::Color32::from_rgb(14, 116, 144)
+                })
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(cancel_btn).clicked() {
+                    state.tool_mode = ToolMode::Select;
+                    state.picking_marker_for_anim_id = None;
+                }
+            } else {
+                let single_btn = egui::Button::new(
+                    egui::RichText::new("+ Rute Unit Tunggal")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(5, 150, 105))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, single_btn)
+                    .on_hover_text("1 Model 3D bergerak mengikuti garis rute")
+                    .clicked()
+                {
+                    state.tool_mode = ToolMode::DrawRoute;
+                    state.new_route_is_multi = false;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_route_name = format!("Rute Unit {}", state.anims.len() + 1);
+                    state.status_banner = Some(
+                        "Langkah 1/2 (Tunggal): Klik titik-titik garis rute di peta (min 2 titik), lalu tekan Enter / Finish untuk memilih Model 3D."
+                            .into(),
+                    );
+                }
+
+                ui.add_space(4.0);
+
+                let multi_btn = egui::Button::new(
+                    egui::RichText::new("+ Rute Unit Multiple (Formasi)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(14, 116, 144))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, multi_btn)
+                    .on_hover_text(
+                        "Banyak Model 3D bergerak serentak dalam formasi (Barisan Grid, Bebas/Kustom, Panah/V, Zig-Zag, Kawal VIP)",
+                    )
+                    .clicked()
+                {
+                    state.tool_mode = ToolMode::DrawRoute;
+                    state.new_route_is_multi = true;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_route_name = format!("Rute Formasi {}", state.anims.len() + 1);
+                    state.status_banner = Some(
+                        "Langkah 1/2 (Multiple): Klik titik-titik garis rute di peta (min 2 titik), lalu tekan Enter / Finish untuk memilih beberapa Model 3D."
+                            .into(),
+                    );
+                }
+            }
+        });
+}
+
+fn draw_anim_list_filter_pill(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    target: &mut Option<AnimCategory>,
+    val: Option<AnimCategory>,
+) {
+    let btn = egui::Button::new(
+        egui::RichText::new(label)
+            .size(9.5)
+            .strong()
+            .color(if active {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(148, 163, 184)
+            }),
+    )
+    .fill(if active {
+        egui::Color32::from_rgb(14, 116, 144)
+    } else {
+        egui::Color32::from_rgb(22, 30, 45)
+    })
+    .small();
+    if ui.add(btn).clicked() {
+        *target = val;
+    }
+}
+
+fn draw_ordered_animation_list(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    tcam: &mut TacticalCamera,
+    playback: &mut PlaybackState,
+    editable: bool,
+) {
+    state.sort_anims_by_order();
+
+    let total_count = state.anims.len();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("Urutan Animasi ({total_count})"))
+                .size(11.5)
+                .strong()
+                .color(egui::Color32::from_rgb(186, 230, 253)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new("Urut: Up / Down")
+                    .size(9.5)
+                    .color(egui::Color32::from_rgb(100, 116, 139)),
+            );
+        });
+    });
+
+    ui.add_space(3.0);
+    // Filter pills decoupled from category creation: default 'Semua' shows true Play Skenario sequence!
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing.y = 3.0;
+        draw_anim_list_filter_pill(
+            ui,
+            "Semua",
+            state.anim_list_filter.is_none(),
+            &mut state.anim_list_filter,
+            None,
+        );
+        for &cat in AnimCategory::ALL {
+            draw_anim_list_filter_pill(
+                ui,
+                cat.label(),
+                state.anim_list_filter == Some(cat),
+                &mut state.anim_list_filter,
+                Some(cat),
+            );
+        }
+    });
+    ui.add_space(4.0);
+
+    let list_filter = state.anim_list_filter;
+    let visible_anims: Vec<(usize, twg_shared::models::Anim)> = state
+        .anims
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| {
+            list_filter.is_none_or(|cat| AnimCategory::from_anim_type(&a.anim_type) == cat)
+        })
+        .map(|(global_idx, a)| (global_idx, a.clone()))
+        .collect();
+
+    let mut select_anim: Option<twg_shared::models::Anim> = None;
+    let mut play_anim_id: Option<uuid::Uuid> = None;
+    let mut delete_anim_id: Option<uuid::Uuid> = None;
+    let mut reorder_action: Option<(uuid::Uuid, bool)> = None;
+    let mut fly_to: Option<(f64, f64)> = None;
+
+    egui::ScrollArea::vertical()
+        .id_salt("anim_tab_ordered_list")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if visible_anims.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(if total_count == 0 {
+                        "Belum ada animasi.\nKlik '+ Buat Rute Unit Tunggal' di atas untuk mulai menggambar garis di peta."
+                    } else {
+                        "Tidak ada animasi di filter kategori ini.\nPilih 'Semua' untuk melihat seluruh urutan skenario."
+                    })
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                return;
+            }
+
+            let vis_len = visible_anims.len();
+            for (vis_pos, (global_idx, a)) in visible_anims.iter().enumerate() {
+                let is_sel = state.selected == SelectedEntity::Anim(a.id);
+                let is_locked = state.locked_entity_ids.contains(&a.id);
+                let is_multi = is_multi_route_anim(a);
+                let bound_ids = anim_bound_marker_ids(a);
+                let len_m = route_total_length_m(&a.geom);
+                let can_play = anim_is_playable(a, &state.markers);
+                let cat = AnimCategory::from_anim_type(&a.anim_type);
+                let (cat_tag, cat_col) = match cat {
+                    AnimCategory::Route if is_multi => {
+                        ("FORMASI", egui::Color32::from_rgb(14, 116, 144))
+                    }
+                    AnimCategory::Route => ("RUTE", egui::Color32::from_rgb(5, 150, 105)),
+                    AnimCategory::Shoot => ("SHOOT", egui::Color32::from_rgb(185, 28, 28)),
+                    AnimCategory::SpawnHide => ("SPAWN", egui::Color32::from_rgb(109, 40, 217)),
+                    AnimCategory::Other => ("LAIN", egui::Color32::from_rgb(14, 116, 144)),
+                };
+
+                egui::Frame::new()
+                    .fill(if is_sel {
+                        egui::Color32::from_rgb(20, 48, 66)
+                    } else {
+                        egui::Color32::from_rgb(22, 30, 45)
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if is_sel {
+                            egui::Color32::from_rgb(56, 189, 248)
+                        } else {
+                            egui::Color32::from_rgb(38, 52, 74)
+                        },
+                    ))
+                    .corner_radius(5.0)
+                    .inner_margin(egui::Margin::same(7))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        // Row 1: #Order + [CAT] + Name + Right-aligned Up/Down sort buttons
+                        ui.horizontal(|ui| {
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgb(15, 23, 42))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgb(51, 65, 85),
+                                ))
+                                .corner_radius(3.0)
+                                .inner_margin(egui::Margin::symmetric(4, 1))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("#{}", global_idx + 1))
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                                    );
+                                });
+
+                            egui::Frame::new()
+                                .fill(cat_col)
+                                .corner_radius(3.0)
+                                .inner_margin(egui::Margin::symmetric(4, 1))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(cat_tag)
+                                            .size(8.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    );
+                                });
+
+                            let title_resp = ui.selectable_label(
+                                is_sel,
+                                egui::RichText::new(&a.name)
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                            if title_resp.clicked() {
+                                select_anim = Some(a.clone());
+                            }
+                            if is_locked {
+                                ui.label(
+                                    egui::RichText::new("[LOCK]")
+                                        .size(9.0)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                                );
+                            }
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    let can_down = editable && vis_pos + 1 < vis_len;
+                                    let can_up = editable && vis_pos > 0;
+                                    if draw_reorder_arrow_btn(ui, false, can_down)
+                                        .on_hover_text("Turunkan urutan (Down)")
+                                        .clicked()
+                                        && can_down
+                                    {
+                                        reorder_action = Some((a.id, false));
+                                    }
+                                    if draw_reorder_arrow_btn(ui, true, can_up)
+                                        .on_hover_text("Naikkan urutan (Up)")
+                                        .clicked()
+                                        && can_up
+                                    {
+                                        reorder_action = Some((a.id, true));
+                                    }
+                                },
+                            );
+                        });
+
+                        let has_units = !bound_ids.is_empty();
+                        let meta = if is_multi {
+                            let cfg = parse_multi_route_config(a);
+                            if has_units {
+                                format!(
+                                    "{} ({} unit)  •  {len_m:.0}m  •  {:.1} m/s{}",
+                                    cfg.formation.short_label(),
+                                    bound_ids.len(),
+                                    a.speed,
+                                    if a.replay { "  •  Repeat" } else { "" }
+                                )
+                            } else {
+                                format!(
+                                    "Belum pilih unit formasi  •  {len_m:.0}m  •  {} titik",
+                                    a.geom.len()
+                                )
+                            }
+                        } else {
+                            let unit_name = a
+                                .marker_id
+                                .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
+                                .map(|m| m.name.clone());
+                            match &unit_name {
+                                Some(u) => format!(
+                                    "Unit: {u}  •  {len_m:.0}m  •  {:.1} m/s{}",
+                                    a.speed,
+                                    if a.replay { "  •  Repeat" } else { "" }
+                                ),
+                                None => format!(
+                                    "Belum pilih Model 3D  •  {len_m:.0}m  •  {} titik",
+                                    a.geom.len()
+                                ),
+                            }
+                        };
+                        ui.label(
+                            egui::RichText::new(meta)
+                                .size(10.0)
+                                .color(if has_units {
+                                    egui::Color32::from_rgb(148, 163, 184)
+                                } else {
+                                    egui::Color32::from_rgb(251, 191, 36)
+                                }),
+                        );
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Edit").clicked() {
+                                select_anim = Some(a.clone());
+                            }
+                            if ui
+                                .add_enabled(!a.geom.is_empty(), egui::Button::new("Go").small())
+                                .clicked()
+                                && let Some(first) = a.geom.first()
+                            {
+                                fly_to = Some((first[0], first[1]));
+                            }
+                            let play_btn = egui::Button::new(
+                                egui::RichText::new("Play")
+                                    .size(10.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(if can_play {
+                                egui::Color32::from_rgb(5, 150, 105)
+                            } else {
+                                egui::Color32::from_rgb(51, 65, 85)
+                            })
+                            .small();
+                            if ui.add_enabled(can_play, play_btn).clicked() {
+                                play_anim_id = Some(a.id);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let del = egui::Button::new(
+                                        egui::RichText::new("x")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(252, 165, 165)),
+                                    )
+                                    .fill(egui::Color32::from_rgb(90, 24, 24))
+                                    .small();
+                                    if ui
+                                        .add_enabled(editable && !is_locked, del)
+                                        .on_hover_text("Hapus animasi")
+                                        .clicked()
+                                    {
+                                        delete_anim_id = Some(a.id);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+        });
+
+    if let Some((aid, move_up)) = reorder_action {
+        let changed = state.move_anim_in_order(aid, move_up, list_filter);
+        if !changed.is_empty() {
+            state.status_banner = Some(format!(
+                "Urutan animasi diperbarui — {} perubahan belum disimpan (Simpan / Ctrl+S).",
+                state.unsaved_change_count()
+            ));
+        }
+    }
+    if let Some(a) = select_anim {
+        state.selected = SelectedEntity::Anim(a.id);
+        state.anim_edit = Some(a);
+    }
+    if let Some(aid) = play_anim_id {
+        playback.play_single_immediately(aid);
+    }
+    if let Some(id) = delete_anim_id {
+        state.request_delete_entity(SelectedEntity::Anim(id));
+    }
+    if let Some((lng, lat)) = fly_to {
+        let local = state.geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0);
+        tcam.target_local = bevy::math::Vec2::new(local[0], local[2]);
     }
 }

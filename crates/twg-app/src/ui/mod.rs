@@ -1,5 +1,6 @@
 mod assets_page;
 mod bottom_bar;
+mod formation_pad;
 mod left_panel;
 mod login;
 mod media_assets_ui;
@@ -7,6 +8,7 @@ pub mod nav_bar;
 mod operasi_page;
 mod overlays;
 mod pagination;
+mod play_panel;
 mod right_panel;
 mod skenario_page;
 pub mod spinner;
@@ -34,6 +36,7 @@ use crate::{
         media_preview::MediaPreviewPlayer,
         playback::PlaybackOverrides,
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
+        route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
     },
     state::{AppScreen, AppState, PlaybackState, ToolMode, UiPointerState},
 };
@@ -47,6 +50,7 @@ pub fn egui_root_system(
     marker_bounds: Res<MarkerWorldBounds>,
     gizmo_state: Res<TransformGizmoState>,
     mut poly_edit: ResMut<PolygonEditState>,
+    mut route_edit: ResMut<RouteEditState>,
     mut preview_stage: ResMut<AssetPreviewStage>,
     mut media_player: ResMut<MediaPreviewPlayer>,
     mut ui_state: ResMut<UiPointerState>,
@@ -180,35 +184,54 @@ pub fn egui_root_system(
         return Ok(());
     }
 
-    // Dedicated Scenario Plot Editor (Godot / Unity layout)
-    let top = topbar::draw_top_bar(
-        &mut viewport_ui,
-        &mut state,
-        &mut tcam,
-        &mut playback,
-        &api,
-        &ws,
-        &sync_bridge,
-    );
+    // Dedicated Scenario Plot Editor (hide top toolbar & editor panels during Play Skenario)
+    let top = if playback.play_test_mode {
+        0.0
+    } else {
+        topbar::draw_top_bar(
+            &mut viewport_ui,
+            &mut state,
+            &mut tcam,
+            &mut playback,
+            &api,
+            &ws,
+            &sync_bridge,
+        )
+    };
     let bottom = bottom_bar::draw_bottom_bar(&mut viewport_ui, &mut state, &tcam, &mut playback, &ws);
-    let left = left_panel::draw_left_panel(
-        &mut viewport_ui,
-        &mut state,
-        &mut tcam,
-        &mut playback,
-        &api,
-    );
-    let right = right_panel::draw_right_panel(
-        &mut viewport_ui,
-        ctx,
-        &mut state,
-        &mut tcam,
-        &mut playback,
-        &mut poly_edit,
-        &mut media_player,
-        &api,
-        &ws,
-    );
+    let (left, right) = if playback.play_test_mode {
+        // Play Skenario Mode: hide Editor panels (Layers, 3D Catalog, Basic Mesh, Inspector)
+        // and show the dedicated Animation Player panel on the left.
+        let play_left = play_panel::draw_play_animation_panel(
+            &mut viewport_ui,
+            &mut state,
+            &mut tcam,
+            &mut playback,
+            &ws,
+        );
+        (play_left, 0.0)
+    } else {
+        let l = left_panel::draw_left_panel(
+            &mut viewport_ui,
+            &mut state,
+            &mut tcam,
+            &mut playback,
+            &api,
+        );
+        let r = right_panel::draw_right_panel(
+            &mut viewport_ui,
+            ctx,
+            &mut state,
+            &mut tcam,
+            &mut playback,
+            &mut poly_edit,
+            &mut route_edit,
+            &mut media_player,
+            &api,
+            &ws,
+        );
+        (l, r)
+    };
 
     let center_rect =
         apply_camera_viewport(&mut camera, &window, screen_rect, left, right, top, bottom);
@@ -242,6 +265,18 @@ pub fn egui_root_system(
         &state,
         &playback,
         &poly_edit,
+        &camera,
+        cam_gtf,
+    );
+
+    draw_route_editor_overlay(
+        ctx,
+        center_rect,
+        &state,
+        &playback,
+        &route_edit,
+        &gizmo_state,
+        &marker_bounds,
         &camera,
         cam_gtf,
     );
@@ -347,29 +382,40 @@ pub fn egui_root_system(
                 }
             }
         }
-    } else if poly_edit.is_dragging() || gizmo_state.is_dragging() {
+    } else if route_edit.is_dragging() || poly_edit.is_dragging() || gizmo_state.is_dragging() {
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if matches!(poly_edit.hovered, Some(PolygonHoverTarget::GizmoHandle(_)))
+    } else if matches!(
+        route_edit.hovered,
+        Some(RouteHoverTarget::GizmoHandle(_) | RouteHoverTarget::Waypoint(_))
+    ) || matches!(poly_edit.hovered, Some(PolygonHoverTarget::GizmoHandle(_)))
         || gizmo_state.hovered_handle.is_some()
     {
         ctx.set_cursor_icon(egui::CursorIcon::Grab);
     } else if matches!(
+        route_edit.hovered,
+        Some(RouteHoverTarget::Midpoint(_) | RouteHoverTarget::DeleteWaypoint(_))
+    ) || matches!(
         poly_edit.hovered,
         Some(PolygonHoverTarget::Vertex(_) | PolygonHoverTarget::Midpoint(_))
     ) || gizmo_state.hovered_entity.is_some()
     {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-    } else if poly_edit.add_point_on_map_mode
+    } else if route_edit.add_point_on_map_mode
+        || poly_edit.add_point_on_map_mode
         || matches!(
             state.tool_mode,
-            ToolMode::DrawBasicPolygon | ToolMode::DrawBuilding | ToolMode::DrawLine | ToolMode::DrawRoute
+            ToolMode::DrawBasicPolygon
+                | ToolMode::DrawBuilding
+                | ToolMode::DrawLine
+                | ToolMode::DrawRoute
+                | ToolMode::PickRouteMarker
         )
     {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 
     // Modal confirmation dialog before deleting any map object
-    draw_delete_entity_confirm_modal(ctx, &mut state, &mut poly_edit, &api);
+    draw_delete_entity_confirm_modal(ctx, &mut state, &mut poly_edit, &mut route_edit, &api);
 
     let has_modal = state.pending_delete_entity.is_some();
     let pointer_in_center = ctx
@@ -390,6 +436,7 @@ fn draw_delete_entity_confirm_modal(
     ctx: &egui::Context,
     state: &mut AppState,
     poly_edit: &mut PolygonEditState,
+    route_edit: &mut RouteEditState,
     api: &ApiClientBridge,
 ) {
     let Some(pending) = state.pending_delete_entity.clone() else {
@@ -537,6 +584,11 @@ fn draw_delete_entity_confirm_modal(
             && poly_edit.is_editing(mid)
         {
             poly_edit.clear();
+        }
+        if let crate::state::SelectedEntity::Anim(aid) = pending.entity
+            && route_edit.is_editing(aid)
+        {
+            route_edit.clear();
         }
         execute_delete_entity(state, api, pending.entity);
     } else if cancel {

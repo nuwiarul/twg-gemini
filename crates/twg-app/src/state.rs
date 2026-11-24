@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use bevy::prelude::*;
@@ -705,6 +705,7 @@ pub enum ToolMode {
     DrawBasicPolygon,
     PlaceText,
     DrawRoute,
+    PickRouteMarker,
     Measure,
 }
 
@@ -720,6 +721,7 @@ impl ToolMode {
             Self::DrawBasicPolygon => "Draw Polygon",
             Self::PlaceText => "Add Label",
             Self::DrawRoute => "Draw Route",
+            Self::PickRouteMarker => "Pilih Unit",
             Self::Measure => "Measure",
         }
     }
@@ -738,6 +740,38 @@ pub enum LeftTab {
     Layers,
     Catalog,
     BasicMesh,
+    Animations,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimCategory {
+    #[default]
+    Route,
+    Shoot,
+    SpawnHide,
+    Other,
+}
+
+impl AnimCategory {
+    pub const ALL: &'static [Self] = &[Self::Route, Self::Shoot, Self::SpawnHide, Self::Other];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Route => "Rute",
+            Self::Shoot => "Shoot",
+            Self::SpawnHide => "Spawn & Hide",
+            Self::Other => "Lainnya",
+        }
+    }
+
+    pub fn from_anim_type(anim_type: &str) -> Self {
+        match anim_type {
+            "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
+            "shoot" => Self::Shoot,
+            "spawn_hide" => Self::SpawnHide,
+            _ => Self::Route,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -777,6 +811,23 @@ pub struct UiPointerState {
 
 use bevy_egui::egui;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimRunStatus {
+    #[default]
+    Stopped,
+    Playing,
+    Paused,
+    Finished,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AnimRuntimeTrack {
+    pub status: AnimRunStatus,
+    pub distance_m: f64,
+    pub total_length_m: f64,
+    pub has_pose_override: bool,
+}
+
 #[derive(Resource)]
 pub struct PlaybackState {
     pub play_test_mode: bool,
@@ -787,6 +838,8 @@ pub struct PlaybackState {
     pub speed_multiplier: f32,
     pub loop_anim: bool,
     pub hide_gizmos_in_play: bool,
+    pub tracks: HashMap<Uuid, AnimRuntimeTrack>,
+    pub play_panel_category: Option<AnimCategory>,
 }
 
 impl Default for PlaybackState {
@@ -798,34 +851,111 @@ impl Default for PlaybackState {
             active_anim_id: None,
             elapsed_sec: 0.0,
             speed_multiplier: 1.0,
-            loop_anim: true,
+            loop_anim: false,
             hide_gizmos_in_play: true,
+            tracks: HashMap::new(),
+            play_panel_category: None,
         }
     }
 }
 
 impl PlaybackState {
-    pub fn start_play_test(&mut self) {
+    /// Enters Play Skenario mode with all animations ready (Idle/Stopped) in the Animation Panel.
+    pub fn enter_play_mode(&mut self) {
         self.play_test_mode = true;
+        self.playing = false;
+        self.elapsed_sec = 0.0;
+        self.hide_gizmos_in_play = true;
+        self.tracks.clear();
+    }
+
+    pub fn track_status(&self, anim_id: Uuid) -> AnimRunStatus {
+        self.tracks
+            .get(&anim_id)
+            .map(|t| t.status)
+            .unwrap_or(AnimRunStatus::Stopped)
+    }
+
+    /// Starts (or restarts) a single route animation from waypoint #1.
+    pub fn play_anim(&mut self, anim_id: Uuid) {
+        self.play_test_mode = true;
+        let entry = self.tracks.entry(anim_id).or_default();
+        if matches!(entry.status, AnimRunStatus::Stopped | AnimRunStatus::Finished) {
+            entry.distance_m = 0.0;
+        }
+        entry.status = AnimRunStatus::Playing;
+        entry.has_pose_override = true;
+        self.active_anim_id = Some(anim_id);
         self.playing = true;
     }
 
-    pub fn toggle_pause(&mut self) {
-        if self.play_test_mode {
-            self.playing = !self.playing;
+    /// Pauses an active animation: freezes marker at its current position and restores Idle.
+    pub fn pause_anim(&mut self, anim_id: Uuid) {
+        if let Some(entry) = self.tracks.get_mut(&anim_id)
+            && entry.status == AnimRunStatus::Playing
+        {
+            entry.status = AnimRunStatus::Paused;
+            entry.has_pose_override = true;
+        }
+        self.playing = self
+            .tracks
+            .values()
+            .any(|t| t.status == AnimRunStatus::Playing);
+    }
+
+    /// Resumes a paused animation from its exact last position and switches back to Walk.
+    pub fn resume_anim(&mut self, anim_id: Uuid) {
+        if let Some(entry) = self.tracks.get_mut(&anim_id)
+            && entry.status == AnimRunStatus::Paused
+        {
+            entry.status = AnimRunStatus::Playing;
+            entry.has_pose_override = true;
+            self.playing = true;
         }
     }
 
+    /// Stops a single animation: resets buttons to Play, snaps marker to route start point, restores Idle.
+    pub fn stop_anim(&mut self, anim_id: Uuid) {
+        let entry = self.tracks.entry(anim_id).or_default();
+        entry.status = AnimRunStatus::Stopped;
+        entry.distance_m = 0.0;
+        entry.has_pose_override = true;
+        self.playing = self
+            .tracks
+            .values()
+            .any(|t| t.status == AnimRunStatus::Playing);
+    }
+
+    pub fn play_all_routes(&mut self, anims: &[Anim]) {
+        self.play_test_mode = true;
+        for a in anims {
+            if !twg_shared::route_formation::anim_bound_marker_ids(a).is_empty()
+                && a.geom.len() >= 2
+            {
+                self.play_anim(a.id);
+            }
+        }
+    }
+
+    pub fn stop_all_routes(&mut self, anims: &[Anim]) {
+        for a in anims {
+            self.stop_anim(a.id);
+        }
+        self.playing = false;
+    }
+
+    /// Exits Play Skenario mode completely and returns to the Scenario Editor panels.
     pub fn stop_play_test(&mut self) {
         self.play_test_mode = false;
         self.playing = false;
         self.elapsed_sec = 0.0;
+        self.tracks.clear();
     }
 
-    pub fn restart_play_test(&mut self) {
-        self.play_test_mode = true;
-        self.playing = true;
-        self.elapsed_sec = 0.0;
+    /// Enters Play Mode and immediately plays a specific animation (e.g. from Layers quick Play).
+    pub fn play_single_immediately(&mut self, anim_id: Uuid) {
+        self.enter_play_mode();
+        self.play_anim(anim_id);
     }
 }
 
@@ -944,11 +1074,17 @@ pub struct AppState {
     pub line_edit: Option<PlotLine>,
     pub text_edit: Option<TextMarker>,
     pub anim_edit: Option<Anim>,
+    pub anim_category_filter: AnimCategory,
+    pub anim_list_filter: Option<AnimCategory>,
+    pub picking_marker_for_anim_id: Option<Uuid>,
     pub route_target_marker_id: Option<Uuid>,
+    pub new_route_is_multi: bool,
     pub new_route_name: String,
-    pub new_route_duration: f64,
     pub new_route_speed: f64,
     pub new_route_loop: bool,
+    pub formation_pad_selected_marker: Option<Uuid>,
+    pub formation_pad_snap_m: f64,
+    pub formation_random_seed: u64,
     pub new_text_label: String,
     pub new_building_height: f64,
     pub new_building_color: String,
@@ -1118,11 +1254,17 @@ impl AppState {
             line_edit: None,
             text_edit: None,
             anim_edit: None,
+            anim_category_filter: AnimCategory::Route,
+            anim_list_filter: None,
+            picking_marker_for_anim_id: None,
             route_target_marker_id: None,
-            new_route_name: "Rute Patroli Baru".to_string(),
-            new_route_duration: 20.0,
-            new_route_speed: 14.0,
-            new_route_loop: true,
+            new_route_is_multi: false,
+            new_route_name: "Rute Unit 1".to_string(),
+            new_route_speed: 5.0,
+            new_route_loop: false,
+            formation_pad_selected_marker: None,
+            formation_pad_snap_m: 0.5,
+            formation_random_seed: 1,
             new_text_label: "TITIK TAKTIS".to_string(),
             new_building_height: 24.0,
             new_building_color: "#38bdf8".to_string(),
@@ -1155,6 +1297,76 @@ impl AppState {
         self.dirty_anim_ids.clear();
         self.skenario_dirty = false;
         self.saving_pending_count = 0;
+    }
+
+    /// Keeps `self.anims` consistently sorted by `(sort_order, created_at, id)`.
+    pub fn sort_anims_by_order(&mut self) {
+        self.anims.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    }
+
+    /// Moves an animation one step up or down in the active list (`filter = None` for global order,
+    /// or `Some(cat)` for category-filtered view), renormalizes `sort_order = 1..=N`, marks modified
+    /// animations dirty, and returns the IDs whose `sort_order` changed.
+    pub fn move_anim_in_order(
+        &mut self,
+        anim_id: Uuid,
+        move_up: bool,
+        filter: Option<AnimCategory>,
+    ) -> Vec<Uuid> {
+        self.sort_anims_by_order();
+        let matching_indices: Vec<usize> = self
+            .anims
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                filter.is_none_or(|cat| AnimCategory::from_anim_type(&a.anim_type) == cat)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        let Some(pos) = matching_indices
+            .iter()
+            .position(|&i| self.anims[i].id == anim_id)
+        else {
+            return Vec::new();
+        };
+
+        let target_pos = if move_up {
+            if pos == 0 {
+                return Vec::new();
+            }
+            pos - 1
+        } else {
+            if pos + 1 >= matching_indices.len() {
+                return Vec::new();
+            }
+            pos + 1
+        };
+
+        let idx_a = matching_indices[pos];
+        let idx_b = matching_indices[target_pos];
+        self.anims.swap(idx_a, idx_b);
+
+        let mut changed = Vec::new();
+        for (i, a) in self.anims.iter_mut().enumerate() {
+            let new_order = (i + 1) as i32;
+            if a.sort_order != new_order {
+                a.sort_order = new_order;
+                self.dirty_anim_ids.insert(a.id);
+                changed.push(a.id);
+            }
+        }
+        if let Some(edit_id) = self.anim_edit.as_ref().map(|e| e.id)
+            && let Some(fresh) = self.anims.iter().find(|a| a.id == edit_id).cloned()
+        {
+            self.anim_edit = Some(fresh);
+        }
+        changed
     }
 
     pub fn is_marker_locked(&self, m: &Marker) -> bool {
@@ -1689,3 +1901,69 @@ pub const LOCATION_PRESETS: &[(&str, f64, f64, f64)] = &[
     ("IKN Nusantara", 116.7069, -0.9718, 15.5),
     ("Indoor Tactical Grid", 0.0, 0.0, 18.0),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn dummy_anim(name: &str, anim_type: &str, sort_order: i32) -> Anim {
+        let now = Utc::now();
+        Anim {
+            id: Uuid::new_v4(),
+            operasi_id: Uuid::new_v4(),
+            skenario_id: Uuid::new_v4(),
+            marker_id: None,
+            name: name.to_string(),
+            anim_type: anim_type.to_string(),
+            sort_order,
+            speed: 5.0,
+            duration_sec: 10.0,
+            replay: false,
+            autoplay: false,
+            geom: vec![[115.21, -8.67, 0.0], [115.22, -8.67, 0.0]],
+            data: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn move_anim_in_order_handles_global_and_filtered_reordering() {
+        let mut st = AppState::new(PathBuf::from("."));
+        let a1 = dummy_anim("Rute A", "route", 1);
+        let a2 = dummy_anim("Shoot B", "shoot", 2);
+        let a3 = dummy_anim("Rute C", "route", 3);
+        let (id1, id2, id3) = (a1.id, a2.id, a3.id);
+        st.anims = vec![a3, a1, a2];
+
+        // Global move up: Rute C (pos 3) swaps with Shoot B (pos 2)
+        let changed = st.move_anim_in_order(id3, true, None);
+        assert!(!changed.is_empty());
+        assert_eq!(
+            st.anims.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![id1, id3, id2]
+        );
+        assert_eq!(
+            st.anims.iter().map(|a| a.sort_order).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        // Filtered move up inside Route only: Rute C swaps with Rute A
+        let changed_route = st.move_anim_in_order(id3, true, Some(AnimCategory::Route));
+        assert!(!changed_route.is_empty());
+        assert_eq!(
+            st.anims.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![id3, id1, id2]
+        );
+        assert_eq!(
+            st.anims.iter().map(|a| a.sort_order).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(st.dirty_anim_ids.contains(&id3));
+        assert!(st.dirty_anim_ids.contains(&id1));
+
+        // Boundary move up at top does nothing
+        assert!(st.move_anim_in_order(id3, true, None).is_empty());
+    }
+}

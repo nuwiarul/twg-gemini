@@ -12,7 +12,7 @@ use crate::{
         ws_client::{WsClientBridge, WsOutCommand},
     },
     scene::markers::{finish_active_draft, save_all_scenario_changes},
-    state::{AppScreen, AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode},
+    state::{AppScreen, AppState, PlaybackState, SkyboxPreset, ToolMode},
     ui::nav_bar::{trigger_load_operasis, trigger_load_skenarios},
 };
 
@@ -201,95 +201,55 @@ pub fn draw_top_bar(
                                 if ui
                                     .add(play_btn)
                                     .on_hover_text(
-                                        "Jalankan & uji skenario (animasi rute + animasi model 3D)",
+                                        "Masuk Mode Play Skenario (sembunyikan panel editor & buka Panel Animasi)",
                                     )
                                     .clicked()
                                 {
                                     state.draft_points_lnglat.clear();
+                                    state.picking_marker_for_anim_id = None;
                                     state.tool_mode = ToolMode::Select;
-                                    playback.start_play_test();
+                                    playback.enter_play_mode();
                                     state.status_banner = Some(
-                                        "Play Test Mode aktif — menguji skenario 3D".into(),
+                                        "Mode Play Skenario aktif — tekan Play pada Panel Animasi di kiri."
+                                            .into(),
                                     );
-                                    broadcast_playback_cmd(state, playback, ws, "play_anim");
                                 }
                             } else {
-                                let pause_text = if playback.playing {
-                                    "Pause"
-                                } else {
-                                    "Resume"
-                                };
-                                let pause_btn = egui::Button::new(
-                                    egui::RichText::new(pause_text)
-                                        .size(11.5)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(if playback.playing {
-                                    egui::Color32::from_rgb(180, 83, 9)
-                                } else {
-                                    egui::Color32::from_rgb(5, 150, 105)
-                                })
-                                .min_size(egui::vec2(66.0, 22.0));
-                                if ui.add(pause_btn).clicked() {
-                                    playback.toggle_pause();
-                                    broadcast_playback_cmd(
-                                        state,
-                                        playback,
-                                        ws,
-                                        if playback.playing {
-                                            "play_anim"
-                                        } else {
-                                            "pause_anim"
-                                        },
-                                    );
-                                }
+                                let active_cnt = playback
+                                    .tracks
+                                    .values()
+                                    .filter(|t| t.status == crate::state::AnimRunStatus::Playing)
+                                    .count();
+                                ui.label(
+                                    egui::RichText::new(if active_cnt > 0 {
+                                        format!("PLAY MODE ({active_cnt} berjalan)")
+                                    } else {
+                                        "PLAY MODE (SIAP)".to_string()
+                                    })
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(110, 231, 183)),
+                                );
 
                                 let stop_btn = egui::Button::new(
-                                    egui::RichText::new("Stop")
+                                    egui::RichText::new("Keluar Play Mode")
                                         .size(11.5)
                                         .strong()
                                         .color(egui::Color32::WHITE),
                                 )
                                 .fill(egui::Color32::from_rgb(185, 28, 28))
-                                .min_size(egui::vec2(54.0, 22.0));
+                                .min_size(egui::vec2(110.0, 22.0));
                                 if ui
                                     .add(stop_btn)
-                                    .on_hover_text("Hentikan uji coba & kembalikan posisi editor")
+                                    .on_hover_text(
+                                        "Keluar dari Play Skenario, kembalikan semua unit ke posisi editor & tampilkan panel Editor",
+                                    )
                                     .clicked()
                                 {
                                     playback.stop_play_test();
                                     state.status_banner = Some("Kembali ke Mode Editor".into());
                                     broadcast_playback_cmd(state, playback, ws, "stop_anim");
                                 }
-
-                                let restart_btn = egui::Button::new(
-                                    egui::RichText::new("Restart")
-                                        .size(11.0)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(30, 41, 59))
-                                .min_size(egui::vec2(56.0, 22.0));
-                                if ui
-                                    .add(restart_btn)
-                                    .on_hover_text("Ulangi dari awal (0.0s)")
-                                    .clicked()
-                                {
-                                    playback.restart_play_test();
-                                    broadcast_playback_cmd(state, playback, ws, "play_anim");
-                                }
-
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} {:.1}s",
-                                        if playback.playing { "PLAY" } else { "PAUSED" },
-                                        playback.elapsed_sec
-                                    ))
-                                    .size(11.0)
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(110, 231, 183)),
-                                );
                             }
                         });
                     });
@@ -413,13 +373,12 @@ pub fn draw_top_bar(
                             state.measure_points_lnglat.clear();
                         }
                         if tool == ToolMode::DrawRoute {
-                            if let SelectedEntity::Marker(mid) = state.selected {
-                                state.route_target_marker_id = Some(mid);
-                            } else if state.route_target_marker_id.is_none() {
-                                state.route_target_marker_id = state.markers.first().map(|m| m.id);
-                            }
+                            state.new_route_is_multi = false;
+                            state.route_target_marker_id = None;
+                            state.picking_marker_for_anim_id = None;
+                            state.new_route_name = format!("Rute Unit {}", state.anims.len() + 1);
                             state.status_banner = Some(
-                                "Mode Draw Route: Klik titik rute di peta 3D, lalu tekan Enter / Finish."
+                                "Langkah 1/2: Klik titik garis rute di peta (min 2), lalu tekan Enter untuk memilih Model 3D."
                                     .into(),
                             );
                         }
