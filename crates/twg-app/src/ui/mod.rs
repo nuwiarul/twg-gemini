@@ -409,6 +409,8 @@ pub fn egui_root_system(
                 | ToolMode::DrawLine
                 | ToolMode::DrawRoute
                 | ToolMode::PickRouteMarker
+                | ToolMode::PickShootMarker
+                | ToolMode::PlaceParticle
         )
     {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);

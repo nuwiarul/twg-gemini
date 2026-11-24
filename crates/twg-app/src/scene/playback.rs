@@ -4,10 +4,12 @@ use bevy::prelude::*;
 use twg_shared::{
     geo::haversine_distance_m,
     models::Anim,
+    particle_anim::{is_particle_anim, parse_particle_anim_config},
     route_formation::{
         anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
         sample_multi_route_poses,
     },
+    shoot_anim::{is_water_cannon_anim, parse_water_cannon_config},
 };
 use uuid::Uuid;
 
@@ -74,6 +76,63 @@ pub fn playback_system(
     let mut any_playing = false;
 
     for anim in &state.anims {
+        // Particle animations (Fire / Smoke / Explosion) track elapsed seconds in `track.distance_m`
+        if is_particle_anim(anim) {
+            let cfg = parse_particle_anim_config(anim);
+            let dur_sec = anim.duration_sec.max(0.5);
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = if cfg.continuous { 0.0 } else { dur_sec };
+
+            if track.status == AnimRunStatus::Playing {
+                if anim.geom.is_empty() {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += dt * speed_mult;
+                    if !cfg.continuous && track.distance_m >= dur_sec {
+                        if anim.replay {
+                            track.distance_m %= dur_sec;
+                        } else {
+                            track.distance_m = dur_sec;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
+            }
+            if track.status == AnimRunStatus::Playing {
+                any_playing = true;
+            }
+            continue;
+        }
+
+        // Shoot animations (Water Cannon) advance elapsed time in `track.distance_m` without
+        // overriding marker position — so a spraying vehicle can also drive along a Route!
+        if is_water_cannon_anim(anim) {
+            let cfg = parse_water_cannon_config(anim);
+            let dur_sec = anim.duration_sec.max(0.5);
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = if cfg.continuous { 0.0 } else { dur_sec };
+
+            if track.status == AnimRunStatus::Playing {
+                if anim.marker_id.is_none() {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += dt * speed_mult;
+                    if !cfg.continuous && track.distance_m >= dur_sec {
+                        if anim.replay {
+                            track.distance_m %= dur_sec;
+                        } else {
+                            track.distance_m = dur_sec;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
+            }
+            if track.status == AnimRunStatus::Playing {
+                any_playing = true;
+            }
+            continue;
+        }
+
         let total_len = route_total_length_m(&anim.geom);
         let track = playback.tracks.entry(anim.id).or_default();
         track.total_length_m = total_len;

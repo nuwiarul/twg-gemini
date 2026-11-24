@@ -194,7 +194,11 @@ pub fn draw_projected_labels(
                 "Langkah 1/2 Gambar Garis Rute: {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
                 state.draft_points_lnglat.len()
             ),
-            ToolMode::PickRouteMarker => String::new(),
+            ToolMode::PickRouteMarker | ToolMode::PickShootMarker => String::new(),
+            ToolMode::PlaceParticle => format!(
+                "Mode Letakkan Partikel ({}): Klik lokasi di peta untuk menempatkan (Esc batal)",
+                state.new_particle_kind.label()
+            ),
             ToolMode::Measure => format!(
                 "Mode Measure: {} titik — Klik untuk ukur jarak (Esc batal)",
                 state.measure_points_lnglat.len()

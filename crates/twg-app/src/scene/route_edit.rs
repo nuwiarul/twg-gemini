@@ -2,6 +2,9 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use twg_shared::{
     models::Anim,
+    particle_anim::{
+        ParticleAnimKind, is_particle_anim, parse_particle_anim_config, particle_anim_position,
+    },
     route_formation::{
         anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
         sample_multi_route_poses,
@@ -639,14 +642,94 @@ pub fn draw_route_editor_overlay(
         return;
     }
 
-    // 3. Bound-unit Amber badges + Live Start-Formation Ghost Pins whenever ANY route animation is selected
+    // 2b. Guided HUD + Amber/Violet badges during PickShootMarker (Water Cannon unit selection)
+    if state.tool_mode == ToolMode::PickShootMarker {
+        let target_anim = state
+            .picking_shoot_for_anim_id
+            .and_then(|id| state.anims.iter().find(|a| a.id == id));
+        let banner = if let Some(a) = target_anim {
+            format!(
+                "Ganti Unit Water Cannon '{}': Klik Model 3D / Kendaraan di peta (Amber = saat ini, Ungu = kandidat, Esc = Batal)",
+                a.name
+            )
+        } else {
+            "Buat Water Cannon: Klik 1 Model 3D / Kendaraan di peta sebagai sumber semprotan air (Esc = Batal)"
+                .to_string()
+        };
+        draw_top_center_banner(
+            &painter,
+            clip_rect,
+            &banner,
+            egui::Color32::from_rgb(56, 189, 248),
+        );
+
+        let hovered_mid = match gizmo_state.hovered_entity {
+            Some(SelectedEntity::Marker(hid)) => Some(hid),
+            _ => None,
+        };
+        if let Some(bound_mid) = target_anim.and_then(|a| a.marker_id)
+            && hovered_mid != Some(bound_mid)
+        {
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                bound_mid,
+                "WATER CANNON",
+                egui::Color32::from_rgb(245, 158, 11),
+                egui::Color32::from_rgb(66, 32, 6),
+                camera,
+                cam_gtf,
+            );
+        }
+        if let Some(hid) = hovered_mid
+            && let Some(m) = state.markers.iter().find(|m| m.id == hid)
+        {
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                hid,
+                "PILIH WATER CANNON",
+                egui::Color32::from_rgb(216, 114, 255),
+                egui::Color32::from_rgb(59, 7, 100),
+                camera,
+                cam_gtf,
+            );
+            if let Some(ptr) = ctx.pointer_latest_pos() {
+                let hud_painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new("twg_shoot_pick_hud"),
+                ));
+                let tip = if target_anim.is_some() {
+                    format!("Klik untuk memindahkan Water Cannon ke '{}'", m.name)
+                } else {
+                    format!("Klik untuk memasang Water Cannon pada '{}'", m.name)
+                };
+                draw_hud_pill(
+                    &hud_painter,
+                    ptr + egui::vec2(14.0, -24.0),
+                    &tip,
+                    egui::Color32::from_rgb(233, 213, 255),
+                );
+            }
+        }
+        return;
+    }
+
+    // 3. Bound-unit Amber badges + Live Start-Formation Ghost Pins whenever ANY animation is selected
     if let SelectedEntity::Anim(sel_aid) = state.selected
         && let Some(anim) = state.anims.iter().find(|a| a.id == sel_aid)
     {
+        let is_shoot = twg_shared::shoot_anim::is_shoot_anim(anim);
         let is_multi = is_multi_route_anim(anim);
         let bound_ids = anim_bound_marker_ids(anim);
         for (idx, bound_mid) in bound_ids.iter().enumerate() {
-            let badge_label = if is_multi {
+            let badge_label = if is_shoot {
+                "WATER CANNON".to_string()
+            } else if is_multi {
                 format!("UNIT #{}", idx + 1)
             } else {
                 "UNIT RUTE".to_string()
@@ -712,6 +795,28 @@ pub fn draw_route_editor_overlay(
             }
         }
     }
+
+    // 3b. Clickable 2D tactical pins for all visible Particle Animations (Editor only; hidden in Play Skenario)
+    if state.tool_mode == ToolMode::PlaceParticle {
+        let banner = format!(
+            "Letakkan Partikel {}: Klik lokasi di peta 3D untuk menempatkan (Esc = Batal)",
+            state.new_particle_kind.label()
+        );
+        draw_top_center_banner(
+            &painter,
+            clip_rect,
+            &banner,
+            egui::Color32::from_rgb(251, 146, 60),
+        );
+    }
+    draw_particle_tactical_pins(
+        &painter,
+        clip_rect,
+        state,
+        gizmo_state,
+        camera,
+        cam_gtf,
+    );
 
     // 3. Interactive Route Waypoint Editing Overlay
     let Some(edit_id) = route_edit.editing_anim_id else {
@@ -1242,6 +1347,129 @@ fn draw_hud_pill(
         egui::StrokeKind::Inside,
     );
     painter.galley(rect.min + pad, galley, text_color);
+}
+
+fn draw_particle_tactical_pins(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    state: &AppState,
+    gizmo_state: &TransformGizmoState,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) {
+    for anim in &state.anims {
+        if !is_particle_anim(anim)
+            || anim.geom.is_empty()
+            || state.hidden_entity_ids.contains(&anim.id)
+        {
+            continue;
+        }
+        let [lng, lat, alt] = particle_anim_position(anim);
+        let cfg = parse_particle_anim_config(anim);
+        let world_pos = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt));
+        let Ok(scr_v) = camera.world_to_viewport(cam_gtf, world_pos) else {
+            continue;
+        };
+        let scr = to_pos2(scr_v);
+        if !clip_rect.contains(scr) {
+            continue;
+        }
+
+        let is_selected = state.selected == SelectedEntity::Anim(anim.id);
+        let is_hovered = gizmo_state.hovered_entity == Some(SelectedEntity::Anim(anim.id));
+        let is_locked = state.locked_entity_ids.contains(&anim.id);
+
+        // Altitude drop-stem when elevated above/below ground (and not already drawn by active Move Gizmo)
+        if alt.abs() > 0.2 && !is_selected {
+            let ground_w = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0));
+            if let Ok(g_scr_v) = camera.world_to_viewport(cam_gtf, ground_w) {
+                let g_scr = to_pos2(g_scr_v);
+                painter.line_segment(
+                    [g_scr, scr],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(251, 146, 60, 180)),
+                );
+                painter.circle_filled(
+                    g_scr,
+                    3.0,
+                    egui::Color32::from_rgba_unmultiplied(251, 146, 60, 210),
+                );
+            }
+        }
+
+        let (tag, accent, fill_bg) = match cfg.kind {
+            ParticleAnimKind::Fire => (
+                "API",
+                egui::Color32::from_rgb(251, 146, 60),
+                egui::Color32::from_rgba_unmultiplied(67, 20, 7, 225),
+            ),
+            ParticleAnimKind::Smoke => (
+                "ASAP",
+                egui::Color32::from_rgb(203, 213, 225),
+                egui::Color32::from_rgba_unmultiplied(30, 41, 59, 225),
+            ),
+            ParticleAnimKind::Explosion => (
+                "LED",
+                egui::Color32::from_rgb(248, 113, 113),
+                egui::Color32::from_rgba_unmultiplied(69, 10, 10, 225),
+            ),
+        };
+
+        // Ground anchor dot (kept unobtrusive when Move Gizmo is drawn on selected particle)
+        if !is_selected {
+            let dot_r = if is_hovered { 6.5 } else { 5.0 };
+            painter.circle_filled(scr, dot_r + 1.5, COL_OUTLINE);
+            painter.circle_filled(scr, dot_r, accent);
+            painter.circle_stroke(
+                scr,
+                dot_r,
+                egui::Stroke::new(
+                    1.4,
+                    if is_hovered {
+                        COL_HOT
+                    } else {
+                        egui::Color32::WHITE
+                    },
+                ),
+            );
+        }
+
+        // Offset pill above the gizmo/dot so it never obscures the Move Gizmo center handle
+        let pill_offset_y = if is_selected { -34.0 } else { -20.0 };
+        let label = if alt.abs() > 0.2 {
+            format!(
+                "[{tag}] {} (+{:.1}m){}",
+                anim.name,
+                alt,
+                if is_locked { " [L]" } else { "" }
+            )
+        } else {
+            format!(
+                "[{tag}] {}{}",
+                anim.name,
+                if is_locked { " [L]" } else { "" }
+            )
+        };
+        let font = egui::FontId::proportional(if is_selected { 10.5 } else { 10.0 });
+        let galley = painter.layout_no_wrap(label, font, egui::Color32::WHITE);
+        let pad = egui::vec2(6.0, 2.5);
+        let center = egui::pos2(scr.x, scr.y + pill_offset_y);
+        let rect = egui::Rect::from_center_size(center, galley.size() + pad * 2.0);
+        let border_col = if is_selected {
+            COL_HOT
+        } else if is_hovered {
+            egui::Color32::WHITE
+        } else {
+            accent
+        };
+        painter.rect_filled(rect, 4.0, fill_bg);
+        painter.rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(if is_selected || is_hovered { 1.6 } else { 1.0 }, border_col),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(rect.min + pad, galley, egui::Color32::WHITE);
+    }
 }
 
 #[cfg(test)]

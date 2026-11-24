@@ -706,6 +706,8 @@ pub enum ToolMode {
     PlaceText,
     DrawRoute,
     PickRouteMarker,
+    PickShootMarker,
+    PlaceParticle,
     Measure,
 }
 
@@ -722,6 +724,8 @@ impl ToolMode {
             Self::PlaceText => "Add Label",
             Self::DrawRoute => "Draw Route",
             Self::PickRouteMarker => "Pilih Unit",
+            Self::PickShootMarker => "Pilih Unit Shoot",
+            Self::PlaceParticle => "Letakkan Partikel",
             Self::Measure => "Measure",
         }
     }
@@ -748,17 +752,25 @@ pub enum AnimCategory {
     #[default]
     Route,
     Shoot,
+    Particle,
     SpawnHide,
     Other,
 }
 
 impl AnimCategory {
-    pub const ALL: &'static [Self] = &[Self::Route, Self::Shoot, Self::SpawnHide, Self::Other];
+    pub const ALL: &'static [Self] = &[
+        Self::Route,
+        Self::Shoot,
+        Self::Particle,
+        Self::SpawnHide,
+        Self::Other,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Route => "Rute",
             Self::Shoot => "Shoot",
+            Self::Particle => "Particle",
             Self::SpawnHide => "Spawn & Hide",
             Self::Other => "Lainnya",
         }
@@ -767,7 +779,13 @@ impl AnimCategory {
     pub fn from_anim_type(anim_type: &str) -> Self {
         match anim_type {
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
-            "shoot" => Self::Shoot,
+            s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
+            s if s == "particle"
+                || s.starts_with("particle_")
+                || matches!(s, "fire" | "smoke" | "explosion") =>
+            {
+                Self::Particle
+            }
             "spawn_hide" => Self::SpawnHide,
             _ => Self::Route,
         }
@@ -929,9 +947,15 @@ impl PlaybackState {
     pub fn play_all_routes(&mut self, anims: &[Anim]) {
         self.play_test_mode = true;
         for a in anims {
-            if !twg_shared::route_formation::anim_bound_marker_ids(a).is_empty()
-                && a.geom.len() >= 2
-            {
+            let playable = if twg_shared::particle_anim::is_particle_anim(a) {
+                !a.geom.is_empty()
+            } else if twg_shared::shoot_anim::is_shoot_anim(a) {
+                a.marker_id.is_some()
+            } else {
+                !twg_shared::route_formation::anim_bound_marker_ids(a).is_empty()
+                    && a.geom.len() >= 2
+            };
+            if playable {
                 self.play_anim(a.id);
             }
         }
@@ -1077,11 +1101,16 @@ pub struct AppState {
     pub anim_category_filter: AnimCategory,
     pub anim_list_filter: Option<AnimCategory>,
     pub picking_marker_for_anim_id: Option<Uuid>,
+    pub picking_shoot_for_anim_id: Option<Uuid>,
     pub route_target_marker_id: Option<Uuid>,
     pub new_route_is_multi: bool,
     pub new_route_name: String,
     pub new_route_speed: f64,
     pub new_route_loop: bool,
+    pub new_shoot_name: String,
+    pub new_particle_kind: twg_shared::particle_anim::ParticleAnimKind,
+    pub new_particle_name: String,
+    pub particle_preview_reset_nonce: u64,
     pub formation_pad_selected_marker: Option<Uuid>,
     pub formation_pad_snap_m: f64,
     pub formation_random_seed: u64,
@@ -1257,11 +1286,16 @@ impl AppState {
             anim_category_filter: AnimCategory::Route,
             anim_list_filter: None,
             picking_marker_for_anim_id: None,
+            picking_shoot_for_anim_id: None,
             route_target_marker_id: None,
             new_route_is_multi: false,
             new_route_name: "Rute Unit 1".to_string(),
             new_route_speed: 5.0,
             new_route_loop: false,
+            new_shoot_name: "Water Cannon 1".to_string(),
+            new_particle_kind: twg_shared::particle_anim::ParticleAnimKind::Fire,
+            new_particle_name: "Api 1".to_string(),
+            particle_preview_reset_nonce: 0,
             formation_pad_selected_marker: None,
             formation_pad_snap_m: 0.5,
             formation_random_seed: 1,

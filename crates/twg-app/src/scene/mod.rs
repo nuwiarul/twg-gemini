@@ -5,10 +5,12 @@ pub mod gizmo;
 pub mod lines;
 pub mod markers;
 pub mod media_preview;
+pub mod particle_fx;
 pub mod playback;
 pub mod polygon_edit;
 pub mod route_edit;
 pub mod skybox;
+pub mod water_cannon;
 
 pub fn parse_hex_color(hex: &str, alpha: f32) -> bevy::prelude::Color {
     let clean = hex.trim().trim_start_matches('#');

@@ -2,7 +2,10 @@ use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use twg_shared::models::Marker;
+use twg_shared::{
+    models::{Anim, Marker},
+    particle_anim::{is_particle_anim, particle_anim_position, set_particle_anim_position},
+};
 use uuid::Uuid;
 
 use crate::state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode};
@@ -46,6 +49,7 @@ impl GizmoHandle {
 #[derive(Debug, Clone)]
 pub struct ActiveGizmoDrag {
     pub marker_id: Uuid,
+    pub is_particle_anim: bool,
     pub mode: GizmoMode,
     pub handle: GizmoHandle,
     pub start_origin: Vec3,
@@ -112,6 +116,11 @@ pub fn marker_world_origin(state: &AppState, m: &Marker) -> Vec3 {
             .geo_anchor
             .lng_lat_alt_to_local(m.lng, m.lat, m.altitude),
     )
+}
+
+pub fn particle_anim_world_origin(state: &AppState, anim: &Anim) -> Vec3 {
+    let p = particle_anim_position(anim);
+    Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(p[0], p[1], p[2]))
 }
 
 pub fn compute_gizmo_world_radius(
@@ -342,6 +351,7 @@ pub fn begin_gizmo_drag(
 
     Some(ActiveGizmoDrag {
         marker_id: marker.id,
+        is_particle_anim: false,
         mode,
         handle,
         start_origin,
@@ -355,6 +365,59 @@ pub fn begin_gizmo_drag(
         axis_world,
         rot_start_dir,
         prev_rot_vec: rot_start_dir,
+        accumulated_angle_rad: 0.0,
+        gizmo_radius_world,
+        visual_scale_factor: 1.0,
+        moved: false,
+    })
+}
+
+pub fn begin_particle_move_drag(
+    anim: &Anim,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    state: &AppState,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let start_origin = particle_anim_world_origin(state, anim);
+    let gizmo_radius_world =
+        compute_gizmo_world_radius(camera, cam_gtf, start_origin, GIZMO_SCREEN_RADIUS_PX);
+    let axis_world = match handle {
+        GizmoHandle::AxisX => Vec3::X,
+        GizmoHandle::AxisY => Vec3::Y,
+        GizmoHandle::AxisZ => Vec3::Z,
+        GizmoHandle::Free => Vec3::Y,
+    };
+    let ray = camera.viewport_to_world(cam_gtf, cursor_px).ok()?;
+    let start_axis_param = closest_axis_param(ray, start_origin, axis_world).unwrap_or(0.0);
+    let free_plane_offset = if handle == GizmoHandle::Free {
+        let hit = intersect_ray_plane(ray, start_origin, Vec3::Y).or_else(|| {
+            let cam_fwd = cam_gtf.forward().as_vec3();
+            intersect_ray_plane(ray, start_origin, -cam_fwd)
+                .map(|p| Vec3::new(p.x, start_origin.y, p.z))
+        });
+        hit.map(|h| start_origin - h).unwrap_or(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    };
+
+    Some(ActiveGizmoDrag {
+        marker_id: anim.id,
+        is_particle_anim: true,
+        mode: GizmoMode::Move,
+        handle,
+        start_origin,
+        start_quat: Quat::IDENTITY,
+        current_quat: Quat::IDENTITY,
+        start_scale: Vec3::ONE,
+        start_cursor_px: cursor_px,
+        prev_cursor_px: cursor_px,
+        start_axis_param,
+        free_plane_offset,
+        axis_world,
+        rot_start_dir: None,
+        prev_rot_vec: None,
         accumulated_angle_rad: 0.0,
         gizmo_radius_world,
         visual_scale_factor: 1.0,
@@ -379,6 +442,67 @@ pub fn update_gizmo_drag(
         return false;
     }
     let cam_fwd = cam_gtf.forward().as_vec3();
+
+    // Dedicated Move Gizmo branch for Particle Animations (Lng / Lat / Alt)
+    if drag.is_particle_anim {
+        let new_pos_opt = match drag.handle {
+            GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ => {
+                let p = if let Some(s_curr) =
+                    closest_axis_param(ray, drag.start_origin, drag.axis_world)
+                {
+                    drag.start_origin + drag.axis_world * (s_curr - drag.start_axis_param)
+                } else if let (Ok(o2), Ok(t2)) = (
+                    camera.world_to_viewport(cam_gtf, drag.start_origin),
+                    camera.world_to_viewport(
+                        cam_gtf,
+                        drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                    ),
+                ) {
+                    let s_dir = (t2 - o2).normalize_or(Vec2::X);
+                    let proj = total_px.dot(s_dir);
+                    let world_delta = (proj / GIZMO_SCREEN_RADIUS_PX) * drag.gizmo_radius_world;
+                    drag.start_origin + drag.axis_world * world_delta
+                } else {
+                    drag.start_origin
+                };
+                Some(Vec3::new(p.x, p.y.clamp(-50.0, 2000.0), p.z))
+            }
+            GizmoHandle::Free => {
+                let hit = intersect_ray_plane(ray, drag.start_origin, Vec3::Y).or_else(|| {
+                    intersect_ray_plane(ray, drag.start_origin, -cam_fwd)
+                        .map(|p| Vec3::new(p.x, drag.start_origin.y, p.z))
+                });
+                hit.map(|h| {
+                    let mut p = h + drag.free_plane_offset;
+                    p.y = drag.start_origin.y;
+                    p
+                })
+            }
+        };
+
+        let mut moved_now = false;
+        if let Some(new_pos) = new_pos_opt {
+            let (lng, lat, alt) = state
+                .geo_anchor
+                .local_to_lng_lat_alt([new_pos.x, new_pos.y, new_pos.z]);
+            let clean_alt = round_clean(alt, 2);
+            if let Some(anim) = state.anims.iter_mut().find(|a| a.id == drag.marker_id) {
+                set_particle_anim_position(anim, lng, lat, clean_alt);
+                let updated = anim.clone();
+                if state
+                    .anim_edit
+                    .as_ref()
+                    .is_some_and(|e| e.id == drag.marker_id)
+                {
+                    state.anim_edit = Some(updated);
+                }
+                drag.moved = true;
+                moved_now = true;
+            }
+        }
+        drag.prev_cursor_px = cursor_px;
+        return moved_now;
+    }
 
     let Some(m) = state.markers.iter_mut().find(|x| x.id == drag.marker_id) else {
         return false;
@@ -596,29 +720,66 @@ pub fn draw_transform_gizmo(
     {
         return;
     }
-    let Some(mode) = gizmo_mode_for_tool(state.tool_mode) else {
-        return;
-    };
-    let SelectedEntity::Marker(marker_id) = state.selected else {
-        return;
-    };
-    if poly_edit.is_editing(marker_id) {
-        return;
-    }
-    let Some(marker) = state.markers.iter().find(|m| m.id == marker_id) else {
-        return;
-    };
-    if state.is_marker_locked(marker) {
-        return;
-    }
+    let (mode, origin, rot_quat, cur_lng, cur_lat, altitude, cur_rot, cur_scale) =
+        match state.selected {
+            SelectedEntity::Marker(marker_id) => {
+                let Some(mode) = gizmo_mode_for_tool(state.tool_mode) else {
+                    return;
+                };
+                if poly_edit.is_editing(marker_id) {
+                    return;
+                }
+                let Some(marker) = state.markers.iter().find(|m| m.id == marker_id) else {
+                    return;
+                };
+                if state.is_marker_locked(marker) {
+                    return;
+                }
+                (
+                    mode,
+                    marker_world_origin(state, marker),
+                    marker_quat(marker),
+                    marker.lng,
+                    marker.lat,
+                    marker.altitude,
+                    [marker.rot_x, marker.rot_y, marker.rot_z],
+                    [marker.scale_x, marker.scale_y, marker.scale_z],
+                )
+            }
+            SelectedEntity::Anim(anim_id) => {
+                if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {
+                    return;
+                }
+                if state.locked_entity_ids.contains(&anim_id) {
+                    return;
+                }
+                let Some(anim) = state
+                    .anims
+                    .iter()
+                    .find(|a| a.id == anim_id && is_particle_anim(a) && !a.geom.is_empty())
+                else {
+                    return;
+                };
+                let pos = particle_anim_position(anim);
+                (
+                    GizmoMode::Move,
+                    particle_anim_world_origin(state, anim),
+                    Quat::IDENTITY,
+                    pos[0],
+                    pos[1],
+                    pos[2],
+                    [0.0, 0.0, 0.0],
+                    [1.0, 1.0, 1.0],
+                )
+            }
+            _ => return,
+        };
 
-    let origin = marker_world_origin(state, marker);
     let Ok(origin_2d_v) = camera.world_to_viewport(cam_gtf, origin) else {
         return;
     };
     let origin_2d = to_pos2(origin_2d_v);
 
-    let rot_quat = marker_quat(marker);
     let radius = compute_gizmo_world_radius(camera, cam_gtf, origin, GIZMO_SCREEN_RADIUS_PX);
     let active_handle = gizmo_state.active_drag.as_ref().map(|d| d.handle);
     let hovered_handle = gizmo_state.hovered_handle;
@@ -631,7 +792,7 @@ pub fn draw_transform_gizmo(
         .with_clip_rect(clip_rect);
 
     // Subtle vertical altitude stem when elevated above ground
-    if marker.altitude.abs() > 0.15
+    if altitude.abs() > 0.15
         && let Ok(ground_2d) = camera.world_to_viewport(cam_gtf, Vec3::new(origin.x, 0.0, origin.z))
     {
         let g = to_pos2(ground_2d);
@@ -693,23 +854,23 @@ pub fn draw_transform_gizmo(
         let text = match (drag.mode, drag.handle) {
             (GizmoMode::Move, GizmoHandle::AxisX) => {
                 let dx = origin.x - drag.start_origin.x;
-                format!("Move X: {:+.2} m  (Lng {:.5})", dx, marker.lng)
+                format!("Move X: {:+.2} m  (Lng {:.5})", dx, cur_lng)
             }
             (GizmoMode::Move, GizmoHandle::AxisY) => {
                 let dy = origin.y - drag.start_origin.y;
-                format!("Move Y (Alt): {:.2} m  ({:+.2} m)", marker.altitude, dy)
+                format!("Move Y (Alt): {:.2} m  ({:+.2} m)", altitude, dy)
             }
             (GizmoMode::Move, GizmoHandle::AxisZ) => {
                 let dz = origin.z - drag.start_origin.z;
-                format!("Move Z: {:+.2} m  (Lat {:.5})", dz, marker.lat)
+                format!("Move Z: {:+.2} m  (Lat {:.5})", dz, cur_lat)
             }
             (GizmoMode::Move, GizmoHandle::Free) => {
-                format!("Free Move: Lat {:.5}, Lng {:.5}", marker.lat, marker.lng)
+                format!("Free Move: Lat {:.5}, Lng {:.5}", cur_lat, cur_lng)
             }
             (GizmoMode::Rotate, GizmoHandle::Free) => {
                 format!(
                     "Free Rotate: X {:.1}°  Y {:.1}°  Z {:.1}°",
-                    marker.rot_x, marker.rot_y, marker.rot_z
+                    cur_rot[0], cur_rot[1], cur_rot[2]
                 )
             }
             (GizmoMode::Rotate, h) => {
@@ -718,25 +879,25 @@ pub fn draw_transform_gizmo(
                     "{}: {:+.1}°  (X {:.1}° Y {:.1}° Z {:.1}°)",
                     h.label(drag.mode),
                     deg,
-                    marker.rot_x,
-                    marker.rot_y,
-                    marker.rot_z
+                    cur_rot[0],
+                    cur_rot[1],
+                    cur_rot[2]
                 )
             }
             (GizmoMode::Scale, GizmoHandle::Free) => {
                 format!(
                     "Free Scale (XYZ): {:.2}  ({:.2}x)",
-                    marker.scale_x, drag.visual_scale_factor
+                    cur_scale[0], drag.visual_scale_factor
                 )
             }
             (GizmoMode::Scale, GizmoHandle::AxisX) => {
-                format!("Scale X: {:.2}  ({:.2}x)", marker.scale_x, drag.visual_scale_factor)
+                format!("Scale X: {:.2}  ({:.2}x)", cur_scale[0], drag.visual_scale_factor)
             }
             (GizmoMode::Scale, GizmoHandle::AxisY) => {
-                format!("Scale Y: {:.2}  ({:.2}x)", marker.scale_y, drag.visual_scale_factor)
+                format!("Scale Y: {:.2}  ({:.2}x)", cur_scale[1], drag.visual_scale_factor)
             }
             (GizmoMode::Scale, GizmoHandle::AxisZ) => {
-                format!("Scale Z: {:.2}  ({:.2}x)", marker.scale_z, drag.visual_scale_factor)
+                format!("Scale Z: {:.2}  ({:.2}x)", cur_scale[2], drag.visual_scale_factor)
             }
         };
         let badge_pos = to_pos2(drag.prev_cursor_px) + egui::vec2(16.0, -24.0);

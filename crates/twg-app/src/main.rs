@@ -43,10 +43,12 @@ use crate::{
             setup_selection_highlight_system, sync_markers_system,
         },
         media_preview::{MediaPreviewPlayer, media_preview_audio_system},
+        particle_fx::{ParticleFxPool, particle_fx_visual_system},
         playback::{PlaybackOverrides, playback_system},
         polygon_edit::PolygonEditState,
         route_edit::RouteEditState,
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
+        water_cannon::{WaterCannonVisualPool, water_cannon_visual_system},
     },
     state::{
         AppScreen, AppState, AssetFormMode, MediaFormMode, OperasiModalMode, PlaybackState,
@@ -119,6 +121,8 @@ fn main() {
         .init_resource::<TransformGizmoState>()
         .init_resource::<PolygonEditState>()
         .init_resource::<RouteEditState>()
+        .init_resource::<WaterCannonVisualPool>()
+        .init_resource::<ParticleFxPool>()
         .init_resource::<SkyboxManager>()
         .init_resource::<MarkerWorldBounds>()
         .init_resource::<BasicMeshTextureCache>()
@@ -172,6 +176,8 @@ fn main() {
                 sync_buildings_system,
                 draw_building_draft_gizmos,
                 draw_lines_and_routes_system,
+                water_cannon_visual_system,
+                particle_fx_visual_system,
             )
                 .chain(),
         )
@@ -829,9 +835,12 @@ fn process_net_events_system(
             ApiEvent::AnimCreated(a) => {
                 let anim_id = a.id;
                 let anim_name = a.name.clone();
+                let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
+                let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_multi = twg_shared::route_formation::is_multi_route_anim(&a);
-                let needs_marker_pick =
-                    twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
+                let needs_marker_pick = !is_particle
+                    && !is_shoot
+                    && twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
                 playback.active_anim_id = Some(anim_id);
                 state.selected = SelectedEntity::Anim(anim_id);
                 state.anim_edit = Some(a.clone());
@@ -841,7 +850,17 @@ fn process_net_events_system(
                 state.text_edit = None;
                 state.anims.push(a);
                 state.sort_anims_by_order();
-                if needs_marker_pick {
+                if is_particle {
+                    state.particle_preview_reset_nonce =
+                        state.particle_preview_reset_nonce.wrapping_add(1);
+                    state.status_banner = Some(format!(
+                        "Partikel '{anim_name}' diletakkan — geser posisi via Move Gizmo (X / Alt / Z) atau ubah setting di Inspector!"
+                    ));
+                } else if is_shoot {
+                    state.status_banner = Some(format!(
+                        "Animasi Water Cannon '{anim_name}' dibuat — live preview aktif di peta! Atur tinggi, jangkauan & tekanan di Inspector."
+                    ));
+                } else if needs_marker_pick {
                     state.picking_marker_for_anim_id = Some(anim_id);
                     state.tool_mode = ToolMode::PickRouteMarker;
                     state.status_banner = Some(if is_multi {

@@ -1,9 +1,13 @@
 use bevy_egui::egui;
 use twg_shared::{
     api::UpdateMarkerRequest,
+    particle_anim::{
+        ParticleAnimKind, is_particle_anim, parse_particle_anim_config, particle_anim_position,
+    },
     route_formation::{
         anim_bound_marker_ids, anim_is_playable, is_multi_route_anim, parse_multi_route_config,
     },
+    shoot_anim::{is_water_cannon_anim, parse_water_cannon_config},
 };
 
 use crate::{
@@ -1225,10 +1229,15 @@ fn draw_layers_tab(
 
             ui.add_space(4.0);
 
-            // 5. Route Animations
-            let anims = state.anims.clone();
-            let anim_total = anims.len();
-            let anim_filtered = anims
+            // 5. Route Animations (Category: Route)
+            let route_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Route)
+                .cloned()
+                .collect();
+            let anim_total = route_anims.len();
+            let anim_filtered = route_anims
                 .iter()
                 .filter(|a| {
                     let vis = !state.hidden_entity_ids.contains(&a.id);
@@ -1252,7 +1261,7 @@ fn draw_layers_tab(
             .default_open(true)
             .show(ui, |ui| {
                 let mut shown = 0;
-                for a in &anims {
+                for a in &route_anims {
                     let vis = !state.hidden_entity_ids.contains(&a.id);
                     let locked = state.locked_entity_ids.contains(&a.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -1372,7 +1381,365 @@ fn draw_layers_tab(
                         egui::RichText::new(if has_active_filter {
                             "  (tidak ada yg cocok filter)"
                         } else {
-                            "  (belum ada rute — gunakan tool 'Draw Route')"
+                            "  (belum ada rute — buat di tab Animasi -> Rute)"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // 6. Shoot Animations (Water Cannon, dll.)
+            let shoot_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Shoot)
+                .cloned()
+                .collect();
+            let shoot_total = shoot_anims.len();
+            let shoot_filtered = shoot_anims
+                .iter()
+                .filter(|a| {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    state.matches_layer_filters(vis, locked)
+                        && (filter.is_empty() || a.name.to_lowercase().contains(&filter))
+                })
+                .count();
+            let shoot_header = if has_active_filter {
+                format!("Shoot Animations ({shoot_filtered}/{shoot_total})")
+            } else {
+                format!("Shoot Animations ({shoot_total})")
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(shoot_header)
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(125, 211, 252)),
+            )
+            .id_salt("layer_group_shoot_anims")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut shown = 0;
+                for a in &shoot_anims {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    if !state.matches_layer_filters(vis, locked) {
+                        continue;
+                    }
+                    if !filter.is_empty() && !a.name.to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    shown += 1;
+                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let row_bg = if sel {
+                        egui::Color32::from_rgb(14, 116, 144)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let bound_coords = a
+                        .marker_id
+                        .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
+                        .map(|m| (m.lng, m.lat));
+                    egui::Frame::new()
+                        .fill(row_bg)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(4, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    toggle_hidden_id = Some(a.id);
+                                }
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                    toggle_locked_id = Some(a.id);
+                                }
+
+                                let name_col = if sel {
+                                    egui::Color32::WHITE
+                                } else if !vis {
+                                    egui::Color32::from_rgb(100, 116, 139)
+                                } else if locked {
+                                    egui::Color32::from_rgb(253, 230, 138)
+                                } else {
+                                    egui::Color32::from_rgb(226, 232, 240)
+                                };
+                                let cfg = parse_water_cannon_config(a);
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!(
+                                            "{} ({:.0}m)",
+                                            a.name, cfg.range_m
+                                        ))
+                                        .size(11.5)
+                                        .color(name_col),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    state.selected = SelectedEntity::Anim(a.id);
+                                    state.anim_edit = Some(a.clone());
+                                    state.marker_edit = None;
+                                    state.building_edit = None;
+                                    state.line_edit = None;
+                                    state.text_edit = None;
+                                }
+                                if resp.double_clicked()
+                                    && let Some((lng, lat)) = bound_coords
+                                {
+                                    fly_to = Some((lng, lat));
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if !is_play_mode {
+                                            let del_col = if locked {
+                                                egui::Color32::from_rgb(71, 85, 105)
+                                            } else {
+                                                egui::Color32::from_rgb(248, 113, 113)
+                                            };
+                                            if ui
+                                                .add_enabled(
+                                                    !locked,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x").color(del_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if locked {
+                                                    "Objek terkunci — buka kunci untuk menghapus"
+                                                } else {
+                                                    "Hapus animasi shoot"
+                                                })
+                                                .clicked()
+                                            {
+                                                delete_anim_id = Some(a.id);
+                                            }
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                anim_is_playable(a, &state.markers),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Play")
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(
+                                                            56, 189, 248,
+                                                        )),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Play animasi shoot di Play Skenario")
+                                            .clicked()
+                                        {
+                                            quick_play_anim_id = Some(a.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if shown == 0 {
+                    ui.label(
+                        egui::RichText::new(if has_active_filter {
+                            "  (tidak ada yg cocok filter)"
+                        } else {
+                            "  (belum ada shoot — buat di tab Animasi -> Shoot)"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // 7. Particle Animations (Api, Asap, Ledakan)
+            let particle_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Particle)
+                .cloned()
+                .collect();
+            let particle_total = particle_anims.len();
+            let particle_filtered = particle_anims
+                .iter()
+                .filter(|a| {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    let cfg = parse_particle_anim_config(a);
+                    state.matches_layer_filters(vis, locked)
+                        && (filter.is_empty()
+                            || a.name.to_lowercase().contains(&filter)
+                            || cfg.kind.label().to_lowercase().contains(&filter)
+                            || "particle".contains(&filter))
+                })
+                .count();
+            let particle_header = if has_active_filter {
+                format!("Particle Animations ({particle_filtered}/{particle_total})")
+            } else {
+                format!("Particle Animations ({particle_total})")
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(particle_header)
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(253, 186, 116)),
+            )
+            .id_salt("layer_group_particle_anims")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut shown = 0;
+                for a in &particle_anims {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    let cfg = parse_particle_anim_config(a);
+                    if !state.matches_layer_filters(vis, locked) {
+                        continue;
+                    }
+                    if !filter.is_empty()
+                        && !a.name.to_lowercase().contains(&filter)
+                        && !cfg.kind.label().to_lowercase().contains(&filter)
+                        && !"particle".contains(&filter)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let row_bg = if sel {
+                        egui::Color32::from_rgb(14, 116, 144)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let (tag, tag_col) = match cfg.kind {
+                        ParticleAnimKind::Fire => ("API", egui::Color32::from_rgb(251, 146, 60)),
+                        ParticleAnimKind::Smoke => {
+                            ("ASAP", egui::Color32::from_rgb(203, 213, 225))
+                        }
+                        ParticleAnimKind::Explosion => {
+                            ("LED", egui::Color32::from_rgb(248, 113, 113))
+                        }
+                    };
+                    egui::Frame::new()
+                        .fill(row_bg)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(4, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    toggle_hidden_id = Some(a.id);
+                                }
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                    toggle_locked_id = Some(a.id);
+                                }
+
+                                ui.label(
+                                    egui::RichText::new(format!("[{tag}]"))
+                                        .size(9.0)
+                                        .strong()
+                                        .color(if !vis {
+                                            egui::Color32::from_rgb(100, 116, 139)
+                                        } else {
+                                            tag_col
+                                        }),
+                                );
+
+                                let name_col = if sel {
+                                    egui::Color32::WHITE
+                                } else if !vis {
+                                    egui::Color32::from_rgb(100, 116, 139)
+                                } else if locked {
+                                    egui::Color32::from_rgb(253, 230, 138)
+                                } else {
+                                    egui::Color32::from_rgb(226, 232, 240)
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&a.name).size(11.5).color(name_col),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    state.selected = SelectedEntity::Anim(a.id);
+                                    state.anim_edit = Some(a.clone());
+                                    state.marker_edit = None;
+                                    state.building_edit = None;
+                                    state.line_edit = None;
+                                    state.text_edit = None;
+                                    state.particle_preview_reset_nonce =
+                                        state.particle_preview_reset_nonce.wrapping_add(1);
+                                }
+                                if resp.double_clicked() && !a.geom.is_empty() {
+                                    let [lng, lat, _] = particle_anim_position(a);
+                                    fly_to = Some((lng, lat));
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if !is_play_mode {
+                                            let del_col = if locked {
+                                                egui::Color32::from_rgb(71, 85, 105)
+                                            } else {
+                                                egui::Color32::from_rgb(248, 113, 113)
+                                            };
+                                            if ui
+                                                .add_enabled(
+                                                    !locked,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x").color(del_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if locked {
+                                                    "Objek terkunci — buka kunci untuk menghapus"
+                                                } else {
+                                                    "Hapus animasi partikel"
+                                                })
+                                                .clicked()
+                                            {
+                                                delete_anim_id = Some(a.id);
+                                            }
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                anim_is_playable(a, &state.markers),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Play")
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(
+                                                            251, 146, 60,
+                                                        )),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(
+                                                "Play animasi partikel di Play Skenario",
+                                            )
+                                            .clicked()
+                                        {
+                                            quick_play_anim_id = Some(a.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if shown == 0 {
+                    ui.label(
+                        egui::RichText::new(if has_active_filter {
+                            "  (tidak ada yg cocok filter)"
+                        } else {
+                            "  (belum ada partikel — buat di tab Animasi -> Particle)"
                         })
                         .size(10.5)
                         .color(egui::Color32::from_rgb(100, 116, 139)),
@@ -2020,64 +2387,59 @@ fn draw_animations_tab(
     );
     ui.add_space(5.0);
 
-    // Section 1: Create new animation by Category (2x2 selector + creation card)
+    // Section 1: Create new animation by Category (5 categories in 2 compact rows + creation card)
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(12, 17, 27))
         .corner_radius(5.0)
         .inner_margin(egui::Margin::same(4))
         .show(ui, |ui| {
-            let rows = [
-                [AnimCategory::Route, AnimCategory::Shoot],
-                [AnimCategory::SpawnHide, AnimCategory::Other],
-            ];
-            for (r_idx, row) in rows.iter().enumerate() {
-                ui.columns(2, |cols| {
-                    for (c_idx, cat) in row.iter().enumerate() {
-                        let active = state.anim_category_filter == *cat;
-                        let btn = egui::Button::new(
-                            egui::RichText::new(cat.label())
-                                .size(10.5)
-                                .strong()
-                                .color(if active {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::from_rgb(148, 163, 184)
-                                }),
-                        )
-                        .fill(if active {
-                            match cat {
-                                AnimCategory::Route => egui::Color32::from_rgb(5, 150, 105),
-                                AnimCategory::Shoot => egui::Color32::from_rgb(185, 28, 28),
-                                AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
-                                AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
-                            }
+            let draw_cat_btn = |col_ui: &mut egui::Ui, state: &mut AppState, cat: AnimCategory| {
+                let active = state.anim_category_filter == cat;
+                let btn = egui::Button::new(
+                    egui::RichText::new(cat.label())
+                        .size(10.5)
+                        .strong()
+                        .color(if active {
+                            egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_rgb(22, 30, 45)
-                        })
-                        .min_size(egui::vec2(cols[c_idx].available_width(), 22.0));
-                        if cols[c_idx].add(btn).clicked() {
-                            state.anim_category_filter = *cat;
-                        }
+                            egui::Color32::from_rgb(148, 163, 184)
+                        }),
+                )
+                .fill(if active {
+                    match cat {
+                        AnimCategory::Route => egui::Color32::from_rgb(5, 150, 105),
+                        AnimCategory::Shoot => egui::Color32::from_rgb(185, 28, 28),
+                        AnimCategory::Particle => egui::Color32::from_rgb(234, 88, 12),
+                        AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
+                        AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
                     }
-                });
-                if r_idx == 0 {
-                    ui.add_space(3.0);
+                } else {
+                    egui::Color32::from_rgb(22, 30, 45)
+                })
+                .min_size(egui::vec2(col_ui.available_width(), 22.0));
+                if col_ui.add(btn).clicked() {
+                    state.anim_category_filter = cat;
                 }
-            }
+            };
+
+            ui.columns(3, |cols| {
+                draw_cat_btn(&mut cols[0], state, AnimCategory::Route);
+                draw_cat_btn(&mut cols[1], state, AnimCategory::Shoot);
+                draw_cat_btn(&mut cols[2], state, AnimCategory::Particle);
+            });
+            ui.add_space(3.0);
+            ui.columns(2, |cols| {
+                draw_cat_btn(&mut cols[0], state, AnimCategory::SpawnHide);
+                draw_cat_btn(&mut cols[1], state, AnimCategory::Other);
+            });
         });
 
     ui.add_space(6.0);
 
     match state.anim_category_filter {
         AnimCategory::Route => draw_route_create_card(ui, state, editable),
-        AnimCategory::Shoot => {
-            draw_coming_soon_anim_card(
-                ui,
-                "Kategori: Shoot / Tembakan",
-                "Segera hadir: animasi tembakan senjata, proyektil, muzzle flash, dan garis bidik antar unit.",
-                egui::Color32::from_rgb(248, 113, 113),
-            );
-        }
+        AnimCategory::Shoot => draw_shoot_create_card(ui, state, editable),
+        AnimCategory::Particle => draw_particle_create_card(ui, state, editable),
         AnimCategory::SpawnHide => {
             draw_coming_soon_anim_card(
                 ui,
@@ -2090,7 +2452,7 @@ fn draw_animations_tab(
             draw_coming_soon_anim_card(
                 ui,
                 "Kategori: Lainnya",
-                "Segera hadir: rotasi turret/radar, efek ledakan & asap taktis, dan perubahan warna zona.",
+                "Segera hadir: rotasi turret/radar, sorotan lampu taktis, dan perubahan warna zona.",
                 egui::Color32::from_rgb(125, 211, 252),
             );
         }
@@ -2139,6 +2501,264 @@ fn draw_coming_soon_anim_card(
                     .size(10.5)
                     .color(egui::Color32::from_rgb(148, 163, 184)),
             );
+        });
+}
+
+fn draw_shoot_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
+    let is_picking_shoot = state.tool_mode == ToolMode::PickShootMarker;
+
+    egui::Frame::new()
+        .fill(if is_picking_shoot {
+            egui::Color32::from_rgb(12, 46, 72)
+        } else {
+            egui::Color32::from_rgb(22, 30, 45)
+        })
+        .stroke(egui::Stroke::new(
+            1.2,
+            if is_picking_shoot {
+                egui::Color32::from_rgb(56, 189, 248)
+            } else {
+                egui::Color32::from_rgb(42, 60, 86)
+            },
+        ))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Buat Animasi Shoot")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(185, 28, 28))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("SHOOT")
+                                    .size(9.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                        });
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "Klik '+ Buat Water Cannon', lalu klik 1 kendaraan/unit 3D di peta. Preview semprotan langsung muncul saat animasi dipilih.",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(186, 230, 253)),
+            );
+            ui.add_space(5.0);
+
+            if is_picking_shoot {
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new("Batal Pilih Unit di Peta (Esc)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(180, 83, 9))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(cancel_btn).clicked() {
+                    state.tool_mode = ToolMode::Select;
+                    state.picking_shoot_for_anim_id = None;
+                }
+            } else {
+                let wc_btn = egui::Button::new(
+                    egui::RichText::new("+ Buat Water Cannon (AWC / Damkar)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(2, 132, 199))
+                .min_size(egui::vec2(ui.available_width(), 26.0));
+                if ui
+                    .add_enabled(editable, wc_btn)
+                    .on_hover_text(
+                        "Semprotan air bertekanan dari ketinggian (AWC Polisi / Pemadam Kebakaran) — 1 animasi untuk 1 Model 3D",
+                    )
+                    .clicked()
+                {
+                    let shoot_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Shoot)
+                        .count()
+                        + 1;
+                    state.new_shoot_name = format!("Water Cannon {shoot_idx}");
+                    state.picking_shoot_for_anim_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.draft_points_lnglat.clear();
+                    state.tool_mode = ToolMode::PickShootMarker;
+                    state.status_banner = Some(
+                        "Klik 1 Model 3D / Kendaraan di peta untuk memasang animasi Water Cannon (Esc batal)."
+                            .into(),
+                    );
+                }
+            }
+        });
+}
+
+fn draw_particle_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
+    let is_placing = state.tool_mode == ToolMode::PlaceParticle;
+
+    egui::Frame::new()
+        .fill(if is_placing {
+            egui::Color32::from_rgb(67, 25, 10)
+        } else {
+            egui::Color32::from_rgb(22, 30, 45)
+        })
+        .stroke(egui::Stroke::new(
+            1.2,
+            if is_placing {
+                egui::Color32::from_rgb(251, 146, 60)
+            } else {
+                egui::Color32::from_rgb(42, 60, 86)
+            },
+        ))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Buat Animasi Particle")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(234, 88, 12))
+                        .corner_radius(3.0)
+                        .inner_margin(egui::Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("PARTICLE")
+                                    .size(9.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
+                        });
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "Pilih jenis efek di bawah lalu klik lokasi di peta 3D. Posisi (Lng / Lat / Alt) bisa langsung digeser lewat Move Gizmo atau Inspector.",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(254, 215, 170)),
+            );
+            ui.add_space(5.0);
+
+            if is_placing {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Aktif: {} — klik peta untuk meletakkan",
+                        state.new_particle_kind.label()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(253, 186, 116)),
+                );
+                ui.add_space(3.0);
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new("Batal Letakkan Partikel (Esc)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(180, 83, 9))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(cancel_btn).clicked() {
+                    state.tool_mode = ToolMode::Select;
+                }
+            } else {
+                let start_place = |state: &mut AppState, kind: ParticleAnimKind| {
+                    let count = state
+                        .anims
+                        .iter()
+                        .filter(|a| ParticleAnimKind::from_anim_type(&a.anim_type) == Some(kind))
+                        .count()
+                        + 1;
+                    state.new_particle_kind = kind;
+                    state.new_particle_name = kind.default_name(count);
+                    state.picking_marker_for_anim_id = None;
+                    state.picking_shoot_for_anim_id = None;
+                    state.draft_points_lnglat.clear();
+                    state.tool_mode = ToolMode::PlaceParticle;
+                    state.status_banner = Some(format!(
+                        "Mode Letakkan {}: Klik 1 titik di peta 3D untuk menempatkan (Esc batal).",
+                        kind.label()
+                    ));
+                };
+
+                let fire_btn = egui::Button::new(
+                    egui::RichText::new("+ Buat Api (Fire)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(234, 88, 12))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, fire_btn)
+                    .on_hover_text(
+                        "Efek kebakaran 3D dengan lidah api dinamis, asap atas, percikan bara, dan arah angin",
+                    )
+                    .clicked()
+                {
+                    start_place(state, ParticleAnimKind::Fire);
+                }
+
+                ui.add_space(4.0);
+
+                let smoke_btn = egui::Button::new(
+                    egui::RichText::new("+ Buat Asap (Smoke)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(71, 85, 105))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, smoke_btn)
+                    .on_hover_text(
+                        "Kepulan asap taktis (kebakaran, gas air mata, atau asap sinyal merah/hijau/kuning)",
+                    )
+                    .clicked()
+                {
+                    start_place(state, ParticleAnimKind::Smoke);
+                }
+
+                ui.add_space(4.0);
+
+                let exp_btn = egui::Button::new(
+                    egui::RichText::new("+ Buat Ledakan (Explosion)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(185, 28, 28))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, exp_btn)
+                    .on_hover_text(
+                        "Ledakan 3D dengan bola api, cincin gelombang kejut (shockwave), percikan puing, dan asap jamur",
+                    )
+                    .clicked()
+                {
+                    start_place(state, ParticleAnimKind::Explosion);
+                }
+            }
         });
 }
 
@@ -2437,6 +3057,13 @@ fn draw_ordered_animation_list(
                     }
                     AnimCategory::Route => ("RUTE", egui::Color32::from_rgb(5, 150, 105)),
                     AnimCategory::Shoot => ("SHOOT", egui::Color32::from_rgb(185, 28, 28)),
+                    AnimCategory::Particle => match parse_particle_anim_config(a).kind {
+                        ParticleAnimKind::Fire => ("API", egui::Color32::from_rgb(234, 88, 12)),
+                        ParticleAnimKind::Smoke => ("ASAP", egui::Color32::from_rgb(71, 85, 105)),
+                        ParticleAnimKind::Explosion => {
+                            ("LEDAKAN", egui::Color32::from_rgb(185, 28, 28))
+                        }
+                    },
                     AnimCategory::SpawnHide => ("SPAWN", egui::Color32::from_rgb(109, 40, 217)),
                     AnimCategory::Other => ("LAIN", egui::Color32::from_rgb(14, 116, 144)),
                 };
@@ -2535,8 +3162,46 @@ fn draw_ordered_animation_list(
                             );
                         });
 
+                        let is_particle = is_particle_anim(a);
                         let has_units = !bound_ids.is_empty();
-                        let meta = if is_multi {
+                        let is_ready_meta = if is_particle {
+                            !a.geom.is_empty()
+                        } else {
+                            has_units
+                        };
+                        let meta = if is_particle {
+                            let cfg = parse_particle_anim_config(a);
+                            let alt = particle_anim_position(a)[2];
+                            if cfg.continuous {
+                                format!(
+                                    "Radius {:.1}m  •  Tinggi {:.1}m  •  Alt {:.1}m  •  Terus",
+                                    cfg.radius_m, cfg.height_m, alt
+                                )
+                            } else {
+                                format!(
+                                    "Radius {:.1}m  •  Tinggi {:.1}m  •  {:.1} dtk{}",
+                                    cfg.radius_m,
+                                    cfg.height_m,
+                                    a.duration_sec,
+                                    if a.replay { "  •  Repeat" } else { "" }
+                                )
+                            }
+                        } else if is_water_cannon_anim(a) {
+                            let cfg = parse_water_cannon_config(a);
+                            let unit_name = a
+                                .marker_id
+                                .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
+                                .map(|m| m.name.clone());
+                            match &unit_name {
+                                Some(u) => format!(
+                                    "Unit: {u}  •  Jarak {:.0}m  •  {:.1} bar{}",
+                                    cfg.range_m,
+                                    cfg.pressure_bar,
+                                    if cfg.continuous { "  •  Terus" } else { "" }
+                                ),
+                                None => "Belum pilih Model 3D".to_string(),
+                            }
+                        } else if is_multi {
                             let cfg = parse_multi_route_config(a);
                             if has_units {
                                 format!(
@@ -2572,7 +3237,7 @@ fn draw_ordered_animation_list(
                         ui.label(
                             egui::RichText::new(meta)
                                 .size(10.0)
-                                .color(if has_units {
+                                .color(if is_ready_meta {
                                     egui::Color32::from_rgb(148, 163, 184)
                                 } else {
                                     egui::Color32::from_rgb(251, 191, 36)
@@ -2584,12 +3249,21 @@ fn draw_ordered_animation_list(
                             if ui.small_button("Edit").clicked() {
                                 select_anim = Some(a.clone());
                             }
+                            let go_target = a
+                                .geom
+                                .first()
+                                .map(|p| (p[0], p[1]))
+                                .or_else(|| {
+                                    a.marker_id
+                                        .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
+                                        .map(|m| (m.lng, m.lat))
+                                });
                             if ui
-                                .add_enabled(!a.geom.is_empty(), egui::Button::new("Go").small())
+                                .add_enabled(go_target.is_some(), egui::Button::new("Go").small())
                                 .clicked()
-                                && let Some(first) = a.geom.first()
+                                && let Some((lng, lat)) = go_target
                             {
-                                fly_to = Some((first[0], first[1]));
+                                fly_to = Some((lng, lat));
                             }
                             let play_btn = egui::Button::new(
                                 egui::RichText::new("Play")
@@ -2641,8 +3315,13 @@ fn draw_ordered_animation_list(
         }
     }
     if let Some(a) = select_anim {
+        let is_p = is_particle_anim(&a);
         state.selected = SelectedEntity::Anim(a.id);
         state.anim_edit = Some(a);
+        if is_p {
+            state.particle_preview_reset_nonce =
+                state.particle_preview_reset_nonce.wrapping_add(1);
+        }
     }
     if let Some(aid) = play_anim_id {
         playback.play_single_immediately(aid);

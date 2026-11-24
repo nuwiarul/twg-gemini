@@ -1,6 +1,12 @@
 use bevy_egui::egui;
-use twg_shared::route_formation::{
-    anim_bound_marker_ids, anim_is_playable, is_multi_route_anim, parse_multi_route_config,
+use twg_shared::{
+    particle_anim::{
+        ParticleAnimKind, is_particle_anim, parse_particle_anim_config, particle_anim_position,
+    },
+    route_formation::{
+        anim_bound_marker_ids, anim_is_playable, is_multi_route_anim, parse_multi_route_config,
+    },
+    shoot_anim::{is_water_cannon_anim, parse_water_cannon_config},
 };
 use uuid::Uuid;
 
@@ -201,7 +207,10 @@ pub fn draw_play_animation_panel(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if let Some(cat) = selected_cat
-                        && cat != AnimCategory::Route
+                        && !matches!(
+                            cat,
+                            AnimCategory::Route | AnimCategory::Shoot | AnimCategory::Particle
+                        )
                     {
                         egui::Frame::new()
                             .fill(egui::Color32::from_rgb(20, 29, 44))
@@ -255,20 +264,56 @@ pub fn draw_play_animation_panel(
                     }
 
                     for (global_idx, anim) in &filtered_anims {
+                        let is_wc = is_water_cannon_anim(anim);
+                        let is_particle = is_particle_anim(anim);
+                        let is_multi = is_multi_route_anim(anim);
+                        let wc_cfg = if is_wc {
+                            Some(parse_water_cannon_config(anim))
+                        } else {
+                            None
+                        };
+                        let p_cfg = if is_particle {
+                            Some(parse_particle_anim_config(anim))
+                        } else {
+                            None
+                        };
                         let status = playback.track_status(anim.id);
                         let track = playback.tracks.get(&anim.id);
-                        let total_m = track
-                            .map(|t| t.total_length_m)
-                            .filter(|&v| v > 0.0)
-                            .unwrap_or_else(|| route_total_length_m(&anim.geom));
-                        let dist_m = track.map(|t| t.distance_m).unwrap_or(0.0).clamp(0.0, total_m.max(0.01));
-                        let progress = if total_m > 0.01 {
-                            (dist_m / total_m).clamp(0.0, 1.0) as f32
+                        let (dist_m, total_m, progress) = if let Some(ref wcfg) = wc_cfg {
+                            let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
+                            if wcfg.continuous {
+                                let p = if status == AnimRunStatus::Playing { 1.0 } else { 0.0 };
+                                (elapsed, 0.0, p)
+                            } else {
+                                let dur = anim.duration_sec.max(0.5);
+                                (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
+                            }
+                        } else if let Some(ref pcfg) = p_cfg {
+                            let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
+                            if pcfg.continuous {
+                                let p = if status == AnimRunStatus::Playing { 1.0 } else { 0.0 };
+                                (elapsed, 0.0, p)
+                            } else {
+                                let dur = anim.duration_sec.max(0.5);
+                                (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
+                            }
                         } else {
-                            0.0
+                            let total = track
+                                .map(|t| t.total_length_m)
+                                .filter(|&v| v > 0.0)
+                                .unwrap_or_else(|| route_total_length_m(&anim.geom));
+                            let dist = track
+                                .map(|t| t.distance_m)
+                                .unwrap_or(0.0)
+                                .clamp(0.0, total.max(0.01));
+                            let prog = if total > 0.01 {
+                                (dist / total).clamp(0.0, 1.0) as f32
+                            } else {
+                                0.0
+                            };
+                            (dist, total, prog)
                         };
 
-                        let is_multi = is_multi_route_anim(anim);
                         let bound_ids = anim_bound_marker_ids(anim);
                         let bound_names: Vec<String> = bound_ids
                             .iter()
@@ -280,29 +325,73 @@ pub fn draw_play_animation_panel(
                                     .map(|m| m.name.clone())
                             })
                             .collect();
-                        let can_play = !bound_names.is_empty() && anim.geom.len() >= 2;
+                        let can_play = anim_is_playable(anim, &state.markers);
 
                         let (status_txt, status_bg, status_fg, card_stroke) = match status {
                             AnimRunStatus::Stopped => (
-                                "IDLE",
+                                if is_wc || is_particle {
+                                    "STANDBY"
+                                } else {
+                                    "IDLE"
+                                },
                                 egui::Color32::from_rgb(30, 41, 59),
                                 egui::Color32::from_rgb(148, 163, 184),
                                 egui::Color32::from_rgb(44, 58, 82),
                             ),
-                            AnimRunStatus::Playing => (
-                                "BERJALAN",
-                                egui::Color32::from_rgb(6, 78, 59),
-                                egui::Color32::from_rgb(110, 231, 183),
-                                egui::Color32::from_rgb(16, 185, 129),
-                            ),
+                            AnimRunStatus::Playing => {
+                                if let Some(ref pcfg) = p_cfg {
+                                    match pcfg.kind {
+                                        ParticleAnimKind::Fire => (
+                                            "MENYALA",
+                                            egui::Color32::from_rgb(124, 45, 18),
+                                            egui::Color32::from_rgb(253, 186, 116),
+                                            egui::Color32::from_rgb(249, 115, 22),
+                                        ),
+                                        ParticleAnimKind::Smoke => (
+                                            "BERASAP",
+                                            egui::Color32::from_rgb(51, 65, 85),
+                                            egui::Color32::from_rgb(226, 232, 240),
+                                            egui::Color32::from_rgb(148, 163, 184),
+                                        ),
+                                        ParticleAnimKind::Explosion => (
+                                            "MELEDAK",
+                                            egui::Color32::from_rgb(127, 29, 29),
+                                            egui::Color32::from_rgb(254, 202, 202),
+                                            egui::Color32::from_rgb(239, 68, 68),
+                                        ),
+                                    }
+                                } else if is_wc {
+                                    (
+                                        "MENYEMPROT",
+                                        egui::Color32::from_rgb(12, 74, 110),
+                                        egui::Color32::from_rgb(125, 211, 252),
+                                        egui::Color32::from_rgb(56, 189, 248),
+                                    )
+                                } else {
+                                    (
+                                        "BERJALAN",
+                                        egui::Color32::from_rgb(6, 78, 59),
+                                        egui::Color32::from_rgb(110, 231, 183),
+                                        egui::Color32::from_rgb(16, 185, 129),
+                                    )
+                                }
+                            }
                             AnimRunStatus::Paused => (
-                                "DIJEDA (IDLE)",
+                                if is_wc || is_particle {
+                                    "DIJEDA"
+                                } else {
+                                    "DIJEDA (IDLE)"
+                                },
                                 egui::Color32::from_rgb(120, 53, 15),
                                 egui::Color32::from_rgb(253, 230, 138),
                                 egui::Color32::from_rgb(245, 158, 11),
                             ),
                             AnimRunStatus::Finished => (
-                                "SELESAI (IDLE)",
+                                if is_wc || is_particle {
+                                    "SELESAI"
+                                } else {
+                                    "SELESAI (IDLE)"
+                                },
                                 egui::Color32::from_rgb(30, 58, 138),
                                 egui::Color32::from_rgb(191, 219, 254),
                                 egui::Color32::from_rgb(56, 189, 248),
@@ -317,7 +406,7 @@ pub fn draw_play_animation_panel(
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
 
-                                // Card Row 1: #Order + [RUTE] + Name + Status + Go
+                                // Card Row 1: #Order + [TAG] + Name + Status + Go
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(format!("#{}", global_idx + 1))
@@ -325,19 +414,33 @@ pub fn draw_play_animation_panel(
                                             .strong()
                                             .color(egui::Color32::from_rgb(125, 211, 252)),
                                     );
+                                    let (badge_txt, badge_col) = if let Some(ref pcfg) = p_cfg {
+                                        match pcfg.kind {
+                                            ParticleAnimKind::Fire => (
+                                                "[API]",
+                                                egui::Color32::from_rgb(251, 146, 60),
+                                            ),
+                                            ParticleAnimKind::Smoke => (
+                                                "[ASAP]",
+                                                egui::Color32::from_rgb(203, 213, 225),
+                                            ),
+                                            ParticleAnimKind::Explosion => (
+                                                "[LEDAKAN]",
+                                                egui::Color32::from_rgb(248, 113, 113),
+                                            ),
+                                        }
+                                    } else if is_wc {
+                                        ("[WATER CANNON]", egui::Color32::from_rgb(248, 113, 113))
+                                    } else if is_multi {
+                                        ("[FORMASI]", egui::Color32::from_rgb(56, 189, 248))
+                                    } else {
+                                        ("[RUTE]", egui::Color32::from_rgb(52, 211, 153))
+                                    };
                                     ui.label(
-                                        egui::RichText::new(if is_multi {
-                                            "[FORMASI]"
-                                        } else {
-                                            "[RUTE]"
-                                        })
-                                        .size(9.5)
-                                        .strong()
-                                        .color(if is_multi {
-                                            egui::Color32::from_rgb(56, 189, 248)
-                                        } else {
-                                            egui::Color32::from_rgb(52, 211, 153)
-                                        }),
+                                        egui::RichText::new(badge_txt)
+                                            .size(9.5)
+                                            .strong()
+                                            .color(badge_col),
                                     );
                                     ui.add(
                                         egui::Label::new(
@@ -351,8 +454,23 @@ pub fn draw_play_animation_panel(
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
+                                            let go_target = anim
+                                                .geom
+                                                .first()
+                                                .map(|p| (p[0], p[1]))
+                                                .or_else(|| {
+                                                    anim.marker_id
+                                                        .and_then(|mid| {
+                                                            state
+                                                                .markers
+                                                                .iter()
+                                                                .find(|m| m.id == mid)
+                                                        })
+                                                        .map(|m| (m.lng, m.lat))
+                                                });
                                             if ui
-                                                .add(
+                                                .add_enabled(
+                                                    go_target.is_some(),
                                                     egui::Button::new(
                                                         egui::RichText::new("Go")
                                                             .size(10.0)
@@ -363,11 +481,11 @@ pub fn draw_play_animation_panel(
                                                     .small()
                                                     .frame(false),
                                                 )
-                                                .on_hover_text("Fokus kamera ke titik awal rute")
+                                                .on_hover_text("Fokus kamera ke lokasi animasi")
                                                 .clicked()
-                                                && let Some(pt) = anim.geom.first()
+                                                && let Some((lng, lat)) = go_target
                                             {
-                                                fly_to = Some((pt[0], pt[1]));
+                                                fly_to = Some((lng, lat));
                                             }
                                             egui::Frame::new()
                                                 .fill(status_bg)
@@ -387,8 +505,27 @@ pub fn draw_play_animation_panel(
 
                                 ui.add_space(3.0);
 
-                                // Target 3D Marker(s) & Formation info
-                                if !bound_names.is_empty() {
+                                // Target 3D Marker(s) / Particle Location info
+                                if let Some(ref pcfg) = p_cfg {
+                                    let pos_line = if !anim.geom.is_empty() {
+                                        let [lng, lat, alt] = particle_anim_position(anim);
+                                        format!(
+                                            "{}  •  Alt {:.1} m  •  ({lat:.4}, {lng:.4})",
+                                            pcfg.kind.label(),
+                                            alt
+                                        )
+                                    } else {
+                                        "Lokasi partikel belum ditentukan".to_string()
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(pos_line)
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(253, 186, 116)),
+                                        )
+                                        .truncate(),
+                                    );
+                                } else if !bound_names.is_empty() {
                                     let target_line = if is_multi {
                                         let cfg = parse_multi_route_config(anim);
                                         let preview_names = if bound_names.len() <= 3 {
@@ -427,17 +564,52 @@ pub fn draw_play_animation_panel(
                                     );
                                 }
 
-                                // Speed, distance, repeat metadata
-                                ui.label(
-                                    egui::RichText::new(format!(
+                                // Speed / distance OR Water Cannon OR Particle metadata
+                                let meta_line = if let Some(ref pcfg) = p_cfg {
+                                    if pcfg.continuous {
+                                        format!(
+                                            "Radius: {:.1} m  •  Tinggi: {:.1} m  •  Terus-menerus",
+                                            pcfg.radius_m, pcfg.height_m
+                                        )
+                                    } else {
+                                        format!(
+                                            "Radius: {:.1} m  •  Tinggi: {:.1} m  •  {:.1} / {:.1} dtk{}",
+                                            pcfg.radius_m,
+                                            pcfg.height_m,
+                                            dist_m,
+                                            total_m,
+                                            if anim.replay { " (Repeat)" } else { "" }
+                                        )
+                                    }
+                                } else if let Some(ref wcfg) = wc_cfg {
+                                    if wcfg.continuous {
+                                        format!(
+                                            "Jarak: {:.0} m  •  Tekanan: {:.1} bar  •  Terus-menerus",
+                                            wcfg.range_m, wcfg.pressure_bar
+                                        )
+                                    } else {
+                                        format!(
+                                            "Jarak: {:.0} m  •  {:.1} bar  •  {:.1} / {:.1} dtk{}",
+                                            wcfg.range_m,
+                                            wcfg.pressure_bar,
+                                            dist_m,
+                                            total_m,
+                                            if anim.replay { " (Repeat)" } else { "" }
+                                        )
+                                    }
+                                } else {
+                                    format!(
                                         "Speed: {:.1} m/s  •  Jarak: {:.1} / {:.1} m  •  Repeat: {}",
                                         anim.speed,
                                         dist_m,
                                         total_m,
                                         if anim.replay { "Aktif" } else { "Tidak" }
-                                    ))
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                    )
+                                };
+                                ui.label(
+                                    egui::RichText::new(meta_line)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(148, 163, 184)),
                                 );
 
                                 ui.add_space(5.0);

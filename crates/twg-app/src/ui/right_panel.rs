@@ -6,10 +6,15 @@ use twg_shared::{
     },
     geo::haversine_distance_m,
     models::{BaseLayer, MapMode, MediaAssetType},
+    particle_anim::{
+        ParticleAnimConfig, ParticleAnimKind, is_particle_anim, parse_particle_anim_config,
+        particle_anim_position, set_particle_anim_position, write_particle_anim_config,
+    },
     route_formation::{
         FormationCornerMode, RouteFormationKind, anim_bound_marker_ids, anim_is_playable,
         is_multi_route_anim, parse_multi_route_config, write_multi_route_config,
     },
+    shoot_anim::{is_water_cannon_anim, parse_water_cannon_config, write_water_cannon_config},
     ws::TacticalCommand,
 };
 use uuid::Uuid;
@@ -599,6 +604,96 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                     }
                 }
             });
+        }
+        ToolMode::PickShootMarker => {
+            let rebinding_name = state
+                .picking_shoot_for_anim_id
+                .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                .map(|a| a.name.clone());
+            let title = if rebinding_name.is_some() {
+                "Ganti Unit Water Cannon di Peta"
+            } else {
+                "Buat Water Cannon: Pilih 1 Model 3D"
+            };
+            inspector_card(ui, title, true, |ui| {
+                if let Some(rname) = rebinding_name {
+                    ui.label(
+                        egui::RichText::new(format!("Animasi: {rname}"))
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(56, 189, 248)),
+                    );
+                } else {
+                    ui.label("Nama Animasi Water Cannon:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_shoot_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Klik 1 kendaraan / Model 3D di peta (1 animasi = 1 unit). Tinggi nozzle otomatis menyesuaikan atap model dan preview semprotan langsung menyala.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
+                ui.add_space(6.0);
+                if ui.small_button("Batal (Esc)").clicked() {
+                    state.picking_shoot_for_anim_id = None;
+                    state.tool_mode = ToolMode::Select;
+                }
+            });
+        }
+        ToolMode::PlaceParticle => {
+            inspector_card(
+                ui,
+                &format!("Letakkan Partikel: {}", state.new_particle_kind.label()),
+                true,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new("Jenis Partikel:")
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    ui.horizontal(|ui| {
+                        for &kind in ParticleAnimKind::ALL {
+                            let active = state.new_particle_kind == kind;
+                            if ui.selectable_label(active, kind.short_tag()).clicked() {
+                                let count = state
+                                    .anims
+                                    .iter()
+                                    .filter(|a| {
+                                        ParticleAnimKind::from_anim_type(&a.anim_type)
+                                            == Some(kind)
+                                    })
+                                    .count()
+                                    + 1;
+                                state.new_particle_kind = kind;
+                                state.new_particle_name = kind.default_name(count);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.label("Nama Partikel Baru:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_particle_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Klik 1 titik di peta 3D untuk menempatkan partikel. Setelah dibuat, Inspector & Move Gizmo 3D (X / Alt / Z) langsung aktif.",
+                        )
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(253, 186, 116)),
+                    );
+                    ui.add_space(6.0);
+                    if ui.small_button("Batal (Esc)").clicked() {
+                        state.tool_mode = ToolMode::Select;
+                    }
+                },
+            );
         }
         _ => {}
     }
@@ -2263,14 +2358,21 @@ fn draw_anim_inspector(
                 .color(egui::Color32::WHITE),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let focus_target = a
+                .geom
+                .first()
+                .map(|p| (p[0], p[1]))
+                .or_else(|| {
+                    a.marker_id
+                        .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
+                        .map(|m| (m.lng, m.lat))
+                });
             if ui
-                .add_enabled(!a.geom.is_empty(), egui::Button::new("Focus").small())
+                .add_enabled(focus_target.is_some(), egui::Button::new("Focus").small())
                 .clicked()
-                && let Some(first) = a.geom.first()
+                && let Some((lng, lat)) = focus_target
             {
-                let local = state
-                    .geo_anchor
-                    .lng_lat_alt_to_local(first[0], first[1], 0.0);
+                let local = state.geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0);
                 tcam.target_local = bevy::math::Vec2::new(local[0], local[2]);
             }
         });
@@ -2287,6 +2389,11 @@ fn draw_anim_inspector(
         .iter()
         .map(|m| (m.id, m.name.clone()))
         .collect();
+    if is_particle_anim(&a) {
+        draw_particle_inspector_cards(ui, state, &mut a, editable);
+    } else if is_water_cannon_anim(&a) {
+        draw_water_cannon_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+    } else {
     let is_multi = is_multi_route_anim(&a);
     let linked_name = a
         .marker_id
@@ -3151,9 +3258,11 @@ fn draw_anim_inspector(
             }
         });
     });
+    }
 
     if editable {
         let a_changed = a.name != orig.name
+            || a.anim_type != orig.anim_type
             || a.marker_id != orig.marker_id
             || (a.duration_sec - orig.duration_sec).abs() > 1e-6
             || (a.speed - orig.speed).abs() > 1e-6
@@ -3183,9 +3292,16 @@ fn draw_anim_inspector(
         } else {
             egui::Color32::from_rgb(51, 65, 85)
         });
+        let disabled_hint = if is_particle_anim(&a) {
+            "Tentukan posisi partikel di peta terlebih dahulu"
+        } else if is_water_cannon_anim(&a) {
+            "Pilih 1 Model 3D sumber Water Cannon terlebih dahulu"
+        } else {
+            "Pilih Model 3D dan minimal 2 titik rute terlebih dahulu"
+        };
         if ui
             .add_enabled(can_play, test_btn)
-            .on_disabled_hover_text("Pilih Model 3D dan minimal 2 titik rute terlebih dahulu")
+            .on_disabled_hover_text(disabled_hint)
             .clicked()
         {
             route_edit.clear();
@@ -3223,7 +3339,7 @@ fn draw_anim_inspector(
                 } else {
                     state.dirty_anim_ids.remove(&a.id);
                     state.status_banner =
-                        Some(format!("Animasi rute '{}' disimpan (Offline).", a.name));
+                        Some(format!("Animasi '{}' disimpan (Offline).", a.name));
                 }
             }
 
@@ -3236,6 +3352,943 @@ fn draw_anim_inspector(
             }
         }
     });
+}
+
+fn draw_particle_inspector_cards(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    a: &mut twg_shared::models::Anim,
+    editable: bool,
+) {
+    let mut cfg = parse_particle_anim_config(a);
+    let mut cfg_changed = false;
+
+    // Card 1: Identity, Particle Type & Live Preview Control
+    inspector_card(
+        ui,
+        &format!("Particle: {} — Identitas", cfg.kind.label()),
+        true,
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                // Live preview indicator banner
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(67, 25, 10))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(251, 146, 60)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(
+                                "LIVE PREVIEW & MOVE GIZMO AKTIF — Geser langsung panah X / Alt / Z di peta",
+                            )
+                            .size(9.5)
+                            .strong()
+                            .color(egui::Color32::from_rgb(253, 186, 116)),
+                        );
+                    });
+                ui.add_space(5.0);
+
+                ui.label("Nama Partikel:");
+                ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
+                ui.add_space(5.0);
+
+                // Particle sub-type switcher
+                let prev_kind = cfg.kind;
+                ui.label(
+                    egui::RichText::new("Tipe Efek Partikel:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                egui::ComboBox::from_id_salt(("particle_kind_combo", a.id))
+                    .selected_text(cfg.kind.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for &k in ParticleAnimKind::ALL {
+                            ui.selectable_value(&mut cfg.kind, k, k.label());
+                        }
+                    });
+                if cfg.kind != prev_kind {
+                    let keep_always = cfg.always_preview_in_editor;
+                    let keep_wind_dir = cfg.wind_dir_deg;
+                    let keep_wind_spd = cfg.wind_speed_mps;
+                    cfg = ParticleAnimConfig::default_for(cfg.kind);
+                    cfg.always_preview_in_editor = keep_always;
+                    cfg.wind_dir_deg = keep_wind_dir;
+                    cfg.wind_speed_mps = keep_wind_spd;
+                    a.anim_type = cfg.kind.anim_type_str().to_string();
+                    a.duration_sec = ParticleAnimConfig::default_duration_sec(cfg.kind);
+                    state.particle_preview_reset_nonce =
+                        state.particle_preview_reset_nonce.wrapping_add(1);
+                    cfg_changed = true;
+                }
+
+                ui.add_space(4.0);
+                if ui
+                    .checkbox(
+                        &mut cfg.always_preview_in_editor,
+                        "Selalu Nyala di Editor (meski tidak dipilih)",
+                    )
+                    .changed()
+                {
+                    cfg_changed = true;
+                }
+
+                if cfg.kind == ParticleAnimKind::Explosion {
+                    ui.add_space(4.0);
+                    let replay_btn = egui::Button::new(
+                        egui::RichText::new("Putar Ulang Preview Ledakan")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(185, 28, 28))
+                    .min_size(egui::vec2(ui.available_width(), 25.0));
+                    if ui.add(replay_btn).clicked() {
+                        state.particle_preview_reset_nonce =
+                            state.particle_preview_reset_nonce.wrapping_add(1);
+                    }
+                }
+
+                ui.add_space(4.0);
+                let order_pos = state
+                    .anims
+                    .iter()
+                    .position(|x| x.id == a.id)
+                    .map(|i| i + 1)
+                    .unwrap_or(a.sort_order.max(1) as usize);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Urutan Skenario: #{order_pos}  (atur cepat via Up / Down di tab Animasi)"
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+            });
+        },
+    );
+
+    // Card 2: Full 3D Position (Longitude, Latitude, Altitude) + Move Gizmo sync
+    inspector_card(ui, "Posisi 3D (Lng / Lat / Altitude)", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            let [mut lng, mut lat, mut alt] = particle_anim_position(a);
+            let mut pos_changed = false;
+
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Lng", egui::Color32::from_rgb(185, 28, 28));
+                pos_changed |= numeric_spinner(
+                    ui,
+                    ("particle_lng", a.id),
+                    &mut lng,
+                    SpinnerConfig {
+                        min: -180.0,
+                        max: 180.0,
+                        step: 0.00005,
+                        drag_speed: 0.00001,
+                        decimals: 6,
+                        suffix: "",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Lat", egui::Color32::from_rgb(29, 78, 216));
+                pos_changed |= numeric_spinner(
+                    ui,
+                    ("particle_lat", a.id),
+                    &mut lat,
+                    SpinnerConfig {
+                        min: -85.0,
+                        max: 85.0,
+                        step: 0.00005,
+                        drag_speed: 0.00001,
+                        decimals: 6,
+                        suffix: "",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Alt", egui::Color32::from_rgb(21, 128, 61));
+                pos_changed |= numeric_spinner(
+                    ui,
+                    ("particle_alt", a.id),
+                    &mut alt,
+                    SpinnerConfig {
+                        min: -50.0,
+                        max: 2000.0,
+                        step: 0.5,
+                        drag_speed: 0.2,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+
+            if pos_changed {
+                set_particle_anim_position(a, lng, lat, alt);
+            }
+
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(
+                    "Tips: Tarik panah Merah (X), Hijau (Alt/Y), Biru (Z), atau lingkaran Kuning (Free) di peta untuk memindahkan partikel.",
+                )
+                .size(9.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+        });
+    });
+
+    // Card 3: Particle Effect Parameters, Color Presets & Wind
+    inspector_card(
+        ui,
+        &format!("Pengaturan Efek ({})", cfg.kind.short_tag()),
+        true,
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                let radius_lbl = match cfg.kind {
+                    ParticleAnimKind::Explosion => "Radius Ledakan:",
+                    _ => "Radius Sumber:",
+                };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(radius_lbl)
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("particle_radius", a.id),
+                        &mut cfg.radius_m,
+                        SpinnerConfig {
+                            min: 0.3,
+                            max: 150.0,
+                            step: 0.5,
+                            drag_speed: 0.15,
+                            decimals: 1,
+                            suffix: " m",
+                            wrap_around: false,
+                        },
+                    );
+                });
+
+                let height_lbl = match cfg.kind {
+                    ParticleAnimKind::Fire => "Tinggi Lidah Api:",
+                    ParticleAnimKind::Smoke => "Tinggi Kepulan Asap:",
+                    ParticleAnimKind::Explosion => "Tinggi Bola / Jamur:",
+                };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(height_lbl)
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("particle_height", a.id),
+                        &mut cfg.height_m,
+                        SpinnerConfig {
+                            min: 0.5,
+                            max: 250.0,
+                            step: 0.5,
+                            drag_speed: 0.2,
+                            decimals: 1,
+                            suffix: " m",
+                            wrap_around: false,
+                        },
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Intensitas / Kekuatan:")
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut cfg.intensity, 0.2..=3.0)
+                                .fixed_decimals(2)
+                                .suffix("x"),
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
+                    }
+                });
+
+                if matches!(cfg.kind, ParticleAnimKind::Fire | ParticleAnimKind::Smoke) {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Kecepatan Naik:")
+                                .size(11.0)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut cfg.rise_speed, 0.2..=5.0)
+                                    .fixed_decimals(2)
+                                    .suffix("x"),
+                            )
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Lebar Mekar (Spread):")
+                            .size(11.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut cfg.spread, 0.0..=2.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+                // Kind-specific toggles
+                match cfg.kind {
+                    ParticleAnimKind::Fire => {
+                        if ui
+                            .checkbox(&mut cfg.with_smoke, "Asap Gelap di Atas Api")
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                        if ui
+                            .checkbox(&mut cfg.with_embers, "Percikan Bara Terbang (Embers)")
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                    }
+                    ParticleAnimKind::Smoke => {}
+                    ParticleAnimKind::Explosion => {
+                        if ui
+                            .checkbox(
+                                &mut cfg.shockwave_enabled,
+                                "Cincin Gelombang Kejut (Shockwave)",
+                            )
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                        if ui
+                            .checkbox(&mut cfg.with_embers, "Puing & Percikan Api Terbang")
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                        if ui
+                            .checkbox(&mut cfg.with_smoke, "Awan Asap Pasca-Ledakan")
+                            .changed()
+                        {
+                            cfg_changed = true;
+                        }
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Preset Warna:")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                let presets: &[(&str, &str)] = match cfg.kind {
+                    ParticleAnimKind::Fire => &[
+                        ("Api Normal", "#ff6a00"),
+                        ("Merah Pekat", "#dc2626"),
+                        ("Api Kimia Biru", "#38bdf8"),
+                    ],
+                    ParticleAnimKind::Smoke => &[
+                        ("Kebakaran", "#334155"),
+                        ("Gas Air Mata", "#e2e8f0"),
+                        ("Sinyal Merah", "#ef4444"),
+                        ("Sinyal Hijau", "#22c55e"),
+                        ("Sinyal Kuning", "#eab308"),
+                    ],
+                    ParticleAnimKind::Explosion => &[
+                        ("Bom / Granat", "#ff7b00"),
+                        ("Ledakan BBM", "#ef4444"),
+                        ("Flashbang", "#f8fafc"),
+                    ],
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for &(lbl, hex) in presets {
+                        let active = cfg.color_hex.eq_ignore_ascii_case(hex);
+                        let btn = egui::Button::new(
+                            egui::RichText::new(lbl).size(9.5).color(if active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(203, 213, 225)
+                            }),
+                        )
+                        .fill(if active {
+                            egui::Color32::from_rgb(234, 88, 12)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
+                        if ui.add(btn).clicked() {
+                            cfg.color_hex = hex.to_string();
+                            cfg_changed = true;
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+                let prev_hex = cfg.color_hex.clone();
+                color_hex_picker(ui, "Warna Kustom:", &mut cfg.color_hex);
+                if cfg.color_hex != prev_hex {
+                    cfg_changed = true;
+                }
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Pengaruh Angin (Wind Drift):")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Arah Angin (0°=U):")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("particle_wind_dir", a.id),
+                        &mut cfg.wind_dir_deg,
+                        SpinnerConfig {
+                            min: 0.0,
+                            max: 360.0,
+                            step: 15.0,
+                            drag_speed: 1.0,
+                            decimals: 0,
+                            suffix: "°",
+                            wrap_around: true,
+                        },
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Kecepatan Angin:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("particle_wind_spd", a.id),
+                        &mut cfg.wind_speed_mps,
+                        SpinnerConfig {
+                            min: 0.0,
+                            max: 25.0,
+                            step: 0.5,
+                            drag_speed: 0.15,
+                            decimals: 1,
+                            suffix: " m/s",
+                            wrap_around: false,
+                        },
+                    );
+                });
+            });
+        },
+    );
+
+    // Card 4: Duration & Continuous / Repeat Settings
+    inspector_card(ui, "Durasi & Pengulangan (Play Skenario)", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .checkbox(
+                    &mut cfg.continuous,
+                    "Nyala Terus-Menerus (sampai tombol Stop)",
+                )
+                .changed()
+            {
+                cfg_changed = true;
+            }
+            if !cfg.continuous {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Durasi Efek:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    numeric_spinner(
+                        ui,
+                        ("particle_duration", a.id),
+                        &mut a.duration_sec,
+                        SpinnerConfig {
+                            min: 0.5,
+                            max: 600.0,
+                            step: 0.5,
+                            drag_speed: 0.2,
+                            decimals: 1,
+                            suffix: " dtk",
+                            wrap_around: false,
+                        },
+                    );
+                });
+                ui.checkbox(&mut a.replay, "Repeat / Ulangi Otomatis");
+            }
+        });
+    });
+
+    if cfg_changed {
+        write_particle_anim_config(a, &cfg);
+    }
+}
+
+fn draw_water_cannon_inspector_cards(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    route_edit: &mut RouteEditState,
+    a: &mut twg_shared::models::Anim,
+    markers_list: &[(Uuid, String)],
+    editable: bool,
+) {
+    let mut cfg = parse_water_cannon_config(a);
+    let mut cfg_changed = false;
+
+    let linked_name = a
+        .marker_id
+        .and_then(|mid| markers_list.iter().find(|(id, _)| *id == mid))
+        .map(|(_, n)| n.clone());
+
+    // Card 1: Identity, Bound 3D Marker (1-to-1) & Live Preview Status
+    inspector_card(ui, "Shoot: Water Cannon — Unit & Identitas", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            // Live Preview Indicator Banner
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(12, 54, 78))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(
+                            "LIVE PREVIEW AKTIF — Semprotan tampil real-time di peta saat animasi ini dipilih",
+                        )
+                        .size(9.5)
+                        .strong()
+                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
+                });
+            ui.add_space(5.0);
+
+            ui.label("Nama Animasi:");
+            ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
+            ui.add_space(6.0);
+
+            ui.label(
+                egui::RichText::new("Kendaraan / Model 3D Sumber (1 Animasi = 1 Unit):")
+                    .size(11.0)
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
+            ui.add_space(2.0);
+            let is_picking_this = state.tool_mode == ToolMode::PickShootMarker
+                && state.picking_shoot_for_anim_id == Some(a.id);
+            let pick_btn = egui::Button::new(
+                egui::RichText::new(if is_picking_this {
+                    "Klik Model 3D di Peta... (Batal)"
+                } else if linked_name.is_some() {
+                    "Ganti Unit Sumber di Peta"
+                } else {
+                    "Pilih Unit Sumber di Peta"
+                })
+                .size(11.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+            )
+            .fill(if is_picking_this {
+                egui::Color32::from_rgb(180, 83, 9)
+            } else {
+                egui::Color32::from_rgb(2, 132, 199)
+            })
+            .min_size(egui::vec2(ui.available_width(), 26.0));
+            if ui.add(pick_btn).clicked() {
+                if is_picking_this {
+                    state.tool_mode = ToolMode::Select;
+                    state.picking_shoot_for_anim_id = None;
+                } else {
+                    route_edit.clear();
+                    state.picking_marker_for_anim_id = None;
+                    state.picking_shoot_for_anim_id = Some(a.id);
+                    state.tool_mode = ToolMode::PickShootMarker;
+                    state.status_banner = Some(format!(
+                        "Klik 1 Model 3D di peta untuk memindahkan Water Cannon '{}' (Esc batal).",
+                        a.name
+                    ));
+                }
+            }
+            ui.add_space(3.0);
+            egui::ComboBox::from_id_salt(("wc_inspector_marker", a.id))
+                .selected_text(
+                    linked_name
+                        .clone()
+                        .unwrap_or_else(|| "(Belum pilih Model 3D)".to_string()),
+                )
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.marker_id, None, "(Belum terikat)");
+                    for (mid, mname) in markers_list {
+                        ui.selectable_value(&mut a.marker_id, Some(*mid), mname);
+                    }
+                });
+
+            ui.add_space(4.0);
+            let order_pos = state
+                .anims
+                .iter()
+                .position(|x| x.id == a.id)
+                .map(|i| i + 1)
+                .unwrap_or(a.sort_order.max(1) as usize);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Urutan Skenario: #{order_pos}  (atur cepat via Up / Down di tab Animasi)"
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+        });
+    });
+
+    // Card 2: Nozzle Position (Height & Vehicle Roof Offsets)
+    inspector_card(ui, "Posisi Nozzle (Sumber Air)", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Tgi", egui::Color32::from_rgb(21, 128, 61));
+                ui.label(
+                    egui::RichText::new("Tinggi:")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_nozzle_h", a.id),
+                    &mut cfg.nozzle_height_m,
+                    SpinnerConfig {
+                        min: 0.2,
+                        max: 200.0,
+                        step: 0.2,
+                        drag_speed: 0.08,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Dpn", egui::Color32::from_rgb(29, 78, 216));
+                ui.label(
+                    egui::RichText::new("Depan:")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_nozzle_fwd", a.id),
+                    &mut cfg.nozzle_forward_m,
+                    SpinnerConfig {
+                        min: -50.0,
+                        max: 50.0,
+                        step: 0.2,
+                        drag_speed: 0.08,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                axis_badge(ui, "Smp", egui::Color32::from_rgb(185, 28, 28));
+                ui.label(
+                    egui::RichText::new("Samping:")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_nozzle_right", a.id),
+                    &mut cfg.nozzle_right_m,
+                    SpinnerConfig {
+                        min: -50.0,
+                        max: 50.0,
+                        step: 0.2,
+                        drag_speed: 0.08,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+        });
+    });
+
+    // Card 3: Spray Trajectory, Pressure, Dispersion & Liquid Color
+    inspector_card(ui, "Lintasan, Tekanan & Karakter Air", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Panjang / Jangkauan:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_range", a.id),
+                    &mut cfg.range_m,
+                    SpinnerConfig {
+                        min: 2.0,
+                        max: 180.0,
+                        step: 1.0,
+                        drag_speed: 0.3,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Tinggi Lengkungan:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_arc", a.id),
+                    &mut cfg.arc_height_m,
+                    SpinnerConfig {
+                        min: 0.0,
+                        max: 80.0,
+                        step: 0.5,
+                        drag_speed: 0.15,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Kuat / Tekanan:")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_pressure", a.id),
+                    &mut cfg.pressure_bar,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 10.0,
+                        step: 0.5,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " bar",
+                        wrap_around: false,
+                    },
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Arah Semprot (Yaw):")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                cfg_changed |= numeric_spinner(
+                    ui,
+                    ("wc_yaw", a.id),
+                    &mut cfg.yaw_offset_deg,
+                    SpinnerConfig {
+                        min: -180.0,
+                        max: 180.0,
+                        step: 5.0,
+                        drag_speed: 0.5,
+                        decimals: 0,
+                        suffix: "°",
+                        wrap_around: true,
+                    },
+                );
+            });
+
+            ui.add_space(4.0);
+            let mut spread_pct = cfg.spread * 100.0;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Sebaran (Jet ↔ Spray):")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                if ui
+                    .add(
+                        egui::Slider::new(&mut spread_pct, 0.0..=100.0)
+                            .fixed_decimals(0)
+                            .suffix("%"),
+                    )
+                    .changed()
+                {
+                    cfg.spread = (spread_pct / 100.0).clamp(0.0, 1.0);
+                    cfg_changed = true;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Preset Warna Cairan:")
+                    .size(10.5)
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (lbl, hex) in [
+                    ("Air Jernih", "#d8f3ff"),
+                    ("Busa Damkar", "#f8fafc"),
+                    ("Pewarna", "#fef08a"),
+                    ("Biru Taktis", "#38bdf8"),
+                ] {
+                    let active = cfg.color_hex.eq_ignore_ascii_case(hex);
+                    let btn = egui::Button::new(
+                        egui::RichText::new(lbl).size(9.5).color(if active {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(203, 213, 225)
+                        }),
+                    )
+                    .fill(if active {
+                        egui::Color32::from_rgb(2, 132, 199)
+                    } else {
+                        egui::Color32::from_rgb(24, 34, 52)
+                    })
+                    .small();
+                    if ui.add(btn).clicked() {
+                        cfg.color_hex = hex.to_string();
+                        cfg_changed = true;
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            let prev_hex = cfg.color_hex.clone();
+            color_hex_picker(ui, "Warna Kustom:", &mut cfg.color_hex);
+            if cfg.color_hex != prev_hex {
+                cfg_changed = true;
+            }
+        });
+    });
+
+    // Card 4: Automatic Turret Sweep & Duration / Continuous Mode
+    inspector_card(ui, "Sapuan (Sweep) & Durasi", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .checkbox(&mut cfg.sweep_enabled, "Sapuan Otomatis Kiri–Kanan (Sweep)")
+                .changed()
+            {
+                cfg_changed = true;
+            }
+            if cfg.sweep_enabled {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Sudut Sapuan (±):")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("wc_sweep_ang", a.id),
+                        &mut cfg.sweep_angle_deg,
+                        SpinnerConfig {
+                            min: 5.0,
+                            max: 120.0,
+                            step: 5.0,
+                            drag_speed: 0.5,
+                            decimals: 0,
+                            suffix: "°",
+                            wrap_around: false,
+                        },
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Kecepatan Sapuan:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    cfg_changed |= numeric_spinner(
+                        ui,
+                        ("wc_sweep_spd", a.id),
+                        &mut cfg.sweep_speed,
+                        SpinnerConfig {
+                            min: 0.05,
+                            max: 2.5,
+                            step: 0.05,
+                            drag_speed: 0.02,
+                            decimals: 2,
+                            suffix: " Hz",
+                            wrap_around: false,
+                        },
+                    );
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            if ui
+                .checkbox(
+                    &mut cfg.continuous,
+                    "Semprot Terus-Menerus (sampai tombol Stop)",
+                )
+                .changed()
+            {
+                cfg_changed = true;
+            }
+            if !cfg.continuous {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Durasi Semprot:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    numeric_spinner(
+                        ui,
+                        ("wc_duration", a.id),
+                        &mut a.duration_sec,
+                        SpinnerConfig {
+                            min: 1.0,
+                            max: 600.0,
+                            step: 1.0,
+                            drag_speed: 0.25,
+                            decimals: 1,
+                            suffix: " dtk",
+                            wrap_around: false,
+                        },
+                    );
+                });
+                ui.checkbox(&mut a.replay, "Repeat / Ulangi Otomatis");
+            }
+        });
+    });
+
+    if cfg_changed {
+        write_water_cannon_config(a, &cfg);
+    }
 }
 
 fn draw_skenario_inspector(

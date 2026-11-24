@@ -15,10 +15,14 @@ use twg_shared::{
         UpdatePlotLineRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest,
     },
     models::{Anim, Marker, ModelCatalogEntry, TextMarker},
+    particle_anim::{
+        ParticleAnimConfig, is_particle_anim, particle_anim_position,
+    },
     route_formation::{
         ANIM_TYPE_ROUTE_MULTI, ANIM_TYPE_ROUTE_SINGLE, MultiRouteConfig, anim_bound_marker_ids,
         is_multi_route_anim, parse_multi_route_config, write_multi_route_config,
     },
+    shoot_anim::{ANIM_TYPE_SHOOT_WATER_CANNON, WaterCannonConfig},
     ws::TacticalCommand,
 };
 use uuid::Uuid;
@@ -38,8 +42,9 @@ use crate::{
         buildings::TacticalBuildingEntity,
         gizmo::{
             GIZMO_SCREEN_RADIUS_PX, GizmoHandle, GizmoMode, TransformGizmoState,
-            begin_gizmo_drag, compute_gizmo_world_radius, gizmo_mode_for_tool, hit_test_gizmo,
-            marker_quat, marker_world_origin, update_gizmo_drag,
+            begin_gizmo_drag, begin_particle_move_drag, compute_gizmo_world_radius,
+            gizmo_mode_for_tool, hit_test_gizmo, marker_quat, marker_world_origin,
+            particle_anim_world_origin, update_gizmo_drag,
         },
         playback::{PlaybackOverrides, route_estimated_duration_sec},
         polygon_edit::{
@@ -1412,14 +1417,23 @@ pub fn selection_gizmo_system(
     };
 
     let elapsed = time.elapsed_secs();
-    let is_pick_route_mode =
-        !playback.play_test_mode && state.tool_mode == ToolMode::PickRouteMarker;
+    let is_pick_route_mode = !playback.play_test_mode
+        && matches!(
+            state.tool_mode,
+            ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+        );
 
-    // Resolve active Route Animation whose bound marker should be highlighted in Warm Amber/Gold:
-    // either the route currently being bound in PickRouteMarker mode, or the currently selected route!
-    let active_route_anim = if is_pick_route_mode {
+    // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold:
+    // either the animation currently being bound in Pick mode, or the currently selected animation!
+    let active_route_anim = if !playback.play_test_mode
+        && state.tool_mode == ToolMode::PickRouteMarker
+    {
         state
             .picking_marker_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickShootMarker {
+        state
+            .picking_shoot_for_anim_id
             .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
     } else if !playback.play_test_mode
         && let SelectedEntity::Anim(aid) = state.selected
@@ -1684,6 +1698,7 @@ pub fn map_interaction_system(
         poly_edit.clear();
         route_edit.clear();
         state.picking_marker_for_anim_id = None;
+        state.picking_shoot_for_anim_id = None;
         state.dragging_catalog_entry = None;
         state.dragging_basic_mesh = None;
         state.catalog_drop_world_pos = None;
@@ -1813,6 +1828,12 @@ pub fn map_interaction_system(
             return;
         }
         if keys.just_pressed(KeyCode::Escape) {
+            if state.tool_mode == ToolMode::PickShootMarker {
+                state.picking_shoot_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Pemilihan unit Water Cannon dibatalkan.".into());
+                return;
+            }
             if state.tool_mode == ToolMode::PickRouteMarker {
                 let picked_anim = state
                     .picking_marker_for_anim_id
@@ -1859,6 +1880,7 @@ pub fn map_interaction_system(
             state.draft_points_lnglat.clear();
             state.measure_points_lnglat.clear();
             state.picking_marker_for_anim_id = None;
+            state.picking_shoot_for_anim_id = None;
             state.dragging_catalog_entry = None;
             state.dragging_basic_mesh = None;
             state.catalog_drop_world_pos = None;
@@ -1985,12 +2007,16 @@ pub fn map_interaction_system(
         return;
     }
 
-    // Release active transform gizmo drag: mark marker dirty so toolbar Simpan saves all edits
+    // Release active transform gizmo drag: mark marker or particle anim dirty so toolbar Simpan saves all edits
     if (mouse_buttons.just_released(MouseButton::Left) || !mouse_buttons.pressed(MouseButton::Left))
         && let Some(finished) = gizmo_state.active_drag.take()
     {
         if finished.moved {
-            state.dirty_marker_ids.insert(finished.marker_id);
+            if finished.is_particle_anim {
+                state.dirty_anim_ids.insert(finished.marker_id);
+            } else {
+                state.dirty_marker_ids.insert(finished.marker_id);
+            }
             state.status_banner = Some(format!(
                 "{} perubahan belum disimpan — klik Simpan (Ctrl+S) di toolbar",
                 state.unsaved_change_count()
@@ -2109,6 +2135,32 @@ pub fn map_interaction_system(
                         );
                         hit_test_gizmo(cursor_px, mode, origin, rot_quat, radius, camera, cam_gtf)
                     })
+            } else if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
+                && let SelectedEntity::Anim(sel_id) = state.selected
+                && !state.locked_entity_ids.contains(&sel_id)
+            {
+                state
+                    .anims
+                    .iter()
+                    .find(|a| a.id == sel_id && is_particle_anim(a) && !a.geom.is_empty())
+                    .and_then(|a| {
+                        let origin = particle_anim_world_origin(&state, a);
+                        let radius = compute_gizmo_world_radius(
+                            camera,
+                            cam_gtf,
+                            origin,
+                            GIZMO_SCREEN_RADIUS_PX,
+                        );
+                        hit_test_gizmo(
+                            cursor_px,
+                            GizmoMode::Move,
+                            origin,
+                            Quat::IDENTITY,
+                            radius,
+                            camera,
+                            cam_gtf,
+                        )
+                    })
             } else {
                 None
             }
@@ -2119,11 +2171,15 @@ pub fn map_interaction_system(
 
     let hit_opt = cursor_world_ground(&window, camera, cam_gtf);
 
-    // Continuous 3D body / label / route-line hover detection in transform modes & PickRouteMarker
+    // Continuous 3D body / label / route-line hover detection in transform modes & Pick modes
     gizmo_state.hovered_entity = if !poly_edit.is_active()
         && route_edit.hovered.is_none()
         && !route_edit.add_point_on_map_mode
-        && (state.tool_mode.is_transform_tool() || state.tool_mode == ToolMode::PickRouteMarker)
+        && (state.tool_mode.is_transform_tool()
+            || matches!(
+                state.tool_mode,
+                ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+            ))
         && gizmo_state.hovered_handle.is_none()
     {
         let picked = pick_scene_entity(
@@ -2137,7 +2193,10 @@ pub fn map_interaction_system(
             cam_gtf,
             &pick,
         );
-        if state.tool_mode == ToolMode::PickRouteMarker {
+        if matches!(
+            state.tool_mode,
+            ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+        ) {
             match picked {
                 Some(SelectedEntity::Marker(mid)) => Some(SelectedEntity::Marker(mid)),
                 _ => None,
@@ -2380,25 +2439,41 @@ pub fn map_interaction_system(
         }
     }
 
-    // Priority 1: Clicking a handle on the active 3D Transform Gizmo (Move / Rotate / Scale)
+    // Priority 1: Clicking a handle on the active 3D Transform Gizmo (Marker or Particle Animation)
     if !playback.play_test_mode
-        && let (Some(mode), Some(handle), SelectedEntity::Marker(sel_id)) = (
-            gizmo_mode_for_tool(state.tool_mode),
-            gizmo_state.hovered_handle,
-            state.selected,
-        )
-        && let Some(marker) = state
-            .markers
-            .iter()
-            .find(|m| m.id == sel_id && !state.is_marker_locked(m))
-            .cloned()
-        && let Some(drag) =
-            begin_gizmo_drag(&marker, mode, handle, cursor_px, &state, camera, cam_gtf)
+        && let Some(handle) = gizmo_state.hovered_handle
     {
-        gizmo_state.active_drag = Some(drag);
-        gizmo_state.suppress_camera_pan = true;
-        gizmo_state.empty_click_start_px = None;
-        return;
+        if let (Some(mode), SelectedEntity::Marker(sel_id)) =
+            (gizmo_mode_for_tool(state.tool_mode), state.selected)
+            && let Some(marker) = state
+                .markers
+                .iter()
+                .find(|m| m.id == sel_id && !state.is_marker_locked(m))
+                .cloned()
+            && let Some(drag) =
+                begin_gizmo_drag(&marker, mode, handle, cursor_px, &state, camera, cam_gtf)
+        {
+            gizmo_state.active_drag = Some(drag);
+            gizmo_state.suppress_camera_pan = true;
+            gizmo_state.empty_click_start_px = None;
+            return;
+        }
+        if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
+            && let SelectedEntity::Anim(sel_id) = state.selected
+            && !state.locked_entity_ids.contains(&sel_id)
+            && let Some(anim) = state
+                .anims
+                .iter()
+                .find(|a| a.id == sel_id && is_particle_anim(a) && !a.geom.is_empty())
+                .cloned()
+            && let Some(drag) =
+                begin_particle_move_drag(&anim, handle, cursor_px, &state, camera, cam_gtf)
+        {
+            gizmo_state.active_drag = Some(drag);
+            gizmo_state.suppress_camera_pan = true;
+            gizmo_state.empty_click_start_px = None;
+            return;
+        }
     }
 
     match state.tool_mode {
@@ -2460,17 +2535,36 @@ pub fn map_interaction_system(
                     gizmo_state.empty_click_start_px = None;
                 }
                 Some(SelectedEntity::Anim(id)) => {
+                    let is_route_poly = state
+                        .anims
+                        .iter()
+                        .find(|a| a.id == id)
+                        .is_some_and(|a| a.geom.len() >= 2);
+                    let is_part = state
+                        .anims
+                        .iter()
+                        .find(|a| a.id == id)
+                        .is_some_and(is_particle_anim);
                     state.selected = SelectedEntity::Anim(id);
                     state.anim_edit = state.anims.iter().find(|a| a.id == id).cloned();
                     state.marker_edit = None;
                     state.building_edit = None;
                     state.line_edit = None;
                     state.text_edit = None;
-                    if !playback.play_test_mode && !state.locked_entity_ids.contains(&id) {
+                    if is_route_poly
+                        && !playback.play_test_mode
+                        && !state.locked_entity_ids.contains(&id)
+                    {
                         route_edit.editing_anim_id = Some(id);
                         route_edit.selected_waypoint = None;
                         route_edit.add_point_on_map_mode = false;
                         route_edit.active_drag = None;
+                    } else {
+                        route_edit.clear();
+                    }
+                    if is_part {
+                        state.particle_preview_reset_nonce =
+                            state.particle_preview_reset_nonce.wrapping_add(1);
                     }
                     gizmo_state.suppress_camera_pan = true;
                     gizmo_state.empty_click_start_px = None;
@@ -2650,6 +2744,215 @@ pub fn map_interaction_system(
                     state.status_banner = Some(status_msg);
                 }
             }
+        }
+        ToolMode::PickShootMarker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some(marker_name) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| m.name.clone())
+            {
+                if let Some(anim_id) = state.picking_shoot_for_anim_id.take() {
+                    // Rebind an existing Water Cannon animation to a different 3D marker
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        anim.marker_id = Some(marker_id);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name.clone(),
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+                        state.status_banner = Some(format!(
+                            "Water Cannon '{}' dipindahkan ke unit '{marker_name}' — preview aktif di peta!",
+                            updated.name
+                        ));
+                    }
+                } else if let Some(sk) = state.active_skenario.clone() {
+                    // Create a brand-new Water Cannon animation bound to the clicked 3D marker
+                    let auto_h = marker_bounds
+                        .bounds
+                        .get(&marker_id)
+                        .map(|b| (b.world_max.y - b.world_min.y) as f64)
+                        .filter(|&h| h.is_finite() && h >= 0.4)
+                        .map(|h| ((h * 0.96).clamp(0.8, 30.0) * 10.0).round() / 10.0)
+                        .unwrap_or(3.2);
+                    let cfg = WaterCannonConfig {
+                        nozzle_height_m: auto_h,
+                        ..Default::default()
+                    };
+                    let data = serde_json::json!({ "water_cannon": cfg });
+                    let name = if state.new_shoot_name.trim().is_empty() {
+                        format!("Water Cannon — {marker_name}")
+                    } else {
+                        state.new_shoot_name.trim().to_string()
+                    };
+                    let sort_order = (state.anims.len() + 1) as i32;
+
+                    if state.offline_preview {
+                        let now = chrono::Utc::now();
+                        let a = Anim {
+                            id: Uuid::new_v4(),
+                            operasi_id: sk.operasi_id,
+                            skenario_id: sk.id,
+                            marker_id: Some(marker_id),
+                            name: name.clone(),
+                            anim_type: ANIM_TYPE_SHOOT_WATER_CANNON.into(),
+                            sort_order,
+                            speed: 1.0,
+                            duration_sec: 15.0,
+                            replay: false,
+                            autoplay: false,
+                            geom: Vec::new(),
+                            data,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        let aid = a.id;
+                        state.selected = SelectedEntity::Anim(aid);
+                        state.anim_edit = Some(a.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.anims.push(a);
+                        state.sort_anims_by_order();
+                        state.status_banner = Some(format!(
+                            "Water Cannon '{name}' dibuat pada '{marker_name}' — live preview aktif di peta!"
+                        ));
+                    } else if let Some(auth) = current_auth(&state) {
+                        api.send(ApiCommand::CreateAnim {
+                            auth,
+                            req: CreateAnimRequest {
+                                operasi_id: sk.operasi_id,
+                                skenario_id: sk.id,
+                                marker_id: Some(marker_id),
+                                name: name.clone(),
+                                anim_type: ANIM_TYPE_SHOOT_WATER_CANNON.into(),
+                                sort_order,
+                                speed: 1.0,
+                                duration_sec: 15.0,
+                                replay: false,
+                                autoplay: false,
+                                geom: Vec::new(),
+                                data,
+                            },
+                        });
+                    }
+                    state.new_shoot_name = format!("Water Cannon {}", state.anims.len() + 2);
+                }
+                state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
+        ToolMode::PlaceParticle => {
+            if playback.play_test_mode {
+                return;
+            }
+            let Some(hit) = hit_opt else {
+                return;
+            };
+            let Some(sk) = state.active_skenario.clone() else {
+                return;
+            };
+            let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
+            let kind = state.new_particle_kind;
+            let cfg = ParticleAnimConfig::default_for(kind);
+            let data = serde_json::json!({ "particle": cfg });
+            let part_count = state
+                .anims
+                .iter()
+                .filter(|a| is_particle_anim(a))
+                .count()
+                + 1;
+            let name = if state.new_particle_name.trim().is_empty() {
+                kind.default_name(part_count)
+            } else {
+                state.new_particle_name.trim().to_string()
+            };
+            let sort_order = (state.anims.len() + 1) as i32;
+            let duration_sec = ParticleAnimConfig::default_duration_sec(kind);
+
+            if state.offline_preview {
+                let now = chrono::Utc::now();
+                let a = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: kind.anim_type_str().into(),
+                    sort_order,
+                    speed: 1.0,
+                    duration_sec,
+                    replay: false,
+                    autoplay: false,
+                    geom: vec![[lng, lat, 0.0]],
+                    data,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let aid = a.id;
+                state.selected = SelectedEntity::Anim(aid);
+                state.anim_edit = Some(a.clone());
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.anims.push(a);
+                state.sort_anims_by_order();
+                state.particle_preview_reset_nonce =
+                    state.particle_preview_reset_nonce.wrapping_add(1);
+                state.status_banner = Some(format!(
+                    "Partikel '{name}' diletakkan — geser posisi via Move Gizmo (X / Alt / Z) atau ubah setting di Inspector!"
+                ));
+            } else if let Some(auth) = current_auth(&state) {
+                api.send(ApiCommand::CreateAnim {
+                    auth,
+                    req: CreateAnimRequest {
+                        operasi_id: sk.operasi_id,
+                        skenario_id: sk.id,
+                        marker_id: None,
+                        name: name.clone(),
+                        anim_type: kind.anim_type_str().into(),
+                        sort_order,
+                        speed: 1.0,
+                        duration_sec,
+                        replay: false,
+                        autoplay: false,
+                        geom: vec![[lng, lat, 0.0]],
+                        data,
+                    },
+                });
+            }
+            state.new_particle_name = kind.default_name(part_count + 1);
+            state.tool_mode = ToolMode::Select;
+            gizmo_state.suppress_camera_pan = true;
         }
         ToolMode::Measure => {
             let Some(hit) = hit_opt else {
@@ -3312,7 +3615,32 @@ fn pick_scene_entity(
         }
     }
 
-    // Priority 2c: Direct click on any visible, unlocked Route Animation polyline or waypoint
+    // Priority 2c: Direct click on any visible, unlocked Particle Animation pin on the map
+    if !playback.play_test_mode && state.show_gizmos {
+        let mut best_part: Option<(Uuid, f32)> = None;
+        for anim in &state.anims {
+            if !is_particle_anim(anim)
+                || anim.geom.is_empty()
+                || state.hidden_entity_ids.contains(&anim.id)
+                || state.locked_entity_ids.contains(&anim.id)
+            {
+                continue;
+            }
+            let p = particle_anim_position(anim);
+            let local = state.geo_anchor.lng_lat_alt_to_local(p[0], p[1], p[2]);
+            if let Ok(scr) = camera.world_to_viewport(cam_gtf, Vec3::from_array(local)) {
+                let d = cursor_px.distance(scr);
+                if d <= 22.0 && best_part.is_none_or(|cur| d < cur.1) {
+                    best_part = Some((anim.id, d));
+                }
+            }
+        }
+        if let Some((aid, _)) = best_part {
+            return Some(SelectedEntity::Anim(aid));
+        }
+    }
+
+    // Priority 2d: Direct click on any visible, unlocked Route Animation polyline or waypoint
     if !playback.play_test_mode
         && state.show_gizmos
         && let Some(aid) = hit_test_any_route_line(cursor_px, state, camera, cam_gtf)

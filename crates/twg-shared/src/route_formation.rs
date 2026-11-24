@@ -497,9 +497,20 @@ pub fn anim_bound_marker_ids(anim: &Anim) -> Vec<Uuid> {
     }
 }
 
-/// Returns `true` if the animation has a valid polyline (>= 2 waypoints) and at least one
-/// bound marker that currently exists in `markers`.
+/// Returns `true` if the animation has all required targets & geometry to be played in
+/// `Play Skenario`:
+/// - Particle animations require a placed position (`geom[0]`).
+/// - Shoot animations require a bound marker that currently exists in `markers` (no route polyline).
+/// - Route animations require `>= 2` waypoints and at least one existing bound marker.
 pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
+    if crate::particle_anim::is_particle_anim(anim) {
+        return !anim.geom.is_empty();
+    }
+    if crate::shoot_anim::is_shoot_anim(anim) {
+        return anim
+            .marker_id
+            .is_some_and(|id| markers.iter().any(|m| m.id == id));
+    }
     if anim.geom.len() < 2 {
         return false;
     }
