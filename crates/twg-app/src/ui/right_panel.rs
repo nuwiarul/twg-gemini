@@ -3712,7 +3712,7 @@ fn draw_particle_inspector_cards(
                         ("Api Kimia Biru", "#38bdf8"),
                     ],
                     ParticleAnimKind::Smoke => &[
-                        ("Kebakaran", "#334155"),
+                        ("Kebakaran", "#475569"),
                         ("Gas Air Mata", "#e2e8f0"),
                         ("Sinyal Merah", "#ef4444"),
                         ("Sinyal Hijau", "#22c55e"),
