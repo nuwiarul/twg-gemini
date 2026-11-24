@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: docker.io/library/postgres:18.4-alpine
+    container_name: twg-rust-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-twg_rust}
+      POSTGRES_USER: ${POSTGRES_USER:-twg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twg_dev_password}
+    ports:
+      - "${TWG_DB_PORT:-5435}:5432"
+    volumes:
+      - twg_rust_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-twg} -d ${POSTGRES_DB:-twg_rust}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  twg_rust_pgdata:

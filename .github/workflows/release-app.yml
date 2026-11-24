@@ -1,0 +1,153 @@
+name: Build & Package TWG 3D (Server + Desktop)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "Default VPS API URL embedded in twg-app launchers"
+        required: true
+        default: "https://twg.domain-anda.com"
+        type: string
+      version:
+        description: "Package version label"
+        required: true
+        default: "0.1.0"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      server_url: ${{ steps.vars.outputs.server_url }}
+    steps:
+      - id: vars
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="${{ inputs.version || '0.1.0' }}"
+          fi
+          URL="${{ inputs.server_url || vars.TWG_DEFAULT_API_URL || 'https://twg.domain-anda.com' }}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "server_url=${URL}" >> "$GITHUB_OUTPUT"
+
+  build-server-linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build twg-server (release)
+        run: cargo build --release -p twg-server
+      - name: Package twg-server bundle
+        run: |
+          VER="${{ needs.meta.outputs.version }}"
+          STAGE="dist/twg-server-linux-x86_64"
+          mkdir -p "$STAGE/scripts" "$STAGE/packaging"
+          install -m 0755 target/release/twg-server "$STAGE/twg-server"
+          install -m 0644 scripts/gltf-pipeline.mjs "$STAGE/scripts/gltf-pipeline.mjs"
+          install -m 0755 scripts/convert-single-model.mjs "$STAGE/scripts/convert-single-model.mjs"
+          cp -r packaging/server/* "$STAGE/packaging/"
+          tar -C dist -czf "dist/twg-server-linux-x86_64-v${VER}.tar.gz" twg-server-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twg-server-linux-x86_64
+          path: dist/twg-server-linux-x86_64-*.tar.gz
+
+  build-app-windows:
+    needs: meta
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build & package twg-app (Windows x64 ZIP + Inno Setup)
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/windows/package-windows.ps1 `
+            -ServerUrl "${{ needs.meta.outputs.server_url }}" `
+            -Version "${{ needs.meta.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twg-app-windows-x64
+          path: |
+            dist/twg-app-windows-x64-*.zip
+            dist/TWG-3D-Setup-x64-*.exe
+
+  build-app-linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Bevy & rfd system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libx11-dev libasound2-dev libudev-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libvulkan-dev libgtk-3-dev
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build & package twg-app (Linux tar.gz + deb)
+        run: |
+          bash packaging/linux/package-linux.sh \
+            --server-url "${{ needs.meta.outputs.server_url }}" \
+            --version "${{ needs.meta.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twg-app-linux-x86_64
+          path: |
+            dist/twg-app-linux-*.tar.gz
+            dist/twg-app_*.deb
+
+  build-app-macos:
+    needs: meta
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build & package twg-app (macOS Universal .app + .dmg)
+        run: |
+          bash packaging/macos/package-macos.sh \
+            --arch universal \
+            --server-url "${{ needs.meta.outputs.server_url }}" \
+            --version "${{ needs.meta.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twg-app-macos-universal
+          path: dist/TWG-3D-macOS-universal-*.dmg
+
+  publish-release:
+    if: github.ref_type == 'tag'
+    needs:
+      - build-server-linux
+      - build-app-windows
+      - build-app-linux
+      - build-app-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-artifacts/*

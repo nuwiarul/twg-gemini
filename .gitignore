@@ -1,0 +1,11 @@
+/target
+/dist
+**/*.rs.bk
+.env
+*.log
+.tile_cache/
+client_assets/
+assets/uploads/*
+!assets/uploads/.gitkeep
+!assets/models/
+!assets/catalog/

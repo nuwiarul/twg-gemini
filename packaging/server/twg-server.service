@@ -1,0 +1,21 @@
+[Unit]
+Description=Tactical Wall Game 3D Backend Server (twg-server)
+After=network-online.target docker.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twg
+Group=twg
+# Required so scripts/convert-single-model.mjs is resolved automatically
+WorkingDirectory=/opt/twg-server
+EnvironmentFile=/opt/twg-server/.env
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/twg-server/twg-server
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

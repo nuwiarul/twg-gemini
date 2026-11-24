@@ -1,0 +1,40 @@
+[package]
+name = "twg-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+twg-shared = { path = "../twg-shared" }
+bevy.workspace = true
+bevy_egui.workspace = true
+reqwest.workspace = true
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+crossbeam-channel.workspace = true
+image.workspace = true
+earcutr.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rfd = "0.15"
+rodio = { version = "0.22.2", default-features = false, features = ["minimp3"] }
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[package.metadata.deb]
+maintainer = "TWG Team <admin@twg.local>"
+copyright = "2026, TWG Team"
+section = "graphics"
+priority = "optional"
+depends = "$auto, libvulkan1, libasound2 | libasound2t64, xdg-desktop-portal"
+assets = [
+    ["target/release/twg-app", "usr/lib/twg-app/twg-app-bin", "755"],
+    ["packaging/linux/twg-app", "usr/bin/twg-app", "755"],
+    ["packaging/linux/twg-app.desktop", "usr/share/applications/twg-app.desktop", "644"],
+]

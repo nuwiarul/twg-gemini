@@ -1,0 +1,27 @@
+[package]
+name = "twg-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+twg-shared = { path = "../twg-shared" }
+axum.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+tower-http.workspace = true
+pasetors.workspace = true
+argon2.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dotenvy.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures-util.workspace = true
+image.workspace = true
