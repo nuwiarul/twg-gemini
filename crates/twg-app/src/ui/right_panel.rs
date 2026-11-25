@@ -2748,9 +2748,10 @@ fn draw_editor_preview_card(
                         } else {
                             (launched as f32) / (total_steps as f32)
                         };
+                        let bar_w = ui.available_width().max(80.0);
                         ui.add(
-                            egui::ProgressBar::new(frac)
-                                .desired_width(f32::INFINITY)
+                            egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                                .desired_width(bar_w)
                                 .desired_height(15.0)
                                 .text(format!(
                                     "Step {launched}/{total_steps} • t = {elapsed:.1} dtk"
@@ -2773,9 +2774,10 @@ fn draw_editor_preview_card(
                     let speed = a.speed.max(0.1);
                     let elapsed = dist / speed;
                     let total_sec = route_estimated_duration_sec(&a.geom, speed);
+                    let bar_w = ui.available_width().max(80.0);
                     ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(f32::INFINITY)
+                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                            .desired_width(bar_w)
                             .desired_height(15.0)
                             .text(format!(
                                 "{dist:.1}/{total_len:.1} m • {elapsed:.1}/{total_sec:.1} dtk"
@@ -8702,4 +8704,54 @@ fn draw_live_ops_section(
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_preview_card_renders_progress_bar_without_nan_panic() {
+        let now = chrono::Utc::now();
+        let route_id = Uuid::new_v4();
+        let marker_id = Uuid::new_v4();
+        let route_anim = twg_shared::models::Anim {
+            id: route_id,
+            operasi_id: Uuid::new_v4(),
+            skenario_id: Uuid::new_v4(),
+            marker_id: Some(marker_id),
+            name: "Rute Uji".into(),
+            anim_type: "route".into(),
+            sort_order: 0,
+            speed: 10.0,
+            duration_sec: 10.0,
+            replay: false,
+            autoplay: false,
+            geom: vec![[115.216, -8.670, 0.0], [115.217, -8.671, 0.0]],
+            data: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let mut state = AppState::new(std::env::temp_dir());
+        let mut playback = PlaybackState::default();
+        playback.start_editor_preview(route_id);
+        let mut route_edit = RouteEditState::default();
+
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::Panel::right("test_right_panel")
+                .default_size(320.0)
+                .show(ui, |ui| {
+                    draw_editor_preview_card(
+                        ui,
+                        &mut state,
+                        &mut playback,
+                        &mut route_edit,
+                        &route_anim,
+                    );
+                });
+        });
+        out.textures_delta.clear();
+    }
 }

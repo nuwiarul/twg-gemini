@@ -181,9 +181,10 @@ pub fn draw_login_screen(
                                                 0.0
                                             };
                                             ui.add_space(4.0);
+                                            let bar_w = ui.available_width().max(120.0);
                                             ui.add(
-                                                egui::ProgressBar::new(frac)
-                                                    .desired_width(f32::INFINITY)
+                                                egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                                                    .desired_width(bar_w)
                                                     .text(if state.sync_status.checking {
                                                         "Mengecek manifest server...".to_string()
                                                     } else {
