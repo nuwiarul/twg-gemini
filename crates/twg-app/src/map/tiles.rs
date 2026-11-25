@@ -18,7 +18,7 @@ use twg_shared::{
 
 use crate::{
     map::camera::TacticalCamera,
-    state::{AppScreen, AppState},
+    state::AppState,
 };
 
 const MAX_ACTIVE_TILES: usize = 180;
@@ -283,8 +283,7 @@ pub fn tile_streaming_system(
         tile_mgr.spawned.insert(loaded.key, entity);
     }
 
-    let map_visible =
-        state.screen == AppScreen::PlotSkenario || state.is_skenario_map_preview_active();
+    let map_visible = state.is_3d_map_screen() || state.is_skenario_map_preview_active();
     let wanted_provider = if map_visible && state.active_map_mode == MapMode::Outdoor {
         TileProvider::from_layer(state.active_base_layer)
     } else {

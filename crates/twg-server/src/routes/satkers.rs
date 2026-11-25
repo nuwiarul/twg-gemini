@@ -19,8 +19,10 @@ pub async fn list_satkers(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<ApiResponse<Vec<Satker>>>> {
-    if auth.role.as_str() == "user" {
-        return Err(AppError::Forbidden("satkers listing is blocked for user role".into()));
+    if auth.role.as_str() == "user" || auth.role.is_big_screen_only_role() {
+        return Err(AppError::Forbidden(
+            "Akses daftar satker dibatasi untuk role ini".into(),
+        ));
     }
 
     let rows = if auth.role.is_satker_role() {
@@ -70,8 +72,20 @@ pub async fn create_satker(
     Json(req): Json<CreateSatkerRequest>,
 ) -> AppResult<Json<ApiResponse<Satker>>> {
     auth.require_super_admin_write()?;
-    if req.code.trim().is_empty() || req.name.trim().is_empty() {
-        return Err(AppError::BadRequest("code and name are required".into()));
+    let code = req.code.trim();
+    let name = req.name.trim();
+    if code.is_empty() || name.is_empty() {
+        return Err(AppError::BadRequest("Kode dan nama satker wajib diisi".into()));
+    }
+    let dup: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM satkers WHERE LOWER(code) = LOWER($1))")
+            .bind(code)
+            .fetch_one(&state.db)
+            .await?;
+    if dup {
+        return Err(AppError::BadRequest(format!(
+            "Kode satker '{code}' sudah digunakan"
+        )));
     }
 
     let row = sqlx::query(
@@ -100,6 +114,23 @@ pub async fn update_satker(
     Json(req): Json<UpdateSatkerRequest>,
 ) -> AppResult<Json<ApiResponse<Satker>>> {
     auth.require_super_admin_write()?;
+    let code = req.code.trim();
+    let name = req.name.trim();
+    if code.is_empty() || name.is_empty() {
+        return Err(AppError::BadRequest("Kode dan nama satker wajib diisi".into()));
+    }
+    let dup: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM satkers WHERE LOWER(code) = LOWER($1) AND id <> $2)",
+    )
+    .bind(code)
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    if dup {
+        return Err(AppError::BadRequest(format!(
+            "Kode satker '{code}' sudah digunakan"
+        )));
+    }
     let row = sqlx::query(
         r#"
         UPDATE satkers

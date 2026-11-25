@@ -41,7 +41,7 @@ pub fn sync_buildings_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut existing_q: Query<(Entity, &TacticalBuildingEntity, &mut Visibility)>,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         for (entity, _, _) in &existing_q {
             commands.entity(entity).despawn();
         }

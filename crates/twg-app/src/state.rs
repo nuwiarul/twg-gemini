@@ -7,8 +7,8 @@ use twg_shared::{
     models::{
         Alur, Anim, BaseLayer, Building, LocationPreset, MapMode, Marker, MediaAssetDto,
         MediaAssetType, ModelAssetDto, ModelAssetType, ModelCatalogEntry, ModelCategoryCount,
-        ModelSyncManifest, Operasi, Particle, PlotLine, Satker, Skenario, TextMarker, UserDto,
-        default_model_category_counts,
+        ModelSyncManifest, Operasi, Particle, PlotLine, Satker, Skenario, TacticalOperasiCard,
+        TextMarker, UserDto, UserRole, default_model_category_counts,
     },
     ws::{OnlineOperator, TacticalCommandBroadcast},
 };
@@ -34,7 +34,253 @@ pub enum AppScreen {
     Operasis,
     Skenarios,
     PlotSkenario,
+    Tactical,
+    LayarBesar,
+    Satkers,
+    Users,
     Assets,
+    Profile,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProfileFormState {
+    pub name: String,
+    pub profile_submitting: bool,
+    pub profile_error: Option<String>,
+    pub profile_success: Option<String>,
+
+    pub old_password: String,
+    pub new_password: String,
+    pub confirm_password: String,
+    pub show_old_password: bool,
+    pub show_new_password: bool,
+    pub show_confirm_password: bool,
+    pub password_submitting: bool,
+    pub password_error: Option<String>,
+    pub password_success: Option<String>,
+}
+
+impl ProfileFormState {
+    pub fn load_from_user(&mut self, user: &UserDto) {
+        self.name = user.name.clone();
+        self.profile_error = None;
+        self.profile_success = None;
+        self.old_password.clear();
+        self.new_password.clear();
+        self.confirm_password.clear();
+        self.show_old_password = false;
+        self.show_new_password = false;
+        self.show_confirm_password = false;
+        self.password_error = None;
+        self.password_success = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaySessionMode {
+    /// Play Skenario launched from Plot Editor: 100% local preview (never broadcasts or receives live tactical sync).
+    #[default]
+    LocalPreview,
+    /// Play Skenario launched from Tactical / Simulasi: live realtime sync across peers & Layar Besar.
+    TacticalLive,
+    /// Fullscreen read-only Layar Besar display driven exclusively by remote WebSocket commands.
+    BigScreen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayPanelTab {
+    #[default]
+    Animasi,
+    Skenario,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SatkerModalMode {
+    #[default]
+    None,
+    Create,
+    Edit(Uuid),
+    DeleteConfirm(Satker),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SatkerTableState {
+    pub satkers: Vec<Satker>,
+    pub search: String,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub modal_mode: SatkerModalMode,
+    pub form_code: String,
+    pub form_name: String,
+    pub form_is_active: bool,
+    pub submitting: bool,
+    pub form_error: Option<String>,
+}
+
+impl SatkerTableState {
+    pub fn open_create(&mut self) {
+        self.modal_mode = SatkerModalMode::Create;
+        self.form_code.clear();
+        self.form_name.clear();
+        self.form_is_active = true;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_edit(&mut self, s: &Satker) {
+        self.modal_mode = SatkerModalMode::Edit(s.id);
+        self.form_code = s.code.clone();
+        self.form_name = s.name.clone();
+        self.form_is_active = s.is_active;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_delete(&mut self, s: &Satker) {
+        self.modal_mode = SatkerModalMode::DeleteConfirm(s.clone());
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn close_modal(&mut self) {
+        self.modal_mode = SatkerModalMode::None;
+        self.submitting = false;
+        self.form_error = None;
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum UserModalMode {
+    #[default]
+    None,
+    Create,
+    Edit(Uuid),
+    DeleteConfirm(Box<UserDto>),
+}
+
+#[derive(Debug, Clone)]
+pub struct UserTableState {
+    pub users: Vec<UserDto>,
+    pub search: String,
+    pub filter_role: Option<UserRole>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub modal_mode: UserModalMode,
+    pub form_name: String,
+    pub form_username: String,
+    pub form_password: String,
+    pub form_show_password: bool,
+    pub form_role: UserRole,
+    pub form_satker_id: Option<Uuid>,
+    pub submitting: bool,
+    pub form_error: Option<String>,
+}
+
+impl Default for UserTableState {
+    fn default() -> Self {
+        Self {
+            users: Vec::new(),
+            search: String::new(),
+            filter_role: None,
+            loading: false,
+            error: None,
+            modal_mode: UserModalMode::None,
+            form_name: String::new(),
+            form_username: String::new(),
+            form_password: String::new(),
+            form_show_password: false,
+            form_role: UserRole::User,
+            form_satker_id: None,
+            submitting: false,
+            form_error: None,
+        }
+    }
+}
+
+impl UserTableState {
+    pub fn open_create(&mut self, default_role: UserRole, default_satker_id: Option<Uuid>) {
+        self.modal_mode = UserModalMode::Create;
+        self.form_name.clear();
+        self.form_username.clear();
+        self.form_password.clear();
+        self.form_show_password = false;
+        self.form_role = default_role;
+        self.form_satker_id = default_satker_id;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_edit(&mut self, u: &UserDto) {
+        self.modal_mode = UserModalMode::Edit(u.id);
+        self.form_name = u.name.clone();
+        self.form_username = u.username.clone();
+        self.form_password.clear();
+        self.form_show_password = false;
+        self.form_role = u.role;
+        self.form_satker_id = u.satker_id;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_delete(&mut self, u: &UserDto) {
+        self.modal_mode = UserModalMode::DeleteConfirm(Box::new(u.clone()));
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn close_modal(&mut self) {
+        self.modal_mode = UserModalMode::None;
+        self.submitting = false;
+        self.form_error = None;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TacticalPageState {
+    pub cards: Vec<TacticalOperasiCard>,
+    pub page: i64,
+    pub per_page: i64,
+    pub total: i64,
+    pub search: String,
+    pub applied_search: String,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Set when opening a scenario from Tactical / Simulasi so BundleLoaded transitions into TacticalLive Play Skenario.
+    pub pending_open_tactical_id: Option<Uuid>,
+    /// Whether opening/reloading this scenario should also broadcast `load_skenario` / `reload_skenario` to Layar Besar.
+    pub pending_broadcast_big_screen: Option<&'static str>,
+    /// Skenarios of the currently active Operasi displayed in the "Skenario" tab during Play Skenario Tactical.
+    pub active_operasi_skenarios: Vec<Skenario>,
+    pub active_operasi_name: String,
+    pub play_panel_tab: PlayPanelTab,
+}
+
+impl Default for TacticalPageState {
+    fn default() -> Self {
+        Self {
+            cards: Vec::new(),
+            page: 1,
+            per_page: 6,
+            total: 0,
+            search: String::new(),
+            applied_search: String::new(),
+            loading: false,
+            error: None,
+            pending_open_tactical_id: None,
+            pending_broadcast_big_screen: None,
+            active_operasi_skenarios: Vec::new(),
+            active_operasi_name: String::new(),
+            play_panel_tab: PlayPanelTab::Animasi,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BigScreenState {
+    pub loaded_by_actor: Option<String>,
+    pub pending_skenario_id: Option<Uuid>,
+    pub pending_camera_payload: Option<serde_json::Value>,
+    pub last_event_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +376,8 @@ pub enum SkenarioModalMode {
     None,
     Create,
     Edit(Uuid),
+    Copy(Box<Skenario>),
+    Move(Box<Skenario>),
     DeleteConfirm(Box<Skenario>),
 }
 
@@ -278,6 +526,25 @@ impl SkenarioTableState {
         self.form_grid_size_m = sk.indoor_config.grid_size_m.max(1.0);
         self.map_preview_dirty = true;
         self.map_preview_snap = true;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_copy(&mut self, sk: &Skenario) {
+        self.modal_mode = SkenarioModalMode::Copy(Box::new(sk.clone()));
+        self.form_operasi_id = Some(sk.operasi_id);
+        self.form_name = format!("{} (Salinan)", sk.name);
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_move(&mut self, sk: &Skenario) {
+        self.modal_mode = SkenarioModalMode::Move(Box::new(sk.clone()));
+        self.form_operasi_id = self
+            .operasi_options
+            .iter()
+            .find(|o| o.id != sk.operasi_id)
+            .map(|o| o.id);
         self.submitting = false;
         self.form_error = None;
     }
@@ -554,12 +821,14 @@ pub struct CategoryFormState {
     pub new_supports_idle_walk: bool,
     pub new_default_scale: f64,
     pub new_sort_order: i32,
+    pub new_play_behavior: twg_shared::models::CategoryPlayBehavior,
 
     pub editing_slug: Option<String>,
     pub edit_name: String,
     pub edit_supports_idle_walk: bool,
     pub edit_default_scale: f64,
     pub edit_sort_order: i32,
+    pub edit_play_behavior: twg_shared::models::CategoryPlayBehavior,
 
     pub confirm_delete_slug: Option<String>,
     pub submitting: bool,
@@ -576,11 +845,13 @@ impl Default for CategoryFormState {
             new_supports_idle_walk: false,
             new_default_scale: 0.1,
             new_sort_order: 80,
+            new_play_behavior: twg_shared::models::CategoryPlayBehavior::RtsUnit,
             editing_slug: None,
             edit_name: String::new(),
             edit_supports_idle_walk: false,
             edit_default_scale: 0.1,
             edit_sort_order: 80,
+            edit_play_behavior: twg_shared::models::CategoryPlayBehavior::RtsUnit,
             confirm_delete_slug: None,
             submitting: false,
             error: None,
@@ -707,6 +978,8 @@ pub enum ToolMode {
     DrawRoute,
     PickRouteMarker,
     PickShootMarker,
+    PickPointerMarker,
+    PickSpawnHideMarker,
     PlaceParticle,
     Measure,
 }
@@ -725,6 +998,8 @@ impl ToolMode {
             Self::DrawRoute => "Draw Route",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
+            Self::PickPointerMarker => "Pilih Target Panah",
+            Self::PickSpawnHideMarker => "Pilih Objek Spawn/Hide",
             Self::PlaceParticle => "Letakkan Partikel",
             Self::Measure => "Measure",
         }
@@ -754,6 +1029,7 @@ pub enum AnimCategory {
     Shoot,
     Particle,
     SpawnHide,
+    Group,
     Other,
 }
 
@@ -763,6 +1039,7 @@ impl AnimCategory {
         Self::Shoot,
         Self::Particle,
         Self::SpawnHide,
+        Self::Group,
         Self::Other,
     ];
 
@@ -772,6 +1049,7 @@ impl AnimCategory {
             Self::Shoot => "Shoot",
             Self::Particle => "Particle",
             Self::SpawnHide => "Spawn & Hide",
+            Self::Group => "Grup",
             Self::Other => "Lainnya",
         }
     }
@@ -786,7 +1064,21 @@ impl AnimCategory {
             {
                 Self::Particle
             }
-            "spawn_hide" => Self::SpawnHide,
+            s if s == "spawn_hide"
+                || s.starts_with("spawn_hide_")
+                || matches!(s, "spawn" | "hide") =>
+            {
+                Self::SpawnHide
+            }
+            s if s == "group"
+                || s.starts_with("group_")
+                || matches!(s, "combine" | "sequence") =>
+            {
+                Self::Group
+            }
+            s if s == "pointer_arrow" || s.starts_with("pointer_") || s.starts_with("other_") => {
+                Self::Other
+            }
             _ => Self::Route,
         }
     }
@@ -844,11 +1136,27 @@ pub struct AnimRuntimeTrack {
     pub distance_m: f64,
     pub total_length_m: f64,
     pub has_pose_override: bool,
+    /// Monotonic trigger sequence incremented each time `play_anim` starts this track,
+    /// used to deterministically resolve last-action-wins when Spawn & Hide target the same marker.
+    pub trigger_seq: u64,
+    /// Number of full cycles completed during the current run (increments on `replay` wrap-around
+    /// AND when reaching `Finished`). Enables `Sequence` to advance after 1 cycle of a `repeat` child.
+    pub completed_cycles: u32,
+    /// Group runtime cursor (`Combine` / `Sequence`): count of steps already launched (`0..=items.len()`).
+    pub group_launched_count: usize,
+    /// Group elapsed seconds when the most recently launched step started.
+    pub group_last_step_start_sec: f64,
+    /// Group elapsed seconds when the previous step first reached completion (used for `WaitComplete` + gap).
+    pub group_prev_done_at_sec: Option<f64>,
+    /// Snapshot of child IDs launched by this group run for synchronized Pause / Resume / Stop.
+    pub group_owned_children: Vec<Uuid>,
 }
 
 #[derive(Resource)]
 pub struct PlaybackState {
     pub play_test_mode: bool,
+    /// Non-destructive Plot-Editor preview for a selected Route or Group animation (runs without entering Play Skenario).
+    pub editor_preview_anim_id: Option<Uuid>,
     pub playing: bool,
     pub play_all_anims: bool,
     pub active_anim_id: Option<Uuid>,
@@ -857,13 +1165,16 @@ pub struct PlaybackState {
     pub loop_anim: bool,
     pub hide_gizmos_in_play: bool,
     pub tracks: HashMap<Uuid, AnimRuntimeTrack>,
+    pub next_trigger_seq: u64,
     pub play_panel_category: Option<AnimCategory>,
+    pub play_panel_search: String,
 }
 
 impl Default for PlaybackState {
     fn default() -> Self {
         Self {
             play_test_mode: false,
+            editor_preview_anim_id: None,
             playing: false,
             play_all_anims: true,
             active_anim_id: None,
@@ -872,19 +1183,53 @@ impl Default for PlaybackState {
             loop_anim: false,
             hide_gizmos_in_play: true,
             tracks: HashMap::new(),
+            next_trigger_seq: 0,
             play_panel_category: None,
+            play_panel_search: String::new(),
         }
     }
 }
 
 impl PlaybackState {
+    /// Returns `true` when either full Play Skenario or a Plot-Editor Route/Group preview is active.
+    pub fn is_playback_active(&self) -> bool {
+        self.play_test_mode || self.editor_preview_anim_id.is_some()
+    }
+
+    /// Returns `true` when Plot Editor is actively previewing `anim_id`.
+    pub fn is_previewing_anim(&self, anim_id: Uuid) -> bool {
+        !self.play_test_mode && self.editor_preview_anim_id == Some(anim_id)
+    }
+
+    /// Starts (or restarts) a non-destructive Plot-Editor preview for `anim_id` (Route or Group).
+    pub fn start_editor_preview(&mut self, anim_id: Uuid) {
+        self.play_test_mode = false;
+        self.tracks.clear();
+        self.next_trigger_seq = 0;
+        self.editor_preview_anim_id = Some(anim_id);
+        self.play_anim(anim_id);
+    }
+
+    /// Stops any active Plot-Editor Route/Group preview and snaps all markers back to resting positions.
+    pub fn stop_editor_preview(&mut self) {
+        self.editor_preview_anim_id = None;
+        if !self.play_test_mode {
+            self.playing = false;
+            self.tracks.clear();
+            self.next_trigger_seq = 0;
+        }
+    }
+
     /// Enters Play Skenario mode with all animations ready (Idle/Stopped) in the Animation Panel.
     pub fn enter_play_mode(&mut self) {
+        self.editor_preview_anim_id = None;
         self.play_test_mode = true;
         self.playing = false;
         self.elapsed_sec = 0.0;
         self.hide_gizmos_in_play = true;
         self.tracks.clear();
+        self.next_trigger_seq = 0;
+        self.play_panel_search.clear();
     }
 
     pub fn track_status(&self, anim_id: Uuid) -> AnimRunStatus {
@@ -894,15 +1239,23 @@ impl PlaybackState {
             .unwrap_or(AnimRunStatus::Stopped)
     }
 
-    /// Starts (or restarts) a single route animation from waypoint #1.
+    /// Starts (or restarts) an animation from the beginning (`t = 0`, `completed_cycles = 0`).
     pub fn play_anim(&mut self, anim_id: Uuid) {
-        self.play_test_mode = true;
-        let entry = self.tracks.entry(anim_id).or_default();
-        if matches!(entry.status, AnimRunStatus::Stopped | AnimRunStatus::Finished) {
-            entry.distance_m = 0.0;
+        if self.editor_preview_anim_id.is_none() {
+            self.play_test_mode = true;
         }
+        self.next_trigger_seq = self.next_trigger_seq.wrapping_add(1).max(1);
+        let seq = self.next_trigger_seq;
+        let entry = self.tracks.entry(anim_id).or_default();
+        entry.distance_m = 0.0;
         entry.status = AnimRunStatus::Playing;
         entry.has_pose_override = true;
+        entry.trigger_seq = seq;
+        entry.completed_cycles = 0;
+        entry.group_launched_count = 0;
+        entry.group_last_step_start_sec = 0.0;
+        entry.group_prev_done_at_sec = None;
+        entry.group_owned_children.clear();
         self.active_anim_id = Some(anim_id);
         self.playing = true;
     }
@@ -921,6 +1274,14 @@ impl PlaybackState {
             .any(|t| t.status == AnimRunStatus::Playing);
     }
 
+    /// Pauses an animation and (if it is a `Grup` Combine/Sequence) all active descendant children.
+    pub fn pause_anim_tree(&mut self, anim_id: Uuid, anims: &[Anim]) {
+        self.pause_anim(anim_id);
+        for cid in twg_shared::group_anim::collect_group_descendant_ids(anim_id, anims) {
+            self.pause_anim(cid);
+        }
+    }
+
     /// Resumes a paused animation from its exact last position and switches back to Walk.
     pub fn resume_anim(&mut self, anim_id: Uuid) {
         if let Some(entry) = self.tracks.get_mut(&anim_id)
@@ -932,16 +1293,49 @@ impl PlaybackState {
         }
     }
 
+    /// Resumes a paused animation and (if it is a `Grup` Combine/Sequence) all paused descendant children.
+    pub fn resume_anim_tree(&mut self, anim_id: Uuid, anims: &[Anim]) {
+        self.resume_anim(anim_id);
+        for cid in twg_shared::group_anim::collect_group_descendant_ids(anim_id, anims) {
+            self.resume_anim(cid);
+        }
+    }
+
     /// Stops a single animation: resets buttons to Play, snaps marker to route start point, restores Idle.
     pub fn stop_anim(&mut self, anim_id: Uuid) {
         let entry = self.tracks.entry(anim_id).or_default();
         entry.status = AnimRunStatus::Stopped;
         entry.distance_m = 0.0;
         entry.has_pose_override = true;
+        entry.trigger_seq = 0;
+        entry.completed_cycles = 0;
+        entry.group_launched_count = 0;
+        entry.group_last_step_start_sec = 0.0;
+        entry.group_prev_done_at_sec = None;
+        entry.group_owned_children.clear();
         self.playing = self
             .tracks
             .values()
             .any(|t| t.status == AnimRunStatus::Playing);
+    }
+
+    /// Stops an animation and (if it is a `Grup` Combine/Sequence) stops/resets all descendant children.
+    pub fn stop_anim_tree(&mut self, anim_id: Uuid, anims: &[Anim]) {
+        let owned = self
+            .tracks
+            .get(&anim_id)
+            .map(|t| t.group_owned_children.clone())
+            .unwrap_or_default();
+        self.stop_anim(anim_id);
+        let mut to_stop = twg_shared::group_anim::collect_group_descendant_ids(anim_id, anims);
+        for oid in owned {
+            if !to_stop.contains(&oid) {
+                to_stop.push(oid);
+            }
+        }
+        for cid in to_stop {
+            self.stop_anim(cid);
+        }
     }
 
     pub fn play_all_routes(&mut self, anims: &[Anim]) {
@@ -949,8 +1343,16 @@ impl PlaybackState {
         for a in anims {
             let playable = if twg_shared::particle_anim::is_particle_anim(a) {
                 !a.geom.is_empty()
-            } else if twg_shared::shoot_anim::is_shoot_anim(a) {
+            } else if twg_shared::shoot_anim::is_shoot_anim(a)
+                || twg_shared::pointer_anim::is_pointer_arrow_anim(a)
+            {
                 a.marker_id.is_some()
+            } else if twg_shared::spawn_hide_anim::is_spawn_hide_anim(a) {
+                let cfg = twg_shared::spawn_hide_anim::parse_spawn_hide_config(a);
+                cfg.include_in_play_all && !cfg.marker_ids.is_empty()
+            } else if twg_shared::group_anim::is_group_anim(a) {
+                let cfg = twg_shared::group_anim::parse_group_anim_config(a);
+                cfg.include_in_play_all && !cfg.items.is_empty()
             } else {
                 !twg_shared::route_formation::anim_bound_marker_ids(a).is_empty()
                     && a.geom.len() >= 2
@@ -971,9 +1373,12 @@ impl PlaybackState {
     /// Exits Play Skenario mode completely and returns to the Scenario Editor panels.
     pub fn stop_play_test(&mut self) {
         self.play_test_mode = false;
+        self.editor_preview_anim_id = None;
         self.playing = false;
         self.elapsed_sec = 0.0;
         self.tracks.clear();
+        self.next_trigger_seq = 0;
+        self.play_panel_search.clear();
     }
 
     /// Enters Play Mode and immediately plays a specific animation (e.g. from Layers quick Play).
@@ -996,8 +1401,14 @@ pub struct AppState {
     pub screen: AppScreen,
     pub offline_preview: bool,
     pub server_url: String,
+    pub server_settings: crate::settings::LocalServerSettings,
+    pub server_settings_saved_locally: bool,
+    pub show_server_settings: bool,
+    pub testing_server_connection: bool,
+    pub server_settings_feedback: Option<(bool, String)>,
     pub username: String,
     pub password: String,
+    pub login_show_password: bool,
     pub login_error: Option<String>,
     pub status_banner: Option<String>,
     pub loading: bool,
@@ -1012,6 +1423,13 @@ pub struct AppState {
     pub operasi_table: OperasiTableState,
     pub skenarios: Vec<Skenario>,
     pub skenario_table: SkenarioTableState,
+    pub satker_table: SatkerTableState,
+    pub user_table: UserTableState,
+    pub profile_form: ProfileFormState,
+    pub tactical_page: TacticalPageState,
+    pub big_screen: BigScreenState,
+    pub play_session_mode: PlaySessionMode,
+    pub smoothed_fps: f32,
     pub location_presets: Vec<LocationPreset>,
     pub preset_manager: LocationPresetManagerState,
     pub active_skenario: Option<Skenario>,
@@ -1079,6 +1497,9 @@ pub struct AppState {
     pub show_unit_labels: bool,
     pub show_text_markers: bool,
     pub show_gizmos: bool,
+    /// Trackpad-friendly navigation (2-finger scroll pans map, pinch/Cmd+scroll zooms, Alt+drag orbits).
+    /// Defaults to `true` on macOS and `false` on Windows/Linux; toggleable anytime in Topbar / Play Panel.
+    pub trackpad_mode: bool,
     pub active_base_layer: BaseLayer,
     pub active_map_mode: MapMode,
     pub active_skybox: SkyboxPreset,
@@ -1102,12 +1523,25 @@ pub struct AppState {
     pub anim_list_filter: Option<AnimCategory>,
     pub picking_marker_for_anim_id: Option<Uuid>,
     pub picking_shoot_for_anim_id: Option<Uuid>,
+    pub picking_pointer_for_anim_id: Option<Uuid>,
+    pub picking_spawn_hide_for_anim_id: Option<Uuid>,
     pub route_target_marker_id: Option<Uuid>,
     pub new_route_is_multi: bool,
+    pub new_route_formation: twg_shared::route_formation::RouteFormationKind,
     pub new_route_name: String,
     pub new_route_speed: f64,
     pub new_route_loop: bool,
+    pub new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind,
     pub new_shoot_name: String,
+    pub shoot_preview_reset_nonce: u64,
+    pub new_pointer_name: String,
+    pub new_spawn_hide_action: twg_shared::spawn_hide_anim::SpawnHideAction,
+    pub new_spawn_hide_name: String,
+    pub spawn_hide_preview: Option<(Uuid, f32)>,
+    pub new_group_mode: twg_shared::group_anim::GroupAnimMode,
+    pub new_group_name: String,
+    pub group_add_search: String,
+    pub group_hovered_child_anim_id: Option<Uuid>,
     pub new_particle_kind: twg_shared::particle_anim::ParticleAnimKind,
     pub new_particle_name: String,
     pub particle_preview_reset_nonce: u64,
@@ -1132,7 +1566,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(assets_root: PathBuf) -> Self {
-        let server_url = std::env::var("TWG_API_URL")
+        let (server_settings, server_settings_saved_locally) =
+            crate::settings::load_local_server_settings();
+        let server_url = server_settings
+            .build_url()
             .unwrap_or_else(|_| "http://127.0.0.1:8010".to_string());
 
         let mut available_model_paths = scan_existing_local_models(&assets_root);
@@ -1192,8 +1629,14 @@ impl AppState {
             screen: AppScreen::Login,
             offline_preview: false,
             server_url,
-            username: "admin".to_string(),
+            server_settings,
+            server_settings_saved_locally,
+            show_server_settings: false,
+            testing_server_connection: false,
+            server_settings_feedback: None,
+            username: String::new(),
             password: String::new(),
+            login_show_password: false,
             login_error: None,
             status_banner: None,
             loading: false,
@@ -1206,6 +1649,13 @@ impl AppState {
             operasi_table: OperasiTableState::default(),
             skenarios: Vec::new(),
             skenario_table: SkenarioTableState::default(),
+            satker_table: SatkerTableState::default(),
+            user_table: UserTableState::default(),
+            profile_form: ProfileFormState::default(),
+            tactical_page: TacticalPageState::default(),
+            big_screen: BigScreenState::default(),
+            play_session_mode: PlaySessionMode::LocalPreview,
+            smoothed_fps: 60.0,
             location_presets: default_location_presets(),
             preset_manager: LocationPresetManagerState::default(),
             active_skenario: None,
@@ -1265,9 +1715,10 @@ impl AppState {
             hidden_entity_ids: HashSet::new(),
             locked_entity_ids: HashSet::new(),
             uniform_scale_lock: true,
-            show_unit_labels: true,
+            show_unit_labels: false,
             show_text_markers: true,
             show_gizmos: true,
+            trackpad_mode: cfg!(target_os = "macos"),
             active_base_layer: BaseLayer::Osm,
             active_map_mode: MapMode::Outdoor,
             active_skybox: SkyboxPreset::DayClear,
@@ -1287,12 +1738,25 @@ impl AppState {
             anim_list_filter: None,
             picking_marker_for_anim_id: None,
             picking_shoot_for_anim_id: None,
+            picking_pointer_for_anim_id: None,
+            picking_spawn_hide_for_anim_id: None,
             route_target_marker_id: None,
             new_route_is_multi: false,
+            new_route_formation: twg_shared::route_formation::RouteFormationKind::Grid,
             new_route_name: "Rute Unit 1".to_string(),
             new_route_speed: 5.0,
             new_route_loop: false,
+            new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind::WaterCannon,
             new_shoot_name: "Water Cannon 1".to_string(),
+            shoot_preview_reset_nonce: 0,
+            new_pointer_name: "Panah Penunjuk 1".to_string(),
+            new_spawn_hide_action: twg_shared::spawn_hide_anim::SpawnHideAction::Spawn,
+            new_spawn_hide_name: "Spawn Objek 1".to_string(),
+            spawn_hide_preview: None,
+            new_group_mode: twg_shared::group_anim::GroupAnimMode::Combine,
+            new_group_name: "Combine 1".to_string(),
+            group_add_search: String::new(),
+            group_hovered_child_anim_id: None,
             new_particle_kind: twg_shared::particle_anim::ParticleAnimKind::Fire,
             new_particle_name: "Api 1".to_string(),
             particle_preview_reset_nonce: 0,
@@ -1479,7 +1943,28 @@ impl AppState {
                 .anims
                 .iter()
                 .find(|a| a.id == id)
-                .map(|a| ("Route Animation".to_string(), a.name.clone())),
+                .map(|a| {
+                    let kind = if twg_shared::shoot_anim::is_shoot_anim(a) {
+                        "Shoot Animation"
+                    } else if twg_shared::particle_anim::is_particle_anim(a) {
+                        "Particle Animation"
+                    } else if twg_shared::pointer_anim::is_pointer_arrow_anim(a) {
+                        "Panah Penunjuk 3D"
+                    } else if let Some(act) = twg_shared::spawn_hide_anim::spawn_hide_action(a) {
+                        match act {
+                            twg_shared::spawn_hide_anim::SpawnHideAction::Spawn => "Animasi Spawn",
+                            twg_shared::spawn_hide_anim::SpawnHideAction::Hide => "Animasi Hide",
+                        }
+                    } else if let Some(gm) = twg_shared::group_anim::group_anim_mode(a) {
+                        match gm {
+                            twg_shared::group_anim::GroupAnimMode::Combine => "Animasi Combine",
+                            twg_shared::group_anim::GroupAnimMode::Sequence => "Animasi Sequence",
+                        }
+                    } else {
+                        "Route Animation"
+                    };
+                    (kind.to_string(), a.name.clone())
+                }),
         };
         if let Some((kind_label, name)) = info {
             self.pending_delete_entity = Some(PendingDeleteEntity {
@@ -1504,8 +1989,84 @@ impl AppState {
         vis_ok && lock_ok
     }
 
+    /// Global administrators (`admin` and `admin_monitor`): can manage Assets 3D, Categories,
+    /// Satkers, all Operasis, all Skenarios, and all Users.
     pub fn is_super_admin(&self) -> bool {
-        self.current_user.as_ref().is_some_and(|u| u.role.is_admin())
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.is_global_admin())
+    }
+
+    pub fn can_manage_satkers(&self) -> bool {
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.can_manage_satkers())
+    }
+
+    pub fn can_manage_users(&self) -> bool {
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.can_manage_users())
+    }
+
+    pub fn can_write_admin(&self) -> bool {
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.can_write_admin())
+    }
+
+    /// True whenever the 3D scenario world should be rendered (Plot Skenario or Layar Besar).
+    pub fn is_3d_map_screen(&self) -> bool {
+        matches!(self.screen, AppScreen::PlotSkenario | AppScreen::LayarBesar)
+    }
+
+    /// True when Play Skenario was opened from Tactical / Simulasi (realtime WS broadcast active).
+    pub fn is_tactical_live(&self) -> bool {
+        self.screen == AppScreen::PlotSkenario
+            && self.play_session_mode == PlaySessionMode::TacticalLive
+    }
+
+    pub fn is_big_screen_only_role(&self) -> bool {
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.is_big_screen_only_role())
+    }
+
+    pub fn is_big_screen(&self) -> bool {
+        self.screen == AppScreen::LayarBesar
+    }
+
+    /// True if the signed-in user may control Layar Besar (camera sync & load/reload scenario)
+    /// for the given `Skenario`.
+    pub fn can_control_skenario_big_screen(&self, sk: &Skenario) -> bool {
+        self.current_user
+            .as_ref()
+            .is_some_and(|u| u.role.can_control_big_screen(sk.satker_id, u.satker_id))
+    }
+
+    /// True if the signed-in user may control Layar Besar for the currently active `Skenario`.
+    pub fn can_control_active_big_screen(&self) -> bool {
+        let Some(sk) = &self.active_skenario else {
+            return false;
+        };
+        self.can_control_skenario_big_screen(sk)
+    }
+
+    /// Resolves the Play Skenario interaction behavior for a 3D marker based on its category
+    /// record in `state.model_categories` (falling back to built-in category defaults offline).
+    pub fn marker_play_behavior(&self, marker: &Marker) -> twg_shared::models::CategoryPlayBehavior {
+        if crate::scene::basic_mesh::is_basic_mesh_marker(marker) {
+            return twg_shared::models::CategoryPlayBehavior::StaticObstacle;
+        }
+        let cat_clean = marker.category.trim().to_lowercase();
+        if let Some(cat) = self
+            .model_categories
+            .iter()
+            .find(|c| c.category.eq_ignore_ascii_case(&cat_clean))
+        {
+            return cat.play_behavior;
+        }
+        twg_shared::models::CategoryPlayBehavior::default_for_slug(&cat_clean)
     }
 
     pub fn is_skenario_map_preview_active(&self) -> bool {
@@ -1693,6 +2254,7 @@ impl AppState {
         );
     }
 
+    #[allow(dead_code)]
     pub fn enter_offline_demo(&mut self) {
         use chrono::Utc;
         let now = Utc::now();
@@ -1747,6 +2309,9 @@ impl AppState {
             marker_count: 3,
             building_count: 1,
             line_count: 1,
+            text_count: 0,
+            particle_count: 0,
+            alur_count: 0,
             anim_count: 1,
             created_at: now,
             updated_at: now,

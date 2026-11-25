@@ -43,6 +43,10 @@ install -m 0755 "$BIN_PATH" "$STAGE_DIR/twg-app-bin"
 sed "s|https://twg.domain-anda.com|${SERVER_URL}|g" "$SCRIPT_DIR/twg-app" > "$STAGE_DIR/twg-app.sh"
 chmod +x "$STAGE_DIR/twg-app.sh"
 cp "$SCRIPT_DIR/twg-app.desktop" "$STAGE_DIR/twg-app.desktop"
+ICONS_DIR="$REPO_ROOT/packaging/icons"
+if [[ -f "$ICONS_DIR/twg-app-256.png" ]]; then
+  cp "$ICONS_DIR/twg-app-256.png" "$STAGE_DIR/twg-app.png"
+fi
 
 TAR_PATH="$DIST_DIR/twg-app-linux-${ARCH}-v${VERSION}.tar.gz"
 echo "==> Creating portable tarball: $TAR_PATH"
@@ -64,6 +68,16 @@ if command -v appimagetool >/dev/null 2>&1; then
   mkdir -p "$APPDIR/usr/bin"
   install -m 0755 "$BIN_PATH" "$APPDIR/usr/bin/twg-app-bin"
   cp "$SCRIPT_DIR/twg-app.desktop" "$APPDIR/twg-app.desktop"
+  if [[ -f "$ICONS_DIR/twg-app-256.png" ]]; then
+    cp "$ICONS_DIR/twg-app-256.png" "$APPDIR/twg-app.png"
+    cp "$ICONS_DIR/twg-app-256.png" "$APPDIR/.DirIcon"
+  fi
+  for sz in 48 64 128 256 512; do
+    if [[ -f "$ICONS_DIR/twg-app-${sz}.png" ]]; then
+      mkdir -p "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps"
+      cp "$ICONS_DIR/twg-app-${sz}.png" "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps/twg-app.png"
+    fi
+  done
   cat <<EOF > "$APPDIR/AppRun"
 #!/usr/bin/env bash
 set -euo pipefail

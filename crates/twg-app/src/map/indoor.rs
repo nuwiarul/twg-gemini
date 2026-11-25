@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use twg_shared::models::{BaseLayer, MapMode};
 
-use crate::state::{AppScreen, AppState};
+use crate::state::AppState;
 
 #[derive(Component)]
 pub struct IndoorGroundPlane;
@@ -32,8 +32,7 @@ pub fn indoor_grid_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut ground_q: Query<(&MeshMaterial3d<StandardMaterial>, &mut Visibility), With<IndoorGroundPlane>>,
 ) {
-    let map_visible =
-        state.screen == AppScreen::PlotSkenario || state.is_skenario_map_preview_active();
+    let map_visible = state.is_3d_map_screen() || state.is_skenario_map_preview_active();
     let is_indoor = map_visible
         && (state.active_map_mode == MapMode::Indoor || !state.active_base_layer.is_outdoor_tile());
 

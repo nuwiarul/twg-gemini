@@ -78,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(location_presets::delete_location_preset),
         )
         // Operasis & Skenarios
+        .route("/api/v1/tactical/operasis", get(operasis::list_tactical_operasis))
         .route(
             "/api/v1/operasis",
             get(operasis::list_operasis).post(operasis::create_operasi),
@@ -105,6 +106,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/skenarios/{id}/bundle",
             get(skenarios::get_skenario_bundle),
+        )
+        .route(
+            "/api/v1/skenarios/{id}/copy",
+            post(skenarios::copy_skenario),
+        )
+        .route(
+            "/api/v1/skenarios/{id}/move",
+            post(skenarios::move_skenario),
         )
         // Scenario Entities
         .route("/api/v1/markers", post(entities::create_marker))

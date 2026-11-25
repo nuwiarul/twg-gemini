@@ -6,8 +6,8 @@ use twg_shared::{
         ParticleAnimKind, is_particle_anim, parse_particle_anim_config, particle_anim_position,
     },
     route_formation::{
-        anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
-        sample_multi_route_poses,
+        PatwalUnitRole, RouteFormationKind, anim_bound_marker_ids, is_multi_route_anim,
+        parse_multi_route_config, sample_multi_route_poses,
     },
 };
 use uuid::Uuid;
@@ -642,19 +642,25 @@ pub fn draw_route_editor_overlay(
         return;
     }
 
-    // 2b. Guided HUD + Amber/Violet badges during PickShootMarker (Water Cannon unit selection)
+    // 2b. Guided HUD + Amber/Violet badges during PickShootMarker (all Shoot sub-types)
     if state.tool_mode == ToolMode::PickShootMarker {
         let target_anim = state
             .picking_shoot_for_anim_id
             .and_then(|id| state.anims.iter().find(|a| a.id == id));
+        let active_kind = target_anim
+            .and_then(twg_shared::shoot_anim::shoot_anim_kind)
+            .unwrap_or(state.new_shoot_kind);
+        let kind_lbl = active_kind.label();
+        let kind_tag = active_kind.short_tag();
         let banner = if let Some(a) = target_anim {
             format!(
-                "Ganti Unit Water Cannon '{}': Klik Model 3D / Kendaraan di peta (Amber = saat ini, Ungu = kandidat, Esc = Batal)",
+                "Ganti Unit {kind_lbl} '{}': Klik Model 3D / Unit di peta (Amber = saat ini, Ungu = kandidat, Esc = Batal)",
                 a.name
             )
         } else {
-            "Buat Water Cannon: Klik 1 Model 3D / Kendaraan di peta sebagai sumber semprotan air (Esc = Batal)"
-                .to_string()
+            format!(
+                "Buat {kind_lbl}: Klik 1 Model 3D / Unit di peta sebagai sumber tembakan (Esc = Batal)"
+            )
         };
         draw_top_center_banner(
             &painter,
@@ -676,7 +682,85 @@ pub fn draw_route_editor_overlay(
                 state,
                 marker_bounds,
                 bound_mid,
-                "WATER CANNON",
+                kind_tag,
+                egui::Color32::from_rgb(245, 158, 11),
+                egui::Color32::from_rgb(66, 32, 6),
+                camera,
+                cam_gtf,
+            );
+        }
+        if let Some(hid) = hovered_mid
+            && let Some(m) = state.markers.iter().find(|m| m.id == hid)
+        {
+            let pick_badge = format!("PILIH {kind_tag}");
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                hid,
+                &pick_badge,
+                egui::Color32::from_rgb(216, 114, 255),
+                egui::Color32::from_rgb(59, 7, 100),
+                camera,
+                cam_gtf,
+            );
+            if let Some(ptr) = ctx.pointer_latest_pos() {
+                let hud_painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new("twg_shoot_pick_hud"),
+                ));
+                let tip = if target_anim.is_some() {
+                    format!("Klik untuk memindahkan {kind_lbl} ke '{}'", m.name)
+                } else {
+                    format!("Klik untuk memasang {kind_lbl} pada '{}'", m.name)
+                };
+                draw_hud_pill(
+                    &hud_painter,
+                    ptr + egui::vec2(14.0, -24.0),
+                    &tip,
+                    egui::Color32::from_rgb(233, 213, 255),
+                );
+            }
+        }
+        return;
+    }
+
+    // 2c. Guided HUD + Amber/Violet badges during PickPointerMarker (3D Pointer Arrow target selection)
+    if state.tool_mode == ToolMode::PickPointerMarker {
+        let target_anim = state
+            .picking_pointer_for_anim_id
+            .and_then(|id| state.anims.iter().find(|a| a.id == id));
+        let banner = if let Some(a) = target_anim {
+            format!(
+                "Ganti Target Panah 3D '{}': Klik 1 Marker / Objek 3D di peta (Amber = saat ini, Ungu = kandidat, Esc = Batal)",
+                a.name
+            )
+        } else {
+            "Buat Panah Penunjuk 3D: Klik 1 Marker / Objek 3D di peta yg ingin ditunjuk panah (Esc = Batal)"
+                .to_string()
+        };
+        draw_top_center_banner(
+            &painter,
+            clip_rect,
+            &banner,
+            egui::Color32::from_rgb(250, 204, 21),
+        );
+
+        let hovered_mid = match gizmo_state.hovered_entity {
+            Some(SelectedEntity::Marker(hid)) => Some(hid),
+            _ => None,
+        };
+        if let Some(bound_mid) = target_anim.and_then(|a| a.marker_id)
+            && hovered_mid != Some(bound_mid)
+        {
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                bound_mid,
+                "TARGET PANAH",
                 egui::Color32::from_rgb(245, 158, 11),
                 egui::Color32::from_rgb(66, 32, 6),
                 camera,
@@ -692,7 +776,7 @@ pub fn draw_route_editor_overlay(
                 state,
                 marker_bounds,
                 hid,
-                "PILIH WATER CANNON",
+                "PILIH TARGET PANAH",
                 egui::Color32::from_rgb(216, 114, 255),
                 egui::Color32::from_rgb(59, 7, 100),
                 camera,
@@ -701,18 +785,139 @@ pub fn draw_route_editor_overlay(
             if let Some(ptr) = ctx.pointer_latest_pos() {
                 let hud_painter = ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Tooltip,
-                    egui::Id::new("twg_shoot_pick_hud"),
+                    egui::Id::new("twg_pointer_pick_hud"),
                 ));
                 let tip = if target_anim.is_some() {
-                    format!("Klik untuk memindahkan Water Cannon ke '{}'", m.name)
+                    format!("Klik untuk memindahkan Panah 3D ke '{}'", m.name)
                 } else {
-                    format!("Klik untuk memasang Water Cannon pada '{}'", m.name)
+                    format!("Klik untuk memasang Panah 3D di atas '{}'", m.name)
                 };
                 draw_hud_pill(
                     &hud_painter,
                     ptr + egui::vec2(14.0, -24.0),
                     &tip,
-                    egui::Color32::from_rgb(233, 213, 255),
+                    egui::Color32::from_rgb(254, 240, 138),
+                );
+            }
+        }
+        return;
+    }
+
+    // 2d. Guided HUD + Emerald/Rose/Violet badges during PickSpawnHideMarker (multi-object Spawn & Hide)
+    if state.tool_mode == ToolMode::PickSpawnHideMarker {
+        let target_anim = state
+            .picking_spawn_hide_for_anim_id
+            .and_then(|id| state.anims.iter().find(|a| a.id == id));
+        let action = target_anim
+            .and_then(twg_shared::spawn_hide_anim::spawn_hide_action)
+            .unwrap_or(state.new_spawn_hide_action);
+        let anim_name = target_anim
+            .map(|a| a.name.as_str())
+            .unwrap_or(state.new_spawn_hide_name.as_str());
+        let bound_ids: Vec<Uuid> = target_anim
+            .map(anim_bound_marker_ids)
+            .unwrap_or_default();
+        let is_spawn = action == twg_shared::spawn_hide_anim::SpawnHideAction::Spawn;
+        let (banner_col, sel_border, sel_bg, tag_word) = if is_spawn {
+            (
+                egui::Color32::from_rgb(52, 211, 153),
+                egui::Color32::from_rgb(16, 185, 129),
+                egui::Color32::from_rgb(6, 78, 59),
+                "SPAWN",
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(251, 113, 133),
+                egui::Color32::from_rgb(244, 63, 94),
+                egui::Color32::from_rgb(76, 5, 25),
+                "HIDE",
+            )
+        };
+        let banner = format!(
+            "Pilih Objek {tag_word} '{}' ({} objek): Klik Marker/Objek 3D di peta untuk tambah/lepas ({} = terpilih, Ungu = kandidat) • Enter / Esc = Selesai",
+            anim_name,
+            bound_ids.len(),
+            if is_spawn { "Hijau" } else { "Merah" }
+        );
+        draw_top_center_banner(&painter, clip_rect, &banner, banner_col);
+
+        let hovered_mid = match gizmo_state.hovered_entity {
+            Some(SelectedEntity::Marker(hid)) => Some(hid),
+            _ => None,
+        };
+        for (idx, bound_mid) in bound_ids.iter().enumerate() {
+            if hovered_mid == Some(*bound_mid) {
+                continue;
+            }
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                *bound_mid,
+                &format!("#{} {tag_word}", idx + 1),
+                sel_border,
+                sel_bg,
+                camera,
+                cam_gtf,
+            );
+        }
+        if let Some(hid) = hovered_mid
+            && let Some(m) = state.markers.iter().find(|m| m.id == hid)
+        {
+            let bound_pos = bound_ids.iter().position(|id| *id == hid);
+            let already_bound = bound_pos.is_some();
+            let badge_txt = if let Some(p) = bound_pos {
+                format!("- LEPAS (#{})", p + 1)
+            } else {
+                format!("+ {tag_word} (#{})", bound_ids.len() + 1)
+            };
+            let (badge_border, badge_bg) = if already_bound {
+                (
+                    egui::Color32::from_rgb(251, 113, 133),
+                    egui::Color32::from_rgb(76, 5, 25),
+                )
+            } else {
+                (
+                    egui::Color32::from_rgb(216, 114, 255),
+                    egui::Color32::from_rgb(59, 7, 100),
+                )
+            };
+            draw_marker_role_badge(
+                &painter,
+                clip_rect,
+                state,
+                marker_bounds,
+                hid,
+                &badge_txt,
+                badge_border,
+                badge_bg,
+                camera,
+                cam_gtf,
+            );
+            if let Some(ptr) = ctx.pointer_latest_pos() {
+                let hud_painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new("twg_spawn_hide_pick_hud"),
+                ));
+                let tip = if let Some(p) = bound_pos {
+                    format!(
+                        "Klik untuk melepas '{}' (#{}) dari daftar {tag_word}",
+                        m.name,
+                        p + 1
+                    )
+                } else {
+                    format!(
+                        "Klik untuk menambah '{}' sebagai Target #{} ({tag_word})",
+                        m.name,
+                        bound_ids.len() + 1
+                    )
+                };
+                draw_hud_pill(
+                    &hud_painter,
+                    ptr + egui::vec2(14.0, -24.0),
+                    &tip,
+                    banner_col,
                 );
             }
         }
@@ -723,16 +928,65 @@ pub fn draw_route_editor_overlay(
     if let SelectedEntity::Anim(sel_aid) = state.selected
         && let Some(anim) = state.anims.iter().find(|a| a.id == sel_aid)
     {
-        let is_shoot = twg_shared::shoot_anim::is_shoot_anim(anim);
+        let shoot_kind_opt = twg_shared::shoot_anim::shoot_anim_kind(anim);
+        let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(anim);
+        let spawn_hide_opt = twg_shared::spawn_hide_anim::spawn_hide_action(anim);
         let is_multi = is_multi_route_anim(anim);
+        let multi_cfg_opt = if is_multi {
+            Some(parse_multi_route_config(anim))
+        } else {
+            None
+        };
+        let is_patwal = multi_cfg_opt
+            .as_ref()
+            .is_some_and(|c| c.formation == RouteFormationKind::Patwal);
         let bound_ids = anim_bound_marker_ids(anim);
         for (idx, bound_mid) in bound_ids.iter().enumerate() {
-            let badge_label = if is_shoot {
-                "WATER CANNON".to_string()
+            let (badge_label, badge_border, badge_bg) = if let Some(sk) = shoot_kind_opt {
+                (
+                    sk.short_tag().to_string(),
+                    egui::Color32::from_rgb(251, 191, 36),
+                    egui::Color32::from_rgb(66, 32, 6),
+                )
+            } else if is_pointer {
+                (
+                    "TARGET PANAH".to_string(),
+                    egui::Color32::from_rgb(251, 191, 36),
+                    egui::Color32::from_rgb(66, 32, 6),
+                )
+            } else if let Some(act) = spawn_hide_opt {
+                match act {
+                    twg_shared::spawn_hide_anim::SpawnHideAction::Spawn => (
+                        format!("#{} SPAWN", idx + 1),
+                        egui::Color32::from_rgb(16, 185, 129),
+                        egui::Color32::from_rgb(6, 78, 59),
+                    ),
+                    twg_shared::spawn_hide_anim::SpawnHideAction::Hide => (
+                        format!("#{} HIDE", idx + 1),
+                        egui::Color32::from_rgb(244, 63, 94),
+                        egui::Color32::from_rgb(76, 5, 25),
+                    ),
+                }
+            } else if is_patwal
+                && let Some(ref cfg) = multi_cfg_opt
+            {
+                (
+                    format!("#{} {}", idx + 1, cfg.patwal_role_for(*bound_mid).short_tag()),
+                    egui::Color32::from_rgb(251, 191, 36),
+                    egui::Color32::from_rgb(66, 32, 6),
+                )
             } else if is_multi {
-                format!("UNIT #{}", idx + 1)
+                (
+                    format!("UNIT #{}", idx + 1),
+                    egui::Color32::from_rgb(251, 191, 36),
+                    egui::Color32::from_rgb(66, 32, 6),
+                )
             } else {
-                "UNIT RUTE".to_string()
+                (
+                    "UNIT RUTE".to_string(),
+                    egui::Color32::from_rgb(251, 191, 36),
+                    egui::Color32::from_rgb(66, 32, 6),
+                )
             };
             draw_marker_role_badge(
                 &painter,
@@ -741,17 +995,116 @@ pub fn draw_route_editor_overlay(
                 marker_bounds,
                 *bound_mid,
                 &badge_label,
-                egui::Color32::from_rgb(251, 191, 36),
-                egui::Color32::from_rgb(66, 32, 6),
+                badge_border,
+                badge_bg,
                 camera,
                 cam_gtf,
             );
         }
 
+        // Group (`Combine` / `Sequence`) member badges & hovered candidate preview badges on the 3D map
+        if let Some((group_mode, entries)) = super::resolve_group_highlight_entries(state) {
+            if let Some(hid) = state.group_hovered_child_anim_id
+                && let Some(h_anim) = state.anims.iter().find(|a| a.id == hid)
+            {
+                let step_in_grp = twg_shared::group_anim::parse_group_anim_config(anim)
+                    .items
+                    .iter()
+                    .position(|it| it.anim_id == hid)
+                    .map(|p| p + 1);
+                let banner = match step_in_grp {
+                    Some(n) => format!(
+                        "Highlight Anggota Grup #{n}: '{}' (Kuning = sedang disorot di peta)",
+                        h_anim.name
+                    ),
+                    None => format!(
+                        "Preview Kandidat Grup: '{}' — Klik untuk menambahkan ke '{}'",
+                        h_anim.name, anim.name
+                    ),
+                };
+                draw_top_center_banner(
+                    &painter,
+                    clip_rect,
+                    &banner,
+                    egui::Color32::from_rgb(250, 204, 21),
+                );
+            }
+
+            let (member_border, member_bg) = match group_mode {
+                twg_shared::group_anim::GroupAnimMode::Combine => (
+                    egui::Color32::from_rgb(56, 189, 248),
+                    egui::Color32::from_rgb(12, 42, 74),
+                ),
+                twg_shared::group_anim::GroupAnimMode::Sequence => (
+                    egui::Color32::from_rgb(192, 132, 252),
+                    egui::Color32::from_rgb(59, 7, 100),
+                ),
+            };
+            let focus_border = egui::Color32::from_rgb(250, 204, 21);
+            let focus_bg = egui::Color32::from_rgb(82, 48, 6);
+
+            // Draw non-focused members first, then focused candidate on top so it's never occluded
+            for draw_focused_pass in [false, true] {
+                for entry in &entries {
+                    if entry.is_focused_candidate != draw_focused_pass {
+                        continue;
+                    }
+                    let Some(child) = state.anims.iter().find(|a| a.id == entry.anim_id) else {
+                        continue;
+                    };
+                    let (border_c, fill_c) = if entry.is_focused_candidate {
+                        (focus_border, focus_bg)
+                    } else {
+                        (member_border, member_bg)
+                    };
+                    let badge_txt = match entry.step_number {
+                        Some(n) if entry.is_focused_candidate => format!(">> #{n} {}", child.name),
+                        Some(n) => format!("#{n} {}", child.name),
+                        None => format!("+ PILIH: {}", child.name),
+                    };
+
+                    let child_markers = anim_bound_marker_ids(child);
+                    if !child_markers.is_empty() {
+                        for mid in &child_markers {
+                            draw_marker_role_badge(
+                                &painter,
+                                clip_rect,
+                                state,
+                                marker_bounds,
+                                *mid,
+                                &badge_txt,
+                                border_c,
+                                fill_c,
+                                camera,
+                                cam_gtf,
+                            );
+                        }
+                    } else if let Some(pt) = child.geom.first() {
+                        let anchor_w = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(
+                            pt[0],
+                            pt[1],
+                            pt[2].max(1.5) + 3.0,
+                        ));
+                        draw_world_role_badge(
+                            &painter,
+                            clip_rect,
+                            anchor_w,
+                            &badge_txt,
+                            border_c,
+                            fill_c,
+                            camera,
+                            cam_gtf,
+                        );
+                    }
+                }
+            }
+        }
+
         // Live numbered start-formation ghost pins on the 3D map for Multi-Unit Routes
-        if is_multi && anim.geom.len() >= 2 {
-            let cfg = parse_multi_route_config(anim);
-            let poses = sample_multi_route_poses(&anim.geom, &cfg, 0.0);
+        if let Some(ref cfg) = multi_cfg_opt
+            && anim.geom.len() >= 2
+        {
+            let poses = sample_multi_route_poses(&anim.geom, cfg, 0.0);
             for (idx, pose) in poses.iter().enumerate() {
                 let loc = state.geo_anchor.lng_lat_alt_to_local(
                     pose.lng,
@@ -767,6 +1120,14 @@ pub fn draw_route_editor_overlay(
                     let r = if is_pad_sel { 9.5 } else { 7.5 };
                     let fill = if is_pad_sel {
                         egui::Color32::from_rgb(250, 204, 21)
+                    } else if is_patwal {
+                        match cfg.patwal_role_for(pose.marker_id) {
+                            PatwalUnitRole::LeadMoto => egui::Color32::from_rgb(34, 211, 238),
+                            PatwalUnitRole::FrontPolice => egui::Color32::from_rgb(59, 130, 246),
+                            PatwalUnitRole::Vip => egui::Color32::from_rgb(251, 191, 36),
+                            PatwalUnitRole::SideMoto => egui::Color32::from_rgb(45, 212, 191),
+                            PatwalUnitRole::RearPolice => egui::Color32::from_rgb(129, 140, 248),
+                        }
                     } else if idx == 0 {
                         egui::Color32::from_rgb(6, 182, 212)
                     } else {
@@ -1304,6 +1665,38 @@ fn draw_marker_role_badge(
             .lng_lat_alt_to_local(m.lng, m.lat, m.altitude + 13.0);
         Vec3::from_array(l)
     };
+    let Ok(scr) = camera.world_to_viewport(cam_gtf, anchor_w) else {
+        return;
+    };
+    let pos = egui::pos2(scr.x, scr.y - 16.0);
+    if !clip_rect.contains(pos) {
+        return;
+    }
+    let font = egui::FontId::proportional(10.0);
+    let galley = painter.layout_no_wrap(tag.to_string(), font, egui::Color32::WHITE);
+    let pad = egui::vec2(7.0, 2.5);
+    let rect = egui::Rect::from_center_size(pos, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 9.0, fill_col);
+    painter.rect_stroke(
+        rect,
+        9.0,
+        egui::Stroke::new(1.5, border_col),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(rect.min + pad, galley, egui::Color32::WHITE);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_world_role_badge(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    anchor_w: Vec3,
+    tag: &str,
+    border_col: egui::Color32,
+    fill_col: egui::Color32,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) {
     let Ok(scr) = camera.world_to_viewport(cam_gtf, anchor_w) else {
         return;
     };

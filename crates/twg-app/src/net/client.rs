@@ -6,19 +6,20 @@ use reqwest::{Client, multipart};
 use serde::de::DeserializeOwned;
 use twg_shared::{
     api::{
-        ApiErrorBody, ApiResponse, CreateAnimRequest, CreateBuildingRequest,
-        CreateLocationPresetRequest, CreateMarkerRequest, CreateModelCategoryRequest,
-        CreateOperasiRequest, CreatePlotLineRequest, CreateSkenarioRequest,
-        CreateTextMarkerRequest, LoginRequest, LoginResponse, PaginatedResponse,
-        ResizeTextureRequest, UpdateAnimRequest, UpdateBuildingRequest,
-        UpdateLocationPresetRequest, UpdateMarkerRequest, UpdateModelCategoryRequest,
-        UpdateOperasiRequest, UpdatePlotLineRequest, UpdateSkenarioRequest,
-        UpdateTextMarkerRequest,
+        ApiErrorBody, ApiResponse, ChangePasswordRequest, CopySkenarioRequest, CreateAnimRequest,
+        CreateBuildingRequest, CreateLocationPresetRequest, CreateMarkerRequest,
+        CreateModelCategoryRequest, CreateOperasiRequest, CreatePlotLineRequest,
+        CreateSatkerRequest, CreateSkenarioRequest, CreateTextMarkerRequest, CreateUserRequest,
+        LoginRequest, LoginResponse, MoveSkenarioRequest, PaginatedResponse, ProfileUpdateRequest,
+        ResizeTextureRequest,
+        UpdateAnimRequest, UpdateBuildingRequest, UpdateLocationPresetRequest, UpdateMarkerRequest,
+        UpdateModelCategoryRequest, UpdateOperasiRequest, UpdatePlotLineRequest,
+        UpdateSatkerRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest, UpdateUserRequest,
     },
     models::{
         Anim, Building, LocationPreset, Marker, MediaAssetDto, MediaAssetType, ModelAssetDto,
         ModelAssetType, ModelCategoryDto, Operasi, PlotLine, Satker, Skenario, SkenarioBundle,
-        TextMarker,
+        TacticalOperasiCard, TextMarker, UserDto,
     },
 };
 use uuid::Uuid;
@@ -60,11 +61,22 @@ pub struct AuthCredentials {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ApiCommand {
+    TestServerConnection {
+        server_url: String,
+    },
     Login {
         server_url: String,
         username: String,
         password: String,
         device_id: String,
+    },
+    UpdateProfile {
+        auth: AuthCredentials,
+        req: ProfileUpdateRequest,
+    },
+    ChangePassword {
+        auth: AuthCredentials,
+        req: ChangePasswordRequest,
     },
     LoadOperasis {
         auth: AuthCredentials,
@@ -90,6 +102,45 @@ pub enum ApiCommand {
     },
     LoadSatkers {
         auth: AuthCredentials,
+    },
+    CreateSatker {
+        auth: AuthCredentials,
+        req: CreateSatkerRequest,
+    },
+    UpdateSatker {
+        auth: AuthCredentials,
+        id: Uuid,
+        req: UpdateSatkerRequest,
+    },
+    DeleteSatker {
+        auth: AuthCredentials,
+        id: Uuid,
+    },
+    LoadUsers {
+        auth: AuthCredentials,
+    },
+    CreateUser {
+        auth: AuthCredentials,
+        req: CreateUserRequest,
+    },
+    UpdateUser {
+        auth: AuthCredentials,
+        id: Uuid,
+        req: UpdateUserRequest,
+    },
+    DeleteUser {
+        auth: AuthCredentials,
+        id: Uuid,
+    },
+    LoadTacticalOperasis {
+        auth: AuthCredentials,
+        page: i64,
+        per_page: i64,
+        search: Option<String>,
+    },
+    LoadOperasiSkenariosForTactical {
+        auth: AuthCredentials,
+        operasi_id: Uuid,
     },
     LoadLocationPresets {
         auth: AuthCredentials,
@@ -122,6 +173,16 @@ pub enum ApiCommand {
         auth: AuthCredentials,
         id: Uuid,
         req: UpdateSkenarioRequest,
+    },
+    CopySkenario {
+        auth: AuthCredentials,
+        id: Uuid,
+        req: CopySkenarioRequest,
+    },
+    MoveSkenario {
+        auth: AuthCredentials,
+        id: Uuid,
+        req: MoveSkenarioRequest,
     },
     DeleteSkenario {
         auth: AuthCredentials,
@@ -248,8 +309,16 @@ pub enum ApiCommand {
 
 #[derive(Debug)]
 pub enum ApiEvent {
+    ServerTestResult {
+        ok: bool,
+        message: String,
+    },
     LoginOk(LoginResponse),
     LoginErr(String),
+    ProfileUpdated(UserDto),
+    ProfileError(String),
+    PasswordChanged,
+    PasswordError(String),
     OperasisLoaded(PaginatedResponse<Operasi>),
     OperasiOptionsLoaded(Vec<Operasi>),
     OperasiCreated(Operasi),
@@ -257,6 +326,21 @@ pub enum ApiEvent {
     OperasiDeleted(Uuid),
     OperasiError(String),
     SatkersLoaded(Vec<Satker>),
+    SatkerCreated(Satker),
+    SatkerUpdated(Satker),
+    SatkerDeleted(Uuid),
+    SatkerError(String),
+    UsersLoaded(Vec<UserDto>),
+    UserCreated(UserDto),
+    UserUpdated(UserDto),
+    UserDeleted(Uuid),
+    UserError(String),
+    TacticalOperasisLoaded(PaginatedResponse<TacticalOperasiCard>),
+    TacticalOperasiSkenariosLoaded {
+        operasi_id: Uuid,
+        items: Vec<Skenario>,
+    },
+    TacticalError(String),
     LocationPresetsLoaded(Vec<LocationPreset>),
     LocationPresetCreated(LocationPreset),
     LocationPresetUpdated(LocationPreset),
@@ -268,6 +352,8 @@ pub enum ApiEvent {
     },
     SkenarioCreated(Skenario),
     SkenarioUpdated(Skenario),
+    SkenarioCopied(Skenario),
+    SkenarioMoved(Skenario),
     SkenarioDeleted(Uuid),
     SkenarioError(String),
     BundleLoaded(Box<SkenarioBundle>),
@@ -351,8 +437,83 @@ impl ApiClientBridge {
     }
 }
 
+async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
+    let base_url = server_url.trim_end_matches('/');
+    let ready_url = format!("{base_url}/readyz");
+    let timeout = std::time::Duration::from_secs(8);
+    let started = std::time::Instant::now();
+
+    match client.get(&ready_url).timeout(timeout).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let elapsed_ms = started.elapsed().as_millis();
+            if status.is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await
+                    && json.get("status").and_then(|v| v.as_str()) == Some("ready")
+                {
+                    return ApiEvent::ServerTestResult {
+                        ok: true,
+                        message: format!(
+                            "Berhasil terhubung ({elapsed_ms} ms) • Server & Database siap."
+                        ),
+                    };
+                }
+                return ApiEvent::ServerTestResult {
+                    ok: false,
+                    message: "Host merespons HTTP 200, tetapi bukan endpoint TWG Server yang valid."
+                        .into(),
+                };
+            }
+
+            // Fallback to /healthz if reverse proxy only exposes /healthz
+            if status == reqwest::StatusCode::NOT_FOUND {
+                let health_url = format!("{base_url}/healthz");
+                let health_start = std::time::Instant::now();
+                if let Ok(h_resp) = client.get(&health_url).timeout(timeout).send().await
+                    && h_resp.status().is_success()
+                    && let Ok(json) = h_resp.json::<serde_json::Value>().await
+                    && json.get("status").and_then(|v| v.as_str()) == Some("ok")
+                {
+                    let ms = health_start.elapsed().as_millis();
+                    return ApiEvent::ServerTestResult {
+                        ok: true,
+                        message: format!("Berhasil terhubung ({ms} ms) • TWG Server aktif."),
+                    };
+                }
+            }
+
+            ApiEvent::ServerTestResult {
+                ok: false,
+                message: format!(
+                    "Server merespons HTTP {} ({elapsed_ms} ms), tetapi layanan belum siap.",
+                    status.as_u16()
+                ),
+            }
+        }
+        Err(err) => {
+            let detail = if err.is_timeout() {
+                "Waktu koneksi habis (timeout 8 detik). Periksa host, port, atau firewall."
+                    .to_string()
+            } else if err.is_connect() {
+                format!(
+                    "Tidak dapat terhubung ke {base_url}. Pastikan server aktif serta protokol/port sesuai."
+                )
+            } else {
+                format!("Gagal terhubung: {err}")
+            };
+            ApiEvent::ServerTestResult {
+                ok: false,
+                message: detail,
+            }
+        }
+    }
+}
+
 async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
     match cmd {
+        ApiCommand::TestServerConnection { server_url } => {
+            test_server_connection(client, &server_url).await
+        }
         ApiCommand::Login {
             server_url,
             username,
@@ -377,6 +538,20 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
                     Err(err) => ApiEvent::LoginErr(err),
                 },
                 Err(err) => ApiEvent::LoginErr(format!("Connection failed: {err}")),
+            }
+        }
+        ApiCommand::UpdateProfile { auth, req } => {
+            let url = format!("{}/api/v1/profile", base(&auth));
+            match authed_put::<_, UserDto>(client, &auth, &url, &req).await {
+                Ok(u) => ApiEvent::ProfileUpdated(u),
+                Err(e) => ApiEvent::ProfileError(e),
+            }
+        }
+        ApiCommand::ChangePassword { auth, req } => {
+            let url = format!("{}/api/v1/profile/password", base(&auth));
+            match authed_put::<_, serde_json::Value>(client, &auth, &url, &req).await {
+                Ok(_) => ApiEvent::PasswordChanged,
+                Err(e) => ApiEvent::PasswordError(e),
             }
         }
         ApiCommand::LoadOperasis {
@@ -431,7 +606,89 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
             let url = format!("{}/api/v1/satkers", base(&auth));
             match authed_get::<Vec<Satker>>(client, &auth, &url).await {
                 Ok(items) => ApiEvent::SatkersLoaded(items),
-                Err(e) => ApiEvent::Error(e),
+                Err(e) => ApiEvent::SatkerError(e),
+            }
+        }
+        ApiCommand::CreateSatker { auth, req } => {
+            let url = format!("{}/api/v1/satkers", base(&auth));
+            match authed_post::<_, Satker>(client, &auth, &url, &req).await {
+                Ok(s) => ApiEvent::SatkerCreated(s),
+                Err(e) => ApiEvent::SatkerError(e),
+            }
+        }
+        ApiCommand::UpdateSatker { auth, id, req } => {
+            let url = format!("{}/api/v1/satkers/{id}", base(&auth));
+            match authed_put::<_, Satker>(client, &auth, &url, &req).await {
+                Ok(s) => ApiEvent::SatkerUpdated(s),
+                Err(e) => ApiEvent::SatkerError(e),
+            }
+        }
+        ApiCommand::DeleteSatker { auth, id } => {
+            let url = format!("{}/api/v1/satkers/{id}", base(&auth));
+            match authed_delete(client, &auth, &url).await {
+                Ok(()) => ApiEvent::SatkerDeleted(id),
+                Err(e) => ApiEvent::SatkerError(e),
+            }
+        }
+        ApiCommand::LoadUsers { auth } => {
+            let url = format!("{}/api/v1/users", base(&auth));
+            match authed_get::<Vec<UserDto>>(client, &auth, &url).await {
+                Ok(items) => ApiEvent::UsersLoaded(items),
+                Err(e) => ApiEvent::UserError(e),
+            }
+        }
+        ApiCommand::CreateUser { auth, req } => {
+            let url = format!("{}/api/v1/users", base(&auth));
+            match authed_post::<_, UserDto>(client, &auth, &url, &req).await {
+                Ok(u) => ApiEvent::UserCreated(u),
+                Err(e) => ApiEvent::UserError(e),
+            }
+        }
+        ApiCommand::UpdateUser { auth, id, req } => {
+            let url = format!("{}/api/v1/users/{id}", base(&auth));
+            match authed_put::<_, UserDto>(client, &auth, &url, &req).await {
+                Ok(u) => ApiEvent::UserUpdated(u),
+                Err(e) => ApiEvent::UserError(e),
+            }
+        }
+        ApiCommand::DeleteUser { auth, id } => {
+            let url = format!("{}/api/v1/users/{id}", base(&auth));
+            match authed_delete(client, &auth, &url).await {
+                Ok(()) => ApiEvent::UserDeleted(id),
+                Err(e) => ApiEvent::UserError(e),
+            }
+        }
+        ApiCommand::LoadTacticalOperasis {
+            auth,
+            page,
+            per_page,
+            search,
+        } => {
+            let url = {
+                let mut qs = url::form_urlencoded::Serializer::new(String::new());
+                qs.append_pair("page", &page.max(1).to_string());
+                qs.append_pair("per_page", &per_page.clamp(1, 50).to_string());
+                if let Some(q) = search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    qs.append_pair("search", q);
+                }
+                format!("{}/api/v1/tactical/operasis?{}", base(&auth), qs.finish())
+            };
+            match authed_get::<PaginatedResponse<TacticalOperasiCard>>(client, &auth, &url).await {
+                Ok(p) => ApiEvent::TacticalOperasisLoaded(p),
+                Err(e) => ApiEvent::TacticalError(e),
+            }
+        }
+        ApiCommand::LoadOperasiSkenariosForTactical { auth, operasi_id } => {
+            let url = format!(
+                "{}/api/v1/operasis/{operasi_id}/skenarios?page=1&per_page=200",
+                base(&auth)
+            );
+            match authed_get::<PaginatedResponse<Skenario>>(client, &auth, &url).await {
+                Ok(p) => ApiEvent::TacticalOperasiSkenariosLoaded {
+                    operasi_id,
+                    items: p.items,
+                },
+                Err(e) => ApiEvent::TacticalError(e),
             }
         }
         ApiCommand::LoadLocationPresets { auth } => {
@@ -497,6 +754,20 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
             let url = format!("{}/api/v1/skenarios/{id}", base(&auth));
             match authed_put::<_, Skenario>(client, &auth, &url, &req).await {
                 Ok(sk) => ApiEvent::SkenarioUpdated(sk),
+                Err(e) => ApiEvent::SkenarioError(e),
+            }
+        }
+        ApiCommand::CopySkenario { auth, id, req } => {
+            let url = format!("{}/api/v1/skenarios/{id}/copy", base(&auth));
+            match authed_post::<_, Skenario>(client, &auth, &url, &req).await {
+                Ok(sk) => ApiEvent::SkenarioCopied(sk),
+                Err(e) => ApiEvent::SkenarioError(e),
+            }
+        }
+        ApiCommand::MoveSkenario { auth, id, req } => {
+            let url = format!("{}/api/v1/skenarios/{id}/move", base(&auth));
+            match authed_post::<_, Skenario>(client, &auth, &url, &req).await {
+                Ok(sk) => ApiEvent::SkenarioMoved(sk),
                 Err(e) => ApiEvent::SkenarioError(e),
             }
         }

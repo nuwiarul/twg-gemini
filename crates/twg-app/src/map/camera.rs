@@ -1,17 +1,22 @@
 use bevy::{
-    input::mouse::{MouseMotion, MouseWheel},
+    input::{
+        gestures::{PinchGesture, RotationGesture},
+        mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
+    },
     prelude::*,
     window::PrimaryWindow,
 };
-use twg_shared::geo::{
-    GeoAnchor, camera_distance_for_zoom, haversine_distance_m, zoom_for_camera_distance,
+use twg_shared::{
+    geo::{GeoAnchor, camera_distance_for_zoom, haversine_distance_m, zoom_for_camera_distance},
+    ws::TacticalCommand,
 };
 
 use crate::{
+    net::ws_client::{WsClientBridge, WsOutCommand},
     scene::{
         gizmo::TransformGizmoState, polygon_edit::PolygonEditState, route_edit::RouteEditState,
     },
-    state::{AppScreen, AppState, UiPointerState},
+    state::{AppScreen, AppState, PlaybackState, UiPointerState},
 };
 
 #[derive(Component)]
@@ -85,31 +90,56 @@ pub fn cursor_world_ground(
     screen_pos_to_world_ground(cursor, camera, cam_tf)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn camera_control_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut motion_ev: MessageReader<MouseMotion>,
-    mut wheel_ev: MessageReader<MouseWheel>,
+    (mut motion_ev, mut wheel_ev, mut pinch_ev, mut rot_ev): (
+        MessageReader<MouseMotion>,
+        MessageReader<MouseWheel>,
+        MessageReader<PinchGesture>,
+        MessageReader<RotationGesture>,
+    ),
     window: Single<&Window, With<PrimaryWindow>>,
     ui_state: Res<UiPointerState>,
-    gizmo_state: Res<TransformGizmoState>,
-    poly_edit: Res<PolygonEditState>,
-    route_edit: Res<RouteEditState>,
+    playback: Res<PlaybackState>,
+    (gizmo_state, poly_edit, route_edit, ws): (
+        Res<TransformGizmoState>,
+        Res<PolygonEditState>,
+        Res<RouteEditState>,
+        Res<WsClientBridge>,
+    ),
     mut state: ResMut<AppState>,
     mut cam_q: Query<(&mut TacticalCamera, &mut Transform, &Camera, &GlobalTransform)>,
+    (mut right_drag_origin, mut right_orbiting, mut last_cam_sync): (
+        Local<Option<Vec2>>,
+        Local<bool>,
+        Local<(f64, Vec2, f32, f32, f32)>,
+    ),
 ) {
+    let raw_dt = time.delta_secs();
+    if raw_dt > 1e-4 {
+        let inst_fps = (1.0 / raw_dt).clamp(1.0, 999.0);
+        state.smoothed_fps = state.smoothed_fps * 0.90 + inst_fps * 0.10;
+    }
+
     let Ok((mut tcam, mut tf, camera, cam_gtf)) = cam_q.single_mut() else {
         return;
     };
 
     let in_preview = state.is_skenario_map_preview_active();
     let in_plot = state.screen == AppScreen::PlotSkenario;
+    let in_big_screen = state.is_big_screen();
+    let in_play_mode = in_plot && playback.play_test_mode;
 
-    if !in_preview && !in_plot {
+    if !in_preview && !in_plot && !in_big_screen {
         motion_ev.clear();
         wheel_ev.clear();
+        pinch_ev.clear();
+        rot_ev.clear();
+        *right_drag_origin = None;
+        *right_orbiting = false;
         return;
     }
 
@@ -118,9 +148,51 @@ pub fn camera_control_system(
         total_motion += ev.delta;
     }
 
-    let mut scroll_y = 0.0_f32;
+    let mut zoom_steps = 0.0_f32;
+    let mut scroll_px_delta = Vec2::ZERO;
     for ev in wheel_ev.read() {
-        scroll_y += ev.y;
+        match ev.unit {
+            MouseScrollUnit::Line => {
+                zoom_steps += ev.y;
+                scroll_px_delta += Vec2::new(ev.x * 28.0, ev.y * 28.0);
+            }
+            MouseScrollUnit::Pixel => {
+                zoom_steps += ev.y / 36.0;
+                scroll_px_delta += Vec2::new(ev.x, ev.y);
+            }
+        }
+    }
+
+    let mut pinch_delta = 0.0_f32;
+    for ev in pinch_ev.read() {
+        pinch_delta += ev.0;
+    }
+
+    let mut rot_delta = 0.0_f32;
+    for ev in rot_ev.read() {
+        rot_delta += ev.0;
+    }
+
+    // Track Right-Button drag threshold in Play Skenario so short Right-Click (< 5 px)
+    // issues an RTS Move Order cleanly without nudging camera orbit/pitch.
+    if mouse_buttons.just_pressed(MouseButton::Right) {
+        // Layar Besar is 100% locked against all local pointer & keyboard camera manipulation.
+    if !in_big_screen && !ui_state.wants_pointer {
+            *right_drag_origin = window.cursor_position();
+            *right_orbiting = !in_play_mode;
+        } else {
+            *right_drag_origin = None;
+            *right_orbiting = false;
+        }
+    } else if !mouse_buttons.pressed(MouseButton::Right) {
+        *right_drag_origin = None;
+        *right_orbiting = false;
+    } else if in_play_mode
+        && !*right_orbiting
+        && let (Some(origin_px), Some(curr_px)) = (*right_drag_origin, window.cursor_position())
+        && origin_px.distance(curr_px) >= 5.0
+    {
+        *right_orbiting = true;
     }
 
     let viewport_h = camera
@@ -221,45 +293,95 @@ pub fn camera_control_system(
     let dt = time.delta_secs().min(0.1);
     let mut camera_changed_by_user = false;
 
-    if !ui_state.wants_pointer {
-        if scroll_y.abs() > 0.0 {
-            let factor = (1.0 - scroll_y * 0.12).clamp(0.4, 1.8);
+    // Layar Besar is 100% locked against all local pointer & keyboard camera manipulation.
+    if !in_big_screen && !ui_state.wants_pointer {
+        let space_held = !ui_state.wants_keyboard && keys.pressed(KeyCode::Space);
+        let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+        let ctrl_or_cmd = keys.pressed(KeyCode::ControlLeft)
+            || keys.pressed(KeyCode::ControlRight)
+            || keys.pressed(KeyCode::SuperLeft)
+            || keys.pressed(KeyCode::SuperRight);
+        let no_active_edit_drag = !gizmo_state.is_dragging()
+            && !poly_edit.is_dragging()
+            && !route_edit.is_dragging()
+            && state.dragging_catalog_entry.is_none()
+            && state.dragging_basic_mesh.is_none();
+
+        let b = tcam.bearing_deg.to_radians();
+        let right = Vec2::new(b.cos(), b.sin());
+        let forward = Vec2::new(b.sin(), -b.cos());
+        let meters_per_px = (tcam.distance_m * 0.95) / viewport_h;
+
+        // Native macOS trackpad pinch-to-zoom & two-finger rotation gestures (always active)
+        if pinch_delta.abs() > 1e-5 {
+            let factor = (1.0 - pinch_delta * 1.35).clamp(0.45, 1.85);
+            tcam.distance_m = (tcam.distance_m * factor).clamp(dist_lo, dist_hi);
+            camera_changed_by_user = true;
+        }
+        if rot_delta.abs() > 1e-5 {
+            tcam.bearing_deg = (tcam.bearing_deg - rot_delta.to_degrees()).rem_euclid(360.0);
+            camera_changed_by_user = true;
+        }
+
+        // Scroll wheel / Trackpad 2-finger scroll
+        if state.trackpad_mode {
+            if ctrl_or_cmd && zoom_steps.abs() > 1e-4 {
+                let factor = (1.0 - zoom_steps * 0.14).clamp(0.4, 1.8);
+                tcam.distance_m = (tcam.distance_m * factor).clamp(dist_lo, dist_hi);
+                camera_changed_by_user = true;
+            } else if alt_held && scroll_px_delta.length_squared() > 1e-4 {
+                tcam.bearing_deg =
+                    (tcam.bearing_deg - scroll_px_delta.x * 0.28).rem_euclid(360.0);
+                tcam.pitch_deg = (tcam.pitch_deg - scroll_px_delta.y * 0.22).clamp(5.0, 82.0);
+                camera_changed_by_user = true;
+            } else if scroll_px_delta.length_squared() > 1e-4 {
+                tcam.target_local -= right * (scroll_px_delta.x * meters_per_px * 1.15);
+                tcam.target_local -= forward * (scroll_px_delta.y * meters_per_px * 1.15);
+                camera_changed_by_user = true;
+            }
+        } else if zoom_steps.abs() > 1e-4 {
+            let factor = (1.0 - zoom_steps * 0.12).clamp(0.4, 1.8);
             tcam.distance_m = (tcam.distance_m * factor).clamp(dist_lo, dist_hi);
             camera_changed_by_user = true;
         }
 
-        let allow_left_pan = in_preview
-            || (state.tool_mode.is_transform_tool()
-                && !gizmo_state.is_dragging()
-                && !poly_edit.is_dragging()
-                && !route_edit.is_dragging()
+        // In Play Skenario, plain Left-Drag is reserved for RTS Box Selection (not camera pan).
+        // Camera pan uses Middle-Drag, Space + Left-Drag, 2-finger Trackpad Scroll, or W/A/S/D.
+        let allow_plain_left_pan = in_preview
+            || (!in_play_mode
+                && state.tool_mode.is_transform_tool()
+                && no_active_edit_drag
                 && !gizmo_state.suppress_camera_pan
-                && state.dragging_catalog_entry.is_none()
-                && state.dragging_basic_mesh.is_none()
                 && !keys.pressed(KeyCode::ShiftLeft)
-                && !keys.pressed(KeyCode::ShiftRight));
+                && !keys.pressed(KeyCode::ShiftRight)
+                && !alt_held);
+        let space_left_pan =
+            space_held && no_active_edit_drag && mouse_buttons.pressed(MouseButton::Left);
 
         if (mouse_buttons.pressed(MouseButton::Middle)
-            || (allow_left_pan && mouse_buttons.pressed(MouseButton::Left)))
+            || space_left_pan
+            || (allow_plain_left_pan && mouse_buttons.pressed(MouseButton::Left)))
             && total_motion.length_squared() > 0.0
         {
-            let b = tcam.bearing_deg.to_radians();
-            let right = Vec2::new(b.cos(), b.sin());
-            let forward = Vec2::new(b.sin(), -b.cos());
-            let meters_per_px = (tcam.distance_m * 0.95) / viewport_h;
             tcam.target_local -= right * (total_motion.x * meters_per_px);
             tcam.target_local -= forward * (total_motion.y * meters_per_px);
             camera_changed_by_user = true;
         }
 
-        if mouse_buttons.pressed(MouseButton::Right) && total_motion.length_squared() > 0.0 {
+        // Orbit / Pitch: Right-Drag (with >= 5 px threshold in Play Skenario) OR Alt/Option + Left-Drag
+        let alt_left_orbit =
+            alt_held && no_active_edit_drag && mouse_buttons.pressed(MouseButton::Left);
+        let right_drag_orbit =
+            mouse_buttons.pressed(MouseButton::Right) && (!in_play_mode || *right_orbiting);
+
+        if (right_drag_orbit || alt_left_orbit) && total_motion.length_squared() > 0.0 {
             tcam.bearing_deg = (tcam.bearing_deg - total_motion.x * 0.32).rem_euclid(360.0);
             tcam.pitch_deg = (tcam.pitch_deg - total_motion.y * 0.25).clamp(5.0, 82.0);
             camera_changed_by_user = true;
         }
     }
 
-    if !ui_state.wants_keyboard {
+    if !in_big_screen && !ui_state.wants_keyboard {
         let pan_speed = tcam.distance_m * 0.75 * dt;
         let b = tcam.bearing_deg.to_radians();
         let right = Vec2::new(b.cos(), b.sin());
@@ -301,6 +423,54 @@ pub fn camera_control_system(
     }
 
     tcam.distance_m = tcam.distance_m.clamp(dist_lo, dist_hi);
+
+    // Broadcast throttled camera_sync (~25 Hz) to Layar Besar ONLY when:
+    // - Play Skenario was opened from Tactical (`TacticalLive`), AND
+    // - User is authorized (`admin` for all scenarios, `admin_satker` for their satker's scenario).
+    if in_play_mode
+        && state.is_tactical_live()
+        && !state.offline_preview
+        && state.can_control_active_big_screen()
+        && let Some(sk) = &state.active_skenario
+    {
+        let now_sec = time.elapsed_secs_f64();
+        let (last_t, last_target, last_dist, last_pitch, last_bearing) = *last_cam_sync;
+        let moved = tcam.target_local.distance(last_target) > 0.05
+            || (tcam.distance_m - last_dist).abs() > 0.05
+            || (tcam.pitch_deg - last_pitch).abs() > 0.05
+            || (tcam.bearing_deg - last_bearing).abs() > 0.05;
+        if moved && now_sec - last_t >= 0.04 {
+            let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([
+                tcam.target_local.x,
+                0.0,
+                tcam.target_local.y,
+            ]);
+            let zoom = tcam
+                .current_zoom(viewport_h, state.geo_anchor.cos_lat)
+                .clamp(min_zoom, max_zoom);
+            ws.send(WsOutCommand::SendCommand(TacticalCommand {
+                operasi_id: sk.operasi_id,
+                skenario_id: sk.id,
+                marker_id: None,
+                command: "camera_sync".to_string(),
+                payload: serde_json::json!({
+                    "lng": lng,
+                    "lat": lat,
+                    "zoom": zoom,
+                    "pitch": tcam.pitch_deg,
+                    "bearing": tcam.bearing_deg,
+                }),
+                save_history: false,
+            }));
+            *last_cam_sync = (
+                now_sec,
+                tcam.target_local,
+                tcam.distance_m,
+                tcam.pitch_deg,
+                tcam.bearing_deg,
+            );
+        }
+    }
 
     // Direction 2: Sync Live 3D Map Camera -> Form Inputs when user pans/zooms/pitches/rotates!
     if in_preview && camera_changed_by_user {

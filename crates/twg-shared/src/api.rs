@@ -93,6 +93,8 @@ pub struct UpdateUserRequest {
     #[serde(default)]
     pub satker_id: Option<Uuid>,
     #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
     pub profile_img: Option<String>,
     #[serde(default)]
     pub units: serde_json::Value,
@@ -157,6 +159,18 @@ pub struct UpdateSkenarioRequest {
     #[serde(default)]
     pub skybox: SkyboxPreset,
     pub indoor_config: IndoorConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopySkenarioRequest {
+    pub target_operasi_id: Uuid,
+    #[serde(default)]
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveSkenarioRequest {
+    pub target_operasi_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,6 +390,8 @@ pub struct CreateModelCategoryRequest {
     pub default_scale: f64,
     #[serde(default = "default_cat_sort_order")]
     pub sort_order: i32,
+    #[serde(default)]
+    pub play_behavior: crate::models::CategoryPlayBehavior,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,6 +400,8 @@ pub struct UpdateModelCategoryRequest {
     pub supports_idle_walk: bool,
     pub default_scale: f64,
     pub sort_order: i32,
+    #[serde(default)]
+    pub play_behavior: crate::models::CategoryPlayBehavior,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

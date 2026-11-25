@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use bevy_egui::egui;
 use twg_shared::{
     api::{CreateModelCategoryRequest, UpdateModelCategoryRequest},
-    models::{ModelAssetDto, ModelAssetType, ModelCategoryCount},
+    models::{CategoryPlayBehavior, ModelAssetDto, ModelAssetType, ModelCategoryCount},
 };
 
 use crate::{
@@ -22,10 +22,11 @@ use crate::{
         PlaybackState,
     },
     ui::{
+        app_icon::draw_app_brand_icon,
         media_assets_ui::{
             draw_media_center_preview, draw_media_left_panel_body, draw_media_right_panel_body,
         },
-        nav_bar::draw_screen_nav_tabs,
+        nav_bar::{draw_screen_nav_tabs, open_profile_screen},
         spinner::{SpinnerConfig, numeric_spinner, numeric_spinner_i32},
     },
 };
@@ -111,6 +112,7 @@ fn draw_assets_top_bar(
         )
         .show(viewport_ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                draw_app_brand_icon(ui, 18.0);
                 ui.label(
                     egui::RichText::new("TWG-RUST 3D")
                         .strong()
@@ -118,7 +120,7 @@ fn draw_assets_top_bar(
                 );
                 ui.separator();
 
-                draw_screen_nav_tabs(ui, state, playback, api);
+                draw_screen_nav_tabs(ui, state, playback, api, ws);
 
                 ui.separator();
 
@@ -178,12 +180,24 @@ fn draw_assets_top_bar(
                         state.ws_connected = false;
                     }
 
-                    if let Some(user) = &state.current_user {
-                        ui.label(
-                            egui::RichText::new(format!("{} [{}]", user.username, user.role.as_str()))
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(203, 213, 225)),
-                        );
+                    if let Some(user) = state.current_user.clone()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} [{}]  •  Profil",
+                                        user.username,
+                                        user.role.label()
+                                    ))
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                                )
+                                .fill(egui::Color32::from_rgb(24, 34, 53)),
+                            )
+                            .on_hover_text("Buka halaman Profil & Ganti Password")
+                            .clicked()
+                    {
+                        open_profile_screen(state, playback, ws);
                     }
                 });
             });
@@ -1262,6 +1276,25 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                 );
             });
 
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Perilaku di Play Skenario:")
+                    .size(10.5)
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
+            egui::ComboBox::from_id_salt("cat_new_play_behavior")
+                .selected_text(state.category_form.new_play_behavior.label())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for &beh in CategoryPlayBehavior::ALL {
+                        ui.selectable_value(
+                            &mut state.category_form.new_play_behavior,
+                            beh,
+                            beh.label(),
+                        );
+                    }
+                });
+
             ui.add_space(6.0);
             let add_lbl = if state.category_form.submitting {
                 "Menyimpan..."
@@ -1298,6 +1331,7 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                             supports_idle_walk: state.category_form.new_supports_idle_walk,
                             default_scale: state.category_form.new_default_scale,
                             sort_order: state.category_form.new_sort_order,
+                            play_behavior: state.category_form.new_play_behavior,
                         },
                     });
                 }
@@ -1356,17 +1390,35 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                             egui::RichText::new("[Idle+Walk]").size(10.0).strong(),
                         );
                     }
+                    if cat.is_system {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(148, 163, 184),
+                            egui::RichText::new("[Bawaan]").size(9.5).strong(),
+                        );
+                    }
+                    let beh_col = match cat.play_behavior {
+                        CategoryPlayBehavior::StaticObstacle => egui::Color32::from_rgb(248, 113, 113),
+                        CategoryPlayBehavior::GizmoMove => egui::Color32::from_rgb(251, 191, 36),
+                        CategoryPlayBehavior::RtsUnit => egui::Color32::from_rgb(52, 211, 153),
+                    };
+                    ui.colored_label(
+                        beh_col,
+                        egui::RichText::new(format!("[{}]", cat.play_behavior.short_label()))
+                            .size(9.5)
+                            .strong(),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !is_editing {
-                            if ui
-                                .add_enabled(
-                                    !state.category_form.submitting && model_count == 0,
-                                    egui::Button::new("Hapus").small(),
-                                )
-                                .on_disabled_hover_text(
-                                    "Kategori yang masih berisi model tidak bisa dihapus.",
-                                )
-                                .clicked()
+                            if !cat.is_system
+                                && ui
+                                    .add_enabled(
+                                        !state.category_form.submitting && model_count == 0,
+                                        egui::Button::new("Hapus").small(),
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Kategori yang masih berisi model tidak bisa dihapus.",
+                                    )
+                                    .clicked()
                             {
                                 state.category_form.confirm_delete_slug =
                                     Some(cat.category.clone());
@@ -1378,6 +1430,7 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                                     cat.supports_idle_walk;
                                 state.category_form.edit_default_scale = cat.default_scale;
                                 state.category_form.edit_sort_order = cat.sort_order;
+                                state.category_form.edit_play_behavior = cat.play_behavior;
                                 state.category_form.confirm_delete_slug = None;
                             }
                         }
@@ -1386,10 +1439,11 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
 
                 ui.label(
                     egui::RichText::new(format!(
-                        "Nama: {} • Scale: {:.2} • Urutan: {}",
+                        "Nama: {} • Scale: {:.2} • Urutan: {} • Play: {}",
                         cat.display_name(),
                         cat.default_scale,
-                        cat.sort_order
+                        cat.sort_order,
+                        cat.play_behavior.short_label()
                     ))
                     .size(10.5)
                     .color(egui::Color32::from_rgb(148, 163, 184)),
@@ -1406,6 +1460,23 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                         &mut state.category_form.edit_supports_idle_walk,
                         "Default Animasi (Idle + Walk)",
                     );
+                    ui.label(
+                        egui::RichText::new("Perilaku di Play Skenario:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    egui::ComboBox::from_id_salt(("cat_edit_play_behavior", &cat.category))
+                        .selected_text(state.category_form.edit_play_behavior.label())
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for &beh in CategoryPlayBehavior::ALL {
+                                ui.selectable_value(
+                                    &mut state.category_form.edit_play_behavior,
+                                    beh,
+                                    beh.label(),
+                                );
+                            }
+                        });
                     ui.columns(2, |cols| {
                         cols[0].label(egui::RichText::new("Scale (min 0.01)").size(10.5).color(egui::Color32::LIGHT_GRAY));
                         numeric_spinner(
@@ -1451,6 +1522,7 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                                     supports_idle_walk: state.category_form.edit_supports_idle_walk,
                                     default_scale: state.category_form.edit_default_scale,
                                     sort_order: state.category_form.edit_sort_order,
+                                    play_behavior: state.category_form.edit_play_behavior,
                                 },
                             });
                         }

@@ -73,6 +73,30 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/twg-app"
 
 sed "s|__VERSION__|${VERSION}|g" "$SCRIPT_DIR/Info.plist" > "$APP_BUNDLE/Contents/Info.plist"
 
+# Bundle macOS app icon (.icns) — regenerate natively with iconutil when available, else use pre-built .icns
+ICONS_DIR="$REPO_ROOT/packaging/icons"
+APP_ICNS_DST="$APP_BUNDLE/Contents/Resources/twg-app.icns"
+if command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1 && [[ -f "$ICONS_DIR/twg-app-macos.png" ]]; then
+  echo "==> Generating native macOS .icns via iconutil..."
+  ICONSET_DIR="$DIST_DIR/twg-app.iconset"
+  rm -rf "$ICONSET_DIR"
+  mkdir -p "$ICONSET_DIR"
+  sips -z 16 16     "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
+  sips -z 32 32     "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null
+  sips -z 32 32     "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_32x32.png" >/dev/null
+  sips -z 64 64     "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_32x32@2x.png" >/dev/null
+  sips -z 128 128   "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_128x128.png" >/dev/null
+  sips -z 256 256   "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_128x128@2x.png" >/dev/null
+  sips -z 256 256   "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_256x256.png" >/dev/null
+  sips -z 512 512   "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null
+  sips -z 512 512   "$ICONS_DIR/twg-app-macos.png" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
+  cp "$ICONS_DIR/twg-app-macos.png" "$ICONSET_DIR/icon_512x512@2x.png"
+  iconutil -c icns "$ICONSET_DIR" -o "$APP_ICNS_DST"
+  rm -rf "$ICONSET_DIR"
+elif [[ -f "$ICONS_DIR/twg-app.icns" ]]; then
+  cp "$ICONS_DIR/twg-app.icns" "$APP_ICNS_DST"
+fi
+
 echo "==> Code signing $APP_BUNDLE (identity: $SIGN_IDENTITY)..."
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   codesign --deep --force --sign - "$APP_BUNDLE"
@@ -85,6 +109,12 @@ rm -rf "$DMG_STAGE"
 mkdir -p "$DMG_STAGE"
 cp -R "$APP_BUNDLE" "$DMG_STAGE/"
 ln -sf /Applications "$DMG_STAGE/Applications"
+if [[ -f "$APP_ICNS_DST" ]]; then
+  cp "$APP_ICNS_DST" "$DMG_STAGE/.VolumeIcon.icns"
+  if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a C "$DMG_STAGE" || true
+  fi
+fi
 
 DMG_PATH="$REPO_ROOT/dist/TWG-3D-macOS-${ARCH}-v${VERSION}.dmg"
 rm -f "$DMG_PATH"

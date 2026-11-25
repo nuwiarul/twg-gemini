@@ -1,6 +1,8 @@
+pub mod app_icon;
 mod assets_page;
 mod bottom_bar;
 mod formation_pad;
+mod layar_besar_page;
 mod left_panel;
 mod login;
 mod media_assets_ui;
@@ -8,12 +10,17 @@ pub mod nav_bar;
 mod operasi_page;
 mod overlays;
 mod pagination;
+pub mod password_input;
 mod play_panel;
+mod profile_page;
 mod right_panel;
+mod satker_page;
 mod skenario_page;
 pub mod spinner;
 mod table;
+mod tactical_page;
 mod topbar;
+mod user_page;
 
 use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContext, EguiContexts, egui};
@@ -34,7 +41,9 @@ use crate::{
             spawn_marker_from_catalog,
         },
         media_preview::MediaPreviewPlayer,
+        play_rts::PlayRtsState,
         playback::PlaybackOverrides,
+        pointer_arrow::PointerArrowVisualPool,
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
         route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
     },
@@ -45,9 +54,12 @@ use crate::{
 pub fn egui_root_system(
     mut contexts: EguiContexts,
     mut state: ResMut<AppState>,
-    mut playback: ResMut<PlaybackState>,
-    overrides: Res<PlaybackOverrides>,
-    marker_bounds: Res<MarkerWorldBounds>,
+    (mut playback, mut play_rts): (ResMut<PlaybackState>, ResMut<PlayRtsState>),
+    (overrides, marker_bounds, pointer_pool): (
+        Res<PlaybackOverrides>,
+        Res<MarkerWorldBounds>,
+        Res<PointerArrowVisualPool>,
+    ),
     gizmo_state: Res<TransformGizmoState>,
     mut poly_edit: ResMut<PolygonEditState>,
     mut route_edit: ResMut<RouteEditState>,
@@ -77,15 +89,89 @@ pub fn egui_root_system(
         return Ok(());
     }
 
-    // Enforce admin-only access to the Assets page
+    // Enforce role-based screen guards:
+    // Dedicated Layar Besar accounts (`layar_besar`, `layar_besar_satker`) can ONLY view Layar Besar or Profile.
+    if state.is_big_screen_only_role()
+        && !matches!(state.screen, AppScreen::LayarBesar | AppScreen::Profile)
+    {
+        nav_bar::enter_layar_besar(&mut state, &mut playback, &ws);
+    }
     if state.screen == AppScreen::Assets && !state.is_super_admin() {
         state.screen = AppScreen::Operasis;
+    }
+    if state.screen == AppScreen::Satkers && !state.can_manage_satkers() {
+        state.screen = AppScreen::Operasis;
+    }
+    if state.screen == AppScreen::Users && !state.can_manage_users() {
+        state.screen = AppScreen::Operasis;
+    }
+
+    if state.screen == AppScreen::Profile {
+        profile_page::draw_profile_screen(
+            &mut viewport_ui,
+            &mut state,
+            &mut playback,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
     }
 
     if state.screen == AppScreen::Operasis {
         operasi_page::draw_operasi_screen(
             &mut viewport_ui,
             ctx,
+            &mut state,
+            &mut playback,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
+    }
+
+    if state.screen == AppScreen::Satkers {
+        satker_page::draw_satker_screen(
+            &mut viewport_ui,
+            ctx,
+            &mut state,
+            &mut playback,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
+    }
+
+    if state.screen == AppScreen::Users {
+        user_page::draw_user_screen(
+            &mut viewport_ui,
+            ctx,
+            &mut state,
+            &mut playback,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
+    }
+
+    if state.screen == AppScreen::Tactical {
+        tactical_page::draw_tactical_screen(
+            &mut viewport_ui,
             &mut state,
             &mut playback,
             &api,
@@ -184,6 +270,46 @@ pub fn egui_root_system(
         return Ok(());
     }
 
+    // Dedicated Fullscreen Read-Only Layar Besar Display (camera & map interaction 100% locked)
+    if state.screen == AppScreen::LayarBesar {
+        let center_rect =
+            apply_camera_viewport(&mut camera, &window, screen_rect, 0.0, 0.0, 0.0, 0.0);
+        ui_state.viewport_rect_logical = Some(center_rect);
+
+        overlays::draw_projected_labels(
+            ctx,
+            center_rect,
+            &state,
+            &playback,
+            &overrides,
+            &marker_bounds,
+            &pointer_pool,
+            &camera,
+            cam_gtf,
+        );
+        overlays::draw_compass_and_telemetry_hud(
+            ctx,
+            center_rect,
+            &state,
+            &mut tcam,
+            &camera,
+            false,
+        );
+        layar_besar_page::draw_layar_besar_overlay(
+            ctx,
+            center_rect,
+            &mut state,
+            &mut playback,
+            &mut play_rts,
+            &api,
+            &ws,
+        );
+
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        return Ok(());
+    }
+
     // Dedicated Scenario Plot Editor (hide top toolbar & editor panels during Play Skenario)
     let top = if playback.play_test_mode {
         0.0
@@ -207,6 +333,8 @@ pub fn egui_root_system(
             &mut state,
             &mut tcam,
             &mut playback,
+            &mut play_rts,
+            &api,
             &ws,
         );
         (play_left, 0.0)
@@ -244,6 +372,7 @@ pub fn egui_root_system(
         &playback,
         &overrides,
         &marker_bounds,
+        &pointer_pool,
         &camera,
         cam_gtf,
     );
@@ -253,11 +382,26 @@ pub fn egui_root_system(
         center_rect,
         &state,
         &playback,
+        &overrides,
+        &play_rts,
         &gizmo_state,
         &poly_edit,
         &camera,
         cam_gtf,
     );
+
+    overlays::draw_play_rts_overlay(ctx, center_rect, &state, &playback, &play_rts);
+
+    if state.is_tactical_live() && playback.play_test_mode {
+        overlays::draw_compass_and_telemetry_hud(
+            ctx,
+            center_rect,
+            &state,
+            &mut tcam,
+            &camera,
+            true,
+        );
+    }
 
     draw_polygon_vertex_editor(
         ctx,
@@ -400,7 +544,8 @@ pub fn egui_root_system(
     ) || gizmo_state.hovered_entity.is_some()
     {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-    } else if route_edit.add_point_on_map_mode
+    } else if play_rts.marquee_drag.is_some()
+        || route_edit.add_point_on_map_mode
         || poly_edit.add_point_on_map_mode
         || matches!(
             state.tool_mode,
@@ -410,6 +555,8 @@ pub fn egui_root_system(
                 | ToolMode::DrawRoute
                 | ToolMode::PickRouteMarker
                 | ToolMode::PickShootMarker
+                | ToolMode::PickPointerMarker
+                | ToolMode::PickSpawnHideMarker
                 | ToolMode::PlaceParticle
         )
     {

@@ -1,6 +1,9 @@
 use bevy_egui::egui;
 use chrono::{DateTime, Local, Utc};
-use twg_shared::models::{Operasi, Skenario};
+use twg_shared::{
+    models::{Operasi, Skenario},
+    ws::WsClientMode,
+};
 
 use crate::{
     net::{
@@ -9,7 +12,8 @@ use crate::{
         ws_client::{WsClientBridge, WsOutCommand},
     },
     scene::markers::current_auth,
-    state::{AppScreen, AppState, PlaybackState},
+    state::{AppScreen, AppState, PlayPanelTab, PlaySessionMode, PlaybackState},
+    ui::app_icon::draw_app_brand_icon,
 };
 
 pub fn format_timestamp(dt: DateTime<Utc>) -> String {
@@ -110,6 +114,133 @@ pub fn navigate_to_all_skenarios(state: &mut AppState, api: &ApiClientBridge) {
     trigger_load_skenarios(state, api);
 }
 
+pub fn trigger_load_satkers(state: &mut AppState, api: &ApiClientBridge) {
+    if state.offline_preview {
+        state.satker_table.loading = false;
+        return;
+    }
+    let Some(auth) = current_auth(state) else {
+        return;
+    };
+    state.satker_table.loading = true;
+    state.satker_table.error = None;
+    api.send(ApiCommand::LoadSatkers { auth });
+}
+
+pub fn trigger_load_users(state: &mut AppState, api: &ApiClientBridge) {
+    if state.offline_preview {
+        state.user_table.loading = false;
+        return;
+    }
+    let Some(auth) = current_auth(state) else {
+        return;
+    };
+    state.user_table.loading = true;
+    state.user_table.error = None;
+    api.send(ApiCommand::LoadUsers { auth });
+}
+
+pub fn trigger_load_tactical_operasis(state: &mut AppState, api: &ApiClientBridge) {
+    if state.offline_preview {
+        state.tactical_page.loading = false;
+        return;
+    }
+    let Some(auth) = current_auth(state) else {
+        return;
+    };
+    state.tactical_page.loading = true;
+    state.tactical_page.error = None;
+    let search = {
+        let q = state.tactical_page.applied_search.trim();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.to_string())
+        }
+    };
+    api.send(ApiCommand::LoadTacticalOperasis {
+        auth,
+        page: state.tactical_page.page.max(1),
+        per_page: state.tactical_page.per_page.clamp(1, 50),
+        search,
+    });
+}
+
+/// Opens a scenario directly into **Play Skenario Tactical** (realtime live sync mode).
+/// When `broadcast_cmd` is `Some("load_skenario" | "reload_skenario")` and the current user
+/// is authorized (`admin` or satker-matching `admin_satker`), Layar Besar is instructed to
+/// load/reload this scenario as well once the bundle finishes loading.
+pub fn open_tactical_skenario(
+    state: &mut AppState,
+    playback: &mut PlaybackState,
+    api: &ApiClientBridge,
+    sk: &Skenario,
+    operasi_name: String,
+    sibling_skenarios: Vec<Skenario>,
+    broadcast_cmd: Option<&'static str>,
+) {
+    playback.stop_play_test();
+    state.play_session_mode = PlaySessionMode::TacticalLive;
+    state.tactical_page.active_operasi_name = operasi_name;
+    state.tactical_page.active_operasi_skenarios = sibling_skenarios;
+    state.tactical_page.play_panel_tab = PlayPanelTab::Animasi;
+    state.tactical_page.pending_open_tactical_id = Some(sk.id);
+    state.tactical_page.pending_broadcast_big_screen = if state.can_control_skenario_big_screen(sk)
+    {
+        broadcast_cmd
+    } else {
+        None
+    };
+    state.skenario_table.pending_open_plot_id = None;
+
+    if state.offline_preview {
+        state.active_skenario = Some(sk.clone());
+        state.screen = AppScreen::PlotSkenario;
+        playback.enter_play_mode();
+        return;
+    }
+
+    if let Some(auth) = current_auth(state) {
+        state.status_banner = Some(format!("Memuat Simulasi Tactical '{}'...", sk.name));
+        api.send(ApiCommand::LoadBundle {
+            auth: auth.clone(),
+            skenario_id: sk.id,
+        });
+        if state.tactical_page.active_operasi_skenarios.is_empty() {
+            api.send(ApiCommand::LoadOperasiSkenariosForTactical {
+                auth,
+                operasi_id: sk.operasi_id,
+            });
+        }
+    }
+}
+
+pub fn enter_layar_besar(
+    state: &mut AppState,
+    playback: &mut PlaybackState,
+    ws: &WsClientBridge,
+) {
+    playback.stop_play_test();
+    state.skenario_table.close_modal();
+    state.play_session_mode = PlaySessionMode::BigScreen;
+    state.active_skenario = None;
+    state.markers.clear();
+    state.buildings.clear();
+    state.lines.clear();
+    state.text_markers.clear();
+    state.anims.clear();
+    state.big_screen.loaded_by_actor = None;
+    state.big_screen.pending_skenario_id = None;
+    state.big_screen.pending_camera_payload = None;
+    state.big_screen.last_event_text =
+        Some("Menunggu skenario di-load dari Play Skenario Tactical (Admin / Admin Satker)...".into());
+    state.screen = AppScreen::LayarBesar;
+    ws.send(WsOutCommand::Subscribe {
+        skenario_id: None,
+        client_mode: WsClientMode::BigScreen,
+    });
+}
+
 pub fn open_plot_skenario(
     state: &mut AppState,
     playback: &mut PlaybackState,
@@ -117,6 +248,9 @@ pub fn open_plot_skenario(
     sk: &Skenario,
 ) {
     playback.stop_play_test();
+    state.play_session_mode = PlaySessionMode::LocalPreview;
+    state.tactical_page.pending_open_tactical_id = None;
+    state.tactical_page.pending_broadcast_big_screen = None;
     if let Some(op) = state
         .skenario_table
         .operasi_options
@@ -141,12 +275,63 @@ pub fn open_plot_skenario(
     }
 }
 
+pub fn open_profile_screen(
+    state: &mut AppState,
+    playback: &mut PlaybackState,
+    ws: &WsClientBridge,
+) {
+    playback.stop_play_test();
+    state.play_session_mode = PlaySessionMode::LocalPreview;
+    state.skenario_table.close_modal();
+    state.restore_active_skenario_map_state();
+    if let Some(u) = state.current_user.clone() {
+        state.profile_form.load_from_user(&u);
+    }
+    state.screen = AppScreen::Profile;
+    ws.send(WsOutCommand::Subscribe {
+        skenario_id: None,
+        client_mode: WsClientMode::Idle,
+    });
+}
+
 pub fn draw_screen_nav_tabs(
     ui: &mut egui::Ui,
     state: &mut AppState,
     playback: &mut PlaybackState,
     api: &ApiClientBridge,
+    ws: &WsClientBridge,
 ) {
+    // Dedicated Layar Besar accounts (`layar_besar` & `layar_besar_satker`) ONLY see Layar Besar (+ Profil).
+    if state.is_big_screen_only_role() {
+        let on_big = state.screen == AppScreen::LayarBesar;
+        if ui
+            .selectable_label(
+                on_big,
+                egui::RichText::new("Layar Besar")
+                    .strong()
+                    .color(if on_big {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(253, 224, 71)
+                    }),
+            )
+            .clicked()
+            && !on_big
+        {
+            enter_layar_besar(state, playback, ws);
+        }
+
+        let on_profile = state.screen == AppScreen::Profile;
+        if ui
+            .selectable_label(on_profile, egui::RichText::new("Profil").strong())
+            .clicked()
+            && !on_profile
+        {
+            open_profile_screen(state, playback, ws);
+        }
+        return;
+    }
+
     let on_op = state.screen == AppScreen::Operasis;
     if ui
         .selectable_label(on_op, egui::RichText::new("Operasi").strong())
@@ -154,9 +339,14 @@ pub fn draw_screen_nav_tabs(
         && !on_op
     {
         playback.stop_play_test();
+        state.play_session_mode = PlaySessionMode::LocalPreview;
         state.skenario_table.close_modal();
         state.restore_active_skenario_map_state();
         state.screen = AppScreen::Operasis;
+        ws.send(WsOutCommand::Subscribe {
+            skenario_id: None,
+            client_mode: WsClientMode::Idle,
+        });
         trigger_load_operasis(state, api);
     }
 
@@ -167,34 +357,141 @@ pub fn draw_screen_nav_tabs(
         && (!on_sk || state.is_skenario_map_preview_active())
     {
         playback.stop_play_test();
+        state.play_session_mode = PlaySessionMode::LocalPreview;
         state.restore_active_skenario_map_state();
+        ws.send(WsOutCommand::Subscribe {
+            skenario_id: None,
+            client_mode: WsClientMode::Idle,
+        });
         navigate_to_all_skenarios(state, api);
     }
 
     if state.active_skenario.is_some() {
-        let on_plot = state.screen == AppScreen::PlotSkenario;
+        let on_plot = state.screen == AppScreen::PlotSkenario
+            && state.play_session_mode == PlaySessionMode::LocalPreview;
         if ui
             .selectable_label(on_plot, egui::RichText::new("Plot Skenario").strong())
             .clicked()
             && !on_plot
         {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
             state.skenario_table.close_modal();
             state.restore_active_skenario_map_state();
             state.screen = AppScreen::PlotSkenario;
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::Idle,
+            });
+        }
+    }
+
+    // Tactical / Simulasi (all roles)
+    let on_tactical = state.screen == AppScreen::Tactical;
+    if ui
+        .selectable_label(
+            on_tactical,
+            egui::RichText::new("Tactical")
+                .strong()
+                .color(if on_tactical {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(110, 231, 183)
+                }),
+        )
+        .clicked()
+        && !on_tactical
+    {
+        playback.stop_play_test();
+        state.play_session_mode = PlaySessionMode::LocalPreview;
+        state.skenario_table.close_modal();
+        state.restore_active_skenario_map_state();
+        state.screen = AppScreen::Tactical;
+        ws.send(WsOutCommand::Subscribe {
+            skenario_id: None,
+            client_mode: WsClientMode::Idle,
+        });
+        trigger_load_tactical_operasis(state, api);
+    }
+
+    // Layar Besar (all roles — read-only display synced via WS)
+    let on_big = state.screen == AppScreen::LayarBesar;
+    if ui
+        .selectable_label(
+            on_big,
+            egui::RichText::new("Layar Besar")
+                .strong()
+                .color(if on_big {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(253, 224, 71)
+                }),
+        )
+        .clicked()
+        && !on_big
+    {
+        enter_layar_besar(state, playback, ws);
+    }
+
+    // Satkers CRUD (admin & admin_monitor)
+    if state.can_manage_satkers() {
+        let on_satker = state.screen == AppScreen::Satkers;
+        if ui
+            .selectable_label(on_satker, egui::RichText::new("Satkers").strong())
+            .clicked()
+            && !on_satker
+        {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.skenario_table.close_modal();
+            state.restore_active_skenario_map_state();
+            state.screen = AppScreen::Satkers;
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::Idle,
+            });
+            trigger_load_satkers(state, api);
+        }
+    }
+
+    // Users CRUD (admin, admin_monitor, admin_satker)
+    if state.can_manage_users() {
+        let on_users = state.screen == AppScreen::Users;
+        if ui
+            .selectable_label(on_users, egui::RichText::new("Users").strong())
+            .clicked()
+            && !on_users
+        {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.skenario_table.close_modal();
+            state.restore_active_skenario_map_state();
+            state.screen = AppScreen::Users;
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::Idle,
+            });
+            trigger_load_users(state, api);
+            trigger_load_satkers(state, api);
         }
     }
 
     if state.is_super_admin() {
         let on_assets = state.screen == AppScreen::Assets;
         if ui
-            .selectable_label(on_assets, egui::RichText::new("Assets 3D (Admin)").strong())
+            .selectable_label(on_assets, egui::RichText::new("Assets 3D").strong())
             .clicked()
             && !on_assets
         {
             playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
             state.skenario_table.close_modal();
             state.restore_active_skenario_map_state();
             state.screen = AppScreen::Assets;
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::Idle,
+            });
         }
     }
 }
@@ -216,6 +513,7 @@ pub fn draw_global_top_bar(
         )
         .show(viewport_ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                draw_app_brand_icon(ui, 20.0);
                 ui.label(
                     egui::RichText::new("TWG-RUST 3D")
                         .size(14.0)
@@ -224,7 +522,7 @@ pub fn draw_global_top_bar(
                 );
                 ui.separator();
 
-                draw_screen_nav_tabs(ui, state, playback, api);
+                draw_screen_nav_tabs(ui, state, playback, api, ws);
 
                 ui.separator();
                 if ui
@@ -293,16 +591,35 @@ pub fn draw_global_top_bar(
                         ui.colored_label(ws_color, ws_text);
                     }
 
-                    if let Some(user) = &state.current_user {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} [{}]",
-                                user.username,
-                                user.role.as_str()
-                            ))
-                            .size(11.5)
-                            .color(egui::Color32::from_rgb(203, 213, 225)),
-                        );
+                    if let Some(user) = state.current_user.clone() {
+                        let on_prof = state.screen == AppScreen::Profile;
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} [{}]  •  Profil",
+                                        user.username,
+                                        user.role.label()
+                                    ))
+                                    .size(11.5)
+                                    .color(if on_prof {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        egui::Color32::from_rgb(203, 213, 225)
+                                    }),
+                                )
+                                .fill(if on_prof {
+                                    egui::Color32::from_rgb(14, 116, 144)
+                                } else {
+                                    egui::Color32::from_rgb(24, 34, 53)
+                                }),
+                            )
+                            .on_hover_text("Buka halaman Profil & Ganti Password")
+                            .clicked()
+                            && !on_prof
+                        {
+                            open_profile_screen(state, playback, ws);
+                        }
                     }
                 });
             });

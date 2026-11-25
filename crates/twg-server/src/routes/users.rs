@@ -75,17 +75,48 @@ pub async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> AppResult<Json<ApiResponse<UserDto>>> {
     auth.require_admin_write()?;
-    if req.username.trim().is_empty() || req.password.len() < 6 {
+    let name = req.name.trim();
+    let username = req.username.trim();
+    if name.is_empty() || username.is_empty() || req.password.len() < 6 {
         return Err(AppError::BadRequest(
-            "username required and password >= 6 chars".into(),
+            "Nama, username wajib diisi dan password minimal 6 karakter".into(),
         ));
     }
 
     let target_satker_id = if auth.role.is_admin_satker() {
-        auth.satker_id
+        if !req.role.is_satker_role() {
+            return Err(AppError::Forbidden(
+                "Admin Satker hanya dapat membuat user dengan role Admin Satker, User Satker, atau Layar Besar Satker"
+                    .into(),
+            ));
+        }
+        let Some(sid) = auth.satker_id else {
+            return Err(AppError::Forbidden(
+                "Akun Admin Satker belum terikat ke Satker".into(),
+            ));
+        };
+        Some(sid)
+    } else if req.role.is_satker_role() {
+        let Some(sid) = req.satker_id else {
+            return Err(AppError::BadRequest(
+                "Satker wajib dipilih untuk role satker".into(),
+            ));
+        };
+        Some(sid)
     } else {
-        req.satker_id
+        None
     };
+
+    let dup: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))")
+            .bind(username)
+            .fetch_one(&state.db)
+            .await?;
+    if dup {
+        return Err(AppError::BadRequest(format!(
+            "Username '{username}' sudah digunakan"
+        )));
+    }
 
     let pw_hash = hash_password(&req.password)?;
     let id = Uuid::new_v4();
@@ -102,8 +133,8 @@ pub async fn create_user(
         "#,
     )
     .bind(id)
-    .bind(req.name.trim())
-    .bind(req.username.trim())
+    .bind(name)
+    .bind(username)
     .bind(pw_hash)
     .bind(req.role.as_str())
     .bind(target_satker_id)
@@ -123,37 +154,92 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> AppResult<Json<ApiResponse<UserDto>>> {
     auth.require_admin_write()?;
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Nama user wajib diisi".into()));
+    }
     let existing = fetch_user_by_id(&state, id).await?;
     if !auth.can_mutate_satker(existing.satker_id) {
         return Err(AppError::Forbidden("cross-satker user update denied".into()));
     }
 
     let target_satker_id = if auth.role.is_admin_satker() {
-        auth.satker_id
+        if !req.role.is_satker_role() {
+            return Err(AppError::Forbidden(
+                "Admin Satker hanya dapat menetapkan role Admin Satker, User Satker, atau Layar Besar Satker".into(),
+            ));
+        }
+        let Some(sid) = auth.satker_id else {
+            return Err(AppError::Forbidden(
+                "Akun Admin Satker belum terikat ke Satker".into(),
+            ));
+        };
+        Some(sid)
+    } else if req.role.is_satker_role() {
+        let Some(sid) = req.satker_id else {
+            return Err(AppError::BadRequest(
+                "Satker wajib dipilih untuk role satker".into(),
+            ));
+        };
+        Some(sid)
     } else {
-        req.satker_id
+        None
     };
+
     let units = if req.units.is_null() {
         existing.units
     } else {
         req.units
     };
 
-    sqlx::query(
-        r#"
-        UPDATE users
-        SET name = $1, role = $2, satker_id = $3, profile_img = COALESCE($4, profile_img), units = $5, updated_at = NOW()
-        WHERE id = $6
-        "#,
-    )
-    .bind(req.name.trim())
-    .bind(req.role.as_str())
-    .bind(target_satker_id)
-    .bind(req.profile_img)
-    .bind(units)
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    let new_pw_hash = match req.password.as_deref().map(str::trim) {
+        Some(pw) if !pw.is_empty() => {
+            if pw.len() < 6 {
+                return Err(AppError::BadRequest(
+                    "Password baru minimal 6 karakter".into(),
+                ));
+            }
+            Some(hash_password(pw)?)
+        }
+        _ => None,
+    };
+
+    if let Some(pw_hash) = new_pw_hash {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET name = $1, role = $2, satker_id = $3, password = $4,
+                profile_img = COALESCE($5, profile_img), units = $6, updated_at = NOW()
+            WHERE id = $7
+            "#,
+        )
+        .bind(name)
+        .bind(req.role.as_str())
+        .bind(target_satker_id)
+        .bind(pw_hash)
+        .bind(req.profile_img)
+        .bind(units)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET name = $1, role = $2, satker_id = $3,
+                profile_img = COALESCE($4, profile_img), units = $5, updated_at = NOW()
+            WHERE id = $6
+            "#,
+        )
+        .bind(name)
+        .bind(req.role.as_str())
+        .bind(target_satker_id)
+        .bind(req.profile_img)
+        .bind(units)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    }
 
     let user = fetch_user_by_id(&state, id).await?;
     Ok(Json(ApiResponse { data: user }))

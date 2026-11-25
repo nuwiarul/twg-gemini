@@ -18,6 +18,9 @@ pub enum RouteFormationKind {
     /// Rows × Columns grid centered on the route axis (e.g., 5 units with 4 cols = 4 front + 1 back).
     #[default]
     Grid,
+    /// Police Escort / Patwal Convoy arranged by tactical roles (Lead Motos -> Front Police ->
+    /// VIP with flanking Side Motos -> Rear Police Sweeper).
+    Patwal,
     /// Free / Custom formation where each unit keeps its own local `(lateral_m, longitudinal_m)` offset.
     Custom,
     /// Tactical V / Arrowhead formation with Unit #1 at the point.
@@ -31,6 +34,7 @@ pub enum RouteFormationKind {
 impl RouteFormationKind {
     pub const ALL: &'static [Self] = &[
         Self::Grid,
+        Self::Patwal,
         Self::Custom,
         Self::Wedge,
         Self::Staggered,
@@ -40,6 +44,7 @@ impl RouteFormationKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Grid => "Barisan Grid (Kolom × Baris)",
+            Self::Patwal => "Konvoi Patwal (Pengawalan)",
             Self::Custom => "Bebas / Kustom",
             Self::Wedge => "Panah / V (Wedge)",
             Self::Staggered => "Zig-Zag (Staggered)",
@@ -50,12 +55,95 @@ impl RouteFormationKind {
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Grid => "Barisan Grid",
+            Self::Patwal => "Patwal",
             Self::Custom => "Bebas / Kustom",
             Self::Wedge => "Panah / V",
             Self::Staggered => "Zig-Zag",
             Self::VipEscort => "Kawal VIP",
         }
     }
+}
+
+/// Tactical role of an individual unit inside `RouteFormationKind::Patwal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatwalUnitRole {
+    /// Forward outrider / Voorijder motorcycles opening the road at the head of the convoy.
+    #[default]
+    LeadMoto,
+    /// Lead police car(s) directly behind the front outrider motorcycles.
+    FrontPolice,
+    /// Escorted VIP vehicle(s) protected in the center of the convoy.
+    Vip,
+    /// Flanking motorcycles riding left and right alongside the VIP vehicle(s).
+    SideMoto,
+    /// Rear police sweeper car(s) closing the tail of the convoy.
+    RearPolice,
+}
+
+impl PatwalUnitRole {
+    pub const ALL: &'static [Self] = &[
+        Self::LeadMoto,
+        Self::FrontPolice,
+        Self::Vip,
+        Self::SideMoto,
+        Self::RearPolice,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LeadMoto => "Motor Depan (Voorijder)",
+            Self::FrontPolice => "Mobil Patwal Depan",
+            Self::Vip => "Kendaraan VIP (Dikawal)",
+            Self::SideMoto => "Motor Samping VIP (Kiri/Kanan)",
+            Self::RearPolice => "Mobil Patwal Penutup",
+        }
+    }
+
+    pub fn short_tag(self) -> &'static str {
+        match self {
+            Self::LeadMoto => "MTR-DPN",
+            Self::FrontPolice => "PTW-DPN",
+            Self::Vip => "VIP",
+            Self::SideMoto => "MTR-SMP",
+            Self::RearPolice => "PTW-BLK",
+        }
+    }
+}
+
+/// Sub-layout for the front outrider motorcycles (`PatwalUnitRole::LeadMoto`) inside a Patwal convoy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatwalLeadMotoLayout {
+    /// Automatic smart layout: 1 = center, 2 = abreast, odd (>=3) = Arrow/V, even (>=4) = 2-column Grid.
+    #[default]
+    Auto,
+    /// V / Arrowhead formation.
+    Arrow,
+    /// 2-column grid formation.
+    Grid,
+    /// Single-row line abreast.
+    LineAbreast,
+}
+
+impl PatwalLeadMotoLayout {
+    pub const ALL: &'static [Self] = &[Self::Auto, Self::Arrow, Self::Grid, Self::LineAbreast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Otomatis (Ganjil=Panah, Genap=Grid)",
+            Self::Arrow => "Formasi Panah / V",
+            Self::Grid => "Formasi Grid (2 Kolom)",
+            Self::LineAbreast => "Sejajar 1 Baris",
+        }
+    }
+}
+
+/// Per-unit role assignment stored inside `MultiRouteConfig::patwal_roles`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatwalUnitAssignment {
+    pub marker_id: Uuid,
+    pub role: PatwalUnitRole,
 }
 
 /// How the formation handles bends and corners along the route polyline.
@@ -101,6 +189,18 @@ fn default_spacing_m() -> f64 {
 fn default_vip_radius_m() -> f64 {
     4.0
 }
+fn default_patwal_layer_gap_m() -> f64 {
+    9.0
+}
+fn default_patwal_moto_spacing_x_m() -> f64 {
+    3.0
+}
+fn default_patwal_moto_spacing_z_m() -> f64 {
+    4.0
+}
+fn default_patwal_side_offset_x_m() -> f64 {
+    3.2
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiRouteConfig {
@@ -120,6 +220,24 @@ pub struct MultiRouteConfig {
     pub vip_radius_m: f64,
     #[serde(default)]
     pub custom_offsets: Vec<CustomUnitOffset>,
+    /// Per-unit tactical roles when `formation == RouteFormationKind::Patwal`.
+    #[serde(default)]
+    pub patwal_roles: Vec<PatwalUnitAssignment>,
+    /// Sub-layout for front outrider motorcycles (`PatwalUnitRole::LeadMoto`).
+    #[serde(default)]
+    pub patwal_lead_layout: PatwalLeadMotoLayout,
+    /// Longitudinal spacing between convoy layers/vehicles in meters (default `9.0 m`).
+    #[serde(default = "default_patwal_layer_gap_m")]
+    pub patwal_layer_gap_m: f64,
+    /// Lateral spacing between front outrider motorcycles in meters (default `3.0 m`).
+    #[serde(default = "default_patwal_moto_spacing_x_m")]
+    pub patwal_moto_spacing_x_m: f64,
+    /// Longitudinal row spacing inside multi-row front motorcycle formations (default `4.0 m`).
+    #[serde(default = "default_patwal_moto_spacing_z_m")]
+    pub patwal_moto_spacing_z_m: f64,
+    /// Lateral offset of flanking motorcycles to the left/right of VIP vehicles (default `3.2 m`).
+    #[serde(default = "default_patwal_side_offset_x_m")]
+    pub patwal_side_offset_x_m: f64,
 }
 
 impl Default for MultiRouteConfig {
@@ -133,6 +251,12 @@ impl Default for MultiRouteConfig {
             spacing_z_m: default_spacing_m(),
             vip_radius_m: default_vip_radius_m(),
             custom_offsets: Vec::new(),
+            patwal_roles: Vec::new(),
+            patwal_lead_layout: PatwalLeadMotoLayout::Auto,
+            patwal_layer_gap_m: default_patwal_layer_gap_m(),
+            patwal_moto_spacing_x_m: default_patwal_moto_spacing_x_m(),
+            patwal_moto_spacing_z_m: default_patwal_moto_spacing_z_m(),
+            patwal_side_offset_x_m: default_patwal_side_offset_x_m(),
         }
     }
 }
@@ -155,6 +279,26 @@ impl MultiRouteConfig {
         } else {
             default_vip_radius_m()
         };
+        self.patwal_layer_gap_m = if self.patwal_layer_gap_m.is_finite() {
+            self.patwal_layer_gap_m.clamp(2.0, 80.0)
+        } else {
+            default_patwal_layer_gap_m()
+        };
+        self.patwal_moto_spacing_x_m = if self.patwal_moto_spacing_x_m.is_finite() {
+            self.patwal_moto_spacing_x_m.clamp(0.8, 40.0)
+        } else {
+            default_patwal_moto_spacing_x_m()
+        };
+        self.patwal_moto_spacing_z_m = if self.patwal_moto_spacing_z_m.is_finite() {
+            self.patwal_moto_spacing_z_m.clamp(1.0, 40.0)
+        } else {
+            default_patwal_moto_spacing_z_m()
+        };
+        self.patwal_side_offset_x_m = if self.patwal_side_offset_x_m.is_finite() {
+            self.patwal_side_offset_x_m.clamp(1.0, 40.0)
+        } else {
+            default_patwal_side_offset_x_m()
+        };
         // Deduplicate marker_ids while preserving exact order
         let mut seen = std::collections::HashSet::new();
         self.marker_ids.retain(|id| seen.insert(*id));
@@ -171,6 +315,299 @@ impl MultiRouteConfig {
             o.lateral_m = o.lateral_m.clamp(-250.0, 250.0);
             o.longitudinal_m = o.longitudinal_m.clamp(-250.0, 250.0);
         }
+        // Keep patwal_roles deduplicated and synced with marker_ids
+        let mut seen_roles = std::collections::HashSet::new();
+        self.patwal_roles
+            .retain(|a| self.marker_ids.contains(&a.marker_id) && seen_roles.insert(a.marker_id));
+    }
+
+    /// Returns the assigned Patwal role for `marker_id`, falling back to a sensible positional
+    /// convoy sequence (`LeadMoto -> FrontPolice -> Vip -> RearPolice`) when unassigned.
+    pub fn patwal_role_for(&self, marker_id: Uuid) -> PatwalUnitRole {
+        if let Some(a) = self.patwal_roles.iter().find(|r| r.marker_id == marker_id) {
+            return a.role;
+        }
+        let idx = self
+            .marker_ids
+            .iter()
+            .position(|id| *id == marker_id)
+            .unwrap_or(0);
+        let total = self.marker_ids.len();
+        if total <= 1 {
+            PatwalUnitRole::FrontPolice
+        } else if idx == 0 {
+            PatwalUnitRole::LeadMoto
+        } else if idx + 1 == total && total >= 3 {
+            PatwalUnitRole::RearPolice
+        } else if idx == 1 && total >= 4 {
+            PatwalUnitRole::FrontPolice
+        } else {
+            PatwalUnitRole::Vip
+        }
+    }
+
+    /// Explicitly assigns a Patwal convoy role to `marker_id`.
+    pub fn set_patwal_role(&mut self, marker_id: Uuid, role: PatwalUnitRole) {
+        if let Some(entry) = self
+            .patwal_roles
+            .iter_mut()
+            .find(|r| r.marker_id == marker_id)
+        {
+            entry.role = role;
+        } else {
+            self.patwal_roles.push(PatwalUnitAssignment { marker_id, role });
+        }
+    }
+
+    /// Heuristically infers a sensible `PatwalUnitRole` for a newly added marker based on its
+    /// name / model path and what roles are already filled in this convoy.
+    pub fn infer_patwal_role_for_marker(&self, marker: &Marker) -> PatwalUnitRole {
+        let hay = format!(
+            "{} {} {}",
+            marker.name.to_lowercase(),
+            marker.model_path.to_lowercase(),
+            marker.category.to_lowercase()
+        );
+        let has_role = |r: PatwalUnitRole| {
+            self.patwal_roles
+                .iter()
+                .any(|a| a.marker_id != marker.id && a.role == r)
+        };
+
+        let is_moto = hay.contains("motor")
+            || hay.contains("moge")
+            || hay.contains("trail")
+            || hay.contains("bike")
+            || hay.contains("voorijder")
+            || hay.contains("vespa");
+        let is_vip = hay.contains("vip")
+            || hay.contains("vvip")
+            || hay.contains("presiden")
+            || hay.contains("pejabat")
+            || hay.contains("tamu")
+            || hay.contains("dikawal")
+            || hay.contains("alphard")
+            || hay.contains("sedan");
+        let is_police = hay.contains("patwal")
+            || hay.contains("polisi")
+            || hay.contains("police")
+            || hay.contains("lantas")
+            || hay.contains("brimob")
+            || hay.contains("sabhara")
+            || hay.contains("dalmas")
+            || hay.contains("sweeper")
+            || hay.contains("penutup");
+
+        if is_moto {
+            if hay.contains("samping")
+                || hay.contains("apit")
+                || hay.contains("kiri")
+                || hay.contains("kanan")
+                || hay.contains("side")
+            {
+                return PatwalUnitRole::SideMoto;
+            }
+            return PatwalUnitRole::LeadMoto;
+        }
+        if is_vip {
+            return PatwalUnitRole::Vip;
+        }
+        if is_police {
+            if hay.contains("belakang")
+                || hay.contains("penutup")
+                || hay.contains("sweeper")
+                || hay.contains("rear")
+            {
+                return PatwalUnitRole::RearPolice;
+            }
+            if !has_role(PatwalUnitRole::FrontPolice) {
+                return PatwalUnitRole::FrontPolice;
+            }
+            if !has_role(PatwalUnitRole::RearPolice) {
+                return PatwalUnitRole::RearPolice;
+            }
+            return PatwalUnitRole::FrontPolice;
+        }
+
+        // Positional fallback for generic marker names
+        if !has_role(PatwalUnitRole::FrontPolice) {
+            PatwalUnitRole::FrontPolice
+        } else if !has_role(PatwalUnitRole::Vip) {
+            PatwalUnitRole::Vip
+        } else if !has_role(PatwalUnitRole::RearPolice) {
+            PatwalUnitRole::RearPolice
+        } else {
+            PatwalUnitRole::Vip
+        }
+    }
+
+    /// Populates missing Patwal role entries (or overwrites all if `force_reset` is `true`)
+    /// by inspecting the current scenario markers.
+    pub fn auto_assign_patwal_roles(&mut self, markers: &[Marker], force_reset: bool) {
+        if force_reset {
+            self.patwal_roles.clear();
+        }
+        let ids = self.marker_ids.clone();
+        for mid in ids {
+            if !force_reset && self.patwal_roles.iter().any(|r| r.marker_id == mid) {
+                continue;
+            }
+            let role = if let Some(m) = markers.iter().find(|x| x.id == mid) {
+                self.infer_patwal_role_for_marker(m)
+            } else {
+                self.patwal_role_for(mid)
+            };
+            self.set_patwal_role(mid, role);
+        }
+        self.sanitize();
+    }
+
+    /// Computes exact `(marker_id, lateral_m, longitudinal_m)` offsets for `RouteFormationKind::Patwal`:
+    /// 1. `LeadMoto` (Voorijder) at the head (`Auto`: 1 center, 2 abreast, odd>=3 Arrow/V, even>=4 Grid 2-col)
+    /// 2. `FrontPolice` centered behind lead motorcycles
+    /// 3. `Vip` centered in the middle + `SideMoto` flanking left/right symmetrically alongside VIP
+    /// 4. `RearPolice` centered at the tail of the convoy
+    pub fn compute_patwal_offsets(&self) -> Vec<(Uuid, f64, f64)> {
+        let gap = self.patwal_layer_gap_m.clamp(2.0, 80.0);
+        let moto_x = self.patwal_moto_spacing_x_m.clamp(0.8, 40.0);
+        let moto_z = self.patwal_moto_spacing_z_m.clamp(1.0, 40.0);
+        let side_x = self.patwal_side_offset_x_m.clamp(1.0, 40.0);
+
+        let mut lead_motos: Vec<Uuid> = Vec::new();
+        let mut front_police: Vec<Uuid> = Vec::new();
+        let mut vips: Vec<Uuid> = Vec::new();
+        let mut side_motos: Vec<Uuid> = Vec::new();
+        let mut rear_police: Vec<Uuid> = Vec::new();
+
+        for &mid in &self.marker_ids {
+            match self.patwal_role_for(mid) {
+                PatwalUnitRole::LeadMoto => lead_motos.push(mid),
+                PatwalUnitRole::FrontPolice => front_police.push(mid),
+                PatwalUnitRole::Vip => vips.push(mid),
+                PatwalUnitRole::SideMoto => side_motos.push(mid),
+                PatwalUnitRole::RearPolice => rear_police.push(mid),
+            }
+        }
+
+        let mut map: std::collections::HashMap<Uuid, (f64, f64)> =
+            std::collections::HashMap::with_capacity(self.marker_ids.len());
+        let mut cursor_lon = 0.0_f64;
+
+        // 1. Lead Motorcycles (Voorijder)
+        let n_lead = lead_motos.len();
+        if n_lead > 0 {
+            let eff_layout = match self.patwal_lead_layout {
+                PatwalLeadMotoLayout::Auto => {
+                    if n_lead <= 2 {
+                        PatwalLeadMotoLayout::LineAbreast
+                    } else if n_lead % 2 == 1 {
+                        PatwalLeadMotoLayout::Arrow
+                    } else {
+                        PatwalLeadMotoLayout::Grid
+                    }
+                }
+                other => other,
+            };
+            let mut min_lon = cursor_lon;
+            for (i, &mid) in lead_motos.iter().enumerate() {
+                let (lat, local_lon) = match eff_layout {
+                    PatwalLeadMotoLayout::LineAbreast => {
+                        let lat = (i as f64 - (n_lead as f64 - 1.0) * 0.5) * moto_x;
+                        (lat, 0.0)
+                    }
+                    PatwalLeadMotoLayout::Arrow | PatwalLeadMotoLayout::Auto => {
+                        if i == 0 {
+                            (0.0, 0.0)
+                        } else {
+                            let rank = ((i - 1) / 2 + 1) as f64;
+                            let side = if i % 2 == 1 { -1.0 } else { 1.0 };
+                            (side * rank * (moto_x * 0.65), -rank * moto_z)
+                        }
+                    }
+                    PatwalLeadMotoLayout::Grid => {
+                        let cols = 2usize;
+                        let row = i / cols;
+                        let col = i % cols;
+                        let row_start = row * cols;
+                        let items_in_row = n_lead.saturating_sub(row_start).min(cols).max(1);
+                        let lat = (col as f64 - (items_in_row as f64 - 1.0) * 0.5) * moto_x;
+                        let lon = -(row as f64) * moto_z;
+                        (lat, lon)
+                    }
+                };
+                let lon = cursor_lon + local_lon;
+                min_lon = min_lon.min(lon);
+                map.insert(mid, (lat, lon));
+            }
+            cursor_lon = min_lon - gap;
+        }
+
+        // 2. Front Police Escort Car(s)
+        for &mid in &front_police {
+            map.insert(mid, (0.0, cursor_lon));
+            cursor_lon -= gap;
+        }
+
+        // 3. Escorted VIP Vehicle(s) + 4. Flanking Side Motorcycles (Left & Right beside VIP)
+        let mut vip_lons: Vec<f64> = Vec::with_capacity(vips.len());
+        let mut block_min_lon = cursor_lon;
+        for &mid in &vips {
+            map.insert(mid, (0.0, cursor_lon));
+            vip_lons.push(cursor_lon);
+            block_min_lon = block_min_lon.min(cursor_lon);
+            cursor_lon -= gap;
+        }
+
+        let n_side = side_motos.len();
+        if n_side > 0 {
+            let num_pairs = n_side.div_ceil(2);
+            for (j, &mid) in side_motos.iter().enumerate() {
+                let side = if j.is_multiple_of(2) { -1.0 } else { 1.0 };
+                let pair_idx = j / 2;
+                let lon = if !vip_lons.is_empty() {
+                    if vip_lons.len() >= num_pairs {
+                        vip_lons[pair_idx]
+                    } else if vip_lons.len() == 1 {
+                        // Multiple flanking pairs symmetrically staggered beside a single VIP car
+                        let center_lon = vip_lons[0];
+                        let step = (moto_z * 0.85).min(gap * 0.6);
+                        center_lon + ((num_pairs as f64 - 1.0) * 0.5 - pair_idx as f64) * step
+                    } else {
+                        let first = vip_lons[0];
+                        let last = *vip_lons.last().unwrap_or(&first);
+                        let frac = if num_pairs <= 1 {
+                            0.0
+                        } else {
+                            (pair_idx as f64) / ((num_pairs - 1) as f64)
+                        };
+                        first + (last - first) * frac
+                    }
+                } else {
+                    cursor_lon - (pair_idx as f64) * moto_z
+                };
+                block_min_lon = block_min_lon.min(lon);
+                map.insert(mid, (side * side_x, lon));
+            }
+            if vip_lons.is_empty() {
+                cursor_lon = block_min_lon - gap;
+            } else {
+                cursor_lon = cursor_lon.min(block_min_lon - gap * 0.85);
+            }
+        }
+
+        // 5. Rear Police Sweeper Car(s)
+        for &mid in &rear_police {
+            map.insert(mid, (0.0, cursor_lon));
+            cursor_lon -= gap;
+        }
+
+        self.marker_ids
+            .iter()
+            .map(|&mid| {
+                let (lat, lon) = map.get(&mid).copied().unwrap_or((0.0, 0.0));
+                (mid, lat, lon)
+            })
+            .collect()
     }
 
     /// Computes local `(lateral_m, longitudinal_m)` offset for unit at `index` (`marker_id`)
@@ -189,6 +626,11 @@ impl MultiRouteConfig {
                 let lon = -(row as f64) * sz;
                 (lat, lon)
             }
+            RouteFormationKind::Patwal => self
+                .compute_patwal_offsets()
+                .get(index)
+                .map(|&(_, lat, lon)| (lat, lon))
+                .unwrap_or((0.0, 0.0)),
             RouteFormationKind::Wedge => {
                 if index == 0 {
                     (0.0, 0.0)
@@ -226,27 +668,33 @@ impl MultiRouteConfig {
         }
     }
 
-    /// Computes local `(lateral_m, longitudinal_m)` offset for every unit in `self.marker_ids`.
-    pub fn compute_all_offsets(&self) -> Vec<(Uuid, f64, f64)> {
+    /// Computes local `(lateral_m, longitudinal_m)` offsets for every unit using `kind`.
+    pub fn compute_offsets_for_kind(&self, kind: RouteFormationKind) -> Vec<(Uuid, f64, f64)> {
+        if kind == RouteFormationKind::Patwal {
+            return self.compute_patwal_offsets();
+        }
         let total = self.marker_ids.len();
         self.marker_ids
             .iter()
             .enumerate()
             .map(|(i, &mid)| {
-                let (lat, lon) = self.offset_for_kind(self.formation, i, total);
+                let (lat, lon) = self.offset_for_kind(kind, i, total);
                 (mid, lat, lon)
             })
             .collect()
     }
 
+    /// Computes local `(lateral_m, longitudinal_m)` offset for every unit in `self.marker_ids`.
+    pub fn compute_all_offsets(&self) -> Vec<(Uuid, f64, f64)> {
+        self.compute_offsets_for_kind(self.formation)
+    }
+
     /// Ensures every unit in `self.marker_ids` has an explicit entry in `self.custom_offsets`,
     /// initializing missing units from `fallback_kind`.
     pub fn ensure_custom_offsets_seeded(&mut self, fallback_kind: RouteFormationKind) {
-        let total = self.marker_ids.len();
-        let ids = self.marker_ids.clone();
-        for (i, mid) in ids.into_iter().enumerate() {
+        let computed = self.compute_offsets_for_kind(fallback_kind);
+        for (mid, lat, lon) in computed {
             if !self.custom_offsets.iter().any(|o| o.marker_id == mid) {
-                let (lat, lon) = self.offset_for_kind(fallback_kind, i, total);
                 self.custom_offsets.push(CustomUnitOffset {
                     marker_id: mid,
                     lateral_m: lat,
@@ -264,18 +712,13 @@ impl MultiRouteConfig {
         } else {
             preset
         };
-        let total = self.marker_ids.len();
         self.custom_offsets = self
-            .marker_ids
-            .iter()
-            .enumerate()
-            .map(|(i, &mid)| {
-                let (lat, lon) = self.offset_for_kind(kind, i, total);
-                CustomUnitOffset {
-                    marker_id: mid,
-                    lateral_m: lat,
-                    longitudinal_m: lon,
-                }
+            .compute_offsets_for_kind(kind)
+            .into_iter()
+            .map(|(mid, lat, lon)| CustomUnitOffset {
+                marker_id: mid,
+                lateral_m: (lat * 20.0).round() / 20.0,
+                longitudinal_m: (lon * 20.0).round() / 20.0,
             })
             .collect();
     }
@@ -306,6 +749,7 @@ impl MultiRouteConfig {
         if let Some(pos) = self.marker_ids.iter().position(|id| *id == marker_id) {
             self.marker_ids.remove(pos);
             self.custom_offsets.retain(|o| o.marker_id != marker_id);
+            self.patwal_roles.retain(|r| r.marker_id != marker_id);
             false
         } else {
             self.marker_ids.push(marker_id);
@@ -492,6 +936,8 @@ pub fn write_multi_route_config(anim: &mut Anim, cfg: &MultiRouteConfig) {
 pub fn anim_bound_marker_ids(anim: &Anim) -> Vec<Uuid> {
     if is_multi_route_anim(anim) {
         parse_multi_route_config(anim).marker_ids
+    } else if crate::spawn_hide_anim::is_spawn_hide_anim(anim) {
+        crate::spawn_hide_anim::parse_spawn_hide_config(anim).marker_ids
     } else {
         anim.marker_id.into_iter().collect()
     }
@@ -500,16 +946,28 @@ pub fn anim_bound_marker_ids(anim: &Anim) -> Vec<Uuid> {
 /// Returns `true` if the animation has all required targets & geometry to be played in
 /// `Play Skenario`:
 /// - Particle animations require a placed position (`geom[0]`).
-/// - Shoot animations require a bound marker that currently exists in `markers` (no route polyline).
+/// - Shoot & Pointer Arrow animations require a bound marker that currently exists in `markers`.
+/// - Spawn & Hide animations require at least one existing bound marker in `marker_ids`.
 /// - Route animations require `>= 2` waypoints and at least one existing bound marker.
 pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }
-    if crate::shoot_anim::is_shoot_anim(anim) {
+    if crate::shoot_anim::is_shoot_anim(anim) || crate::pointer_anim::is_pointer_arrow_anim(anim) {
         return anim
             .marker_id
             .is_some_and(|id| markers.iter().any(|m| m.id == id));
+    }
+    if crate::spawn_hide_anim::is_spawn_hide_anim(anim) {
+        let bound = anim_bound_marker_ids(anim);
+        return bound
+            .iter()
+            .any(|id| markers.iter().any(|m| m.id == *id));
+    }
+    if crate::group_anim::is_group_anim(anim) {
+        return !crate::group_anim::parse_group_anim_config(anim)
+            .items
+            .is_empty();
     }
     if anim.geom.len() < 2 {
         return false;
@@ -922,6 +1380,73 @@ mod tests {
                 let d = (a.lateral_m - b.lateral_m).hypot(a.longitudinal_m - b.longitudinal_m);
                 assert!(d >= 1.5, "units {i} & {j} overlapped: d={d}");
             }
+        }
+    }
+
+    #[test]
+    fn patwal_auto_layout_handles_odd_arrow_even_grid_and_flanking_side_motos() {
+        // 3 lead motos (odd -> Arrow/V) + 1 front police + 1 VIP + 2 side motos + 1 rear police
+        let ids = mk_ids(8);
+        let mut cfg = MultiRouteConfig {
+            marker_ids: ids.clone(),
+            formation: RouteFormationKind::Patwal,
+            patwal_lead_layout: PatwalLeadMotoLayout::Auto,
+            patwal_layer_gap_m: 10.0,
+            patwal_moto_spacing_x_m: 3.0,
+            patwal_moto_spacing_z_m: 4.0,
+            patwal_side_offset_x_m: 3.5,
+            ..Default::default()
+        };
+        cfg.set_patwal_role(ids[0], PatwalUnitRole::LeadMoto);
+        cfg.set_patwal_role(ids[1], PatwalUnitRole::LeadMoto);
+        cfg.set_patwal_role(ids[2], PatwalUnitRole::LeadMoto);
+        cfg.set_patwal_role(ids[3], PatwalUnitRole::FrontPolice);
+        cfg.set_patwal_role(ids[4], PatwalUnitRole::Vip);
+        cfg.set_patwal_role(ids[5], PatwalUnitRole::SideMoto);
+        cfg.set_patwal_role(ids[6], PatwalUnitRole::SideMoto);
+        cfg.set_patwal_role(ids[7], PatwalUnitRole::RearPolice);
+
+        let offs = cfg.compute_all_offsets();
+        assert_eq!(offs.len(), 8);
+        // Lead 3 motos form V-arrow: tip at (0,0), wings symmetric at (-1.95,-4) & (+1.95,-4)
+        assert!((offs[0].1).abs() < 1e-6 && (offs[0].2).abs() < 1e-6);
+        assert!((offs[1].1 - (-1.95)).abs() < 1e-6 && (offs[1].2 - (-4.0)).abs() < 1e-6);
+        assert!((offs[2].1 - 1.95).abs() < 1e-6 && (offs[2].2 - (-4.0)).abs() < 1e-6);
+        // Front police centered at lon = -4 - 10 = -14
+        assert!((offs[3].1).abs() < 1e-6 && (offs[3].2 - (-14.0)).abs() < 1e-6);
+        // VIP centered at lon = -24, flanked left/right at +-3.5m on exact same lon = -24
+        assert!((offs[4].1).abs() < 1e-6 && (offs[4].2 - (-24.0)).abs() < 1e-6);
+        assert!((offs[5].1 - (-3.5)).abs() < 1e-6 && (offs[5].2 - (-24.0)).abs() < 1e-6);
+        assert!((offs[6].1 - 3.5).abs() < 1e-6 && (offs[6].2 - (-24.0)).abs() < 1e-6);
+        // Rear police centered behind VIP at lon = -34
+        assert!((offs[7].1).abs() < 1e-6 && (offs[7].2 - (-34.0)).abs() < 1e-6);
+
+        // 4 lead motos (even -> 2x2 Grid)
+        let ids4 = mk_ids(4);
+        let mut cfg4 = MultiRouteConfig {
+            marker_ids: ids4.clone(),
+            formation: RouteFormationKind::Patwal,
+            patwal_lead_layout: PatwalLeadMotoLayout::Auto,
+            patwal_moto_spacing_x_m: 3.0,
+            patwal_moto_spacing_z_m: 4.0,
+            ..Default::default()
+        };
+        for &id in &ids4 {
+            cfg4.set_patwal_role(id, PatwalUnitRole::LeadMoto);
+        }
+        let offs4 = cfg4.compute_all_offsets();
+        assert!((offs4[0].1 - (-1.5)).abs() < 1e-6 && (offs4[0].2).abs() < 1e-6);
+        assert!((offs4[1].1 - 1.5).abs() < 1e-6 && (offs4[1].2).abs() < 1e-6);
+        assert!((offs4[2].1 - (-1.5)).abs() < 1e-6 && (offs4[2].2 - (-4.0)).abs() < 1e-6);
+        assert!((offs4[3].1 - 1.5).abs() < 1e-6 && (offs4[3].2 - (-4.0)).abs() < 1e-6);
+
+        // 1-click conversion from Patwal to Custom preserves exact coordinates
+        cfg.copy_preset_into_custom(RouteFormationKind::Patwal);
+        cfg.formation = RouteFormationKind::Custom;
+        let custom_offs = cfg.compute_all_offsets();
+        for (a, b) in offs.iter().zip(custom_offs.iter()) {
+            assert_eq!(a.0, b.0);
+            assert!((a.1 - b.1).abs() < 0.06 && (a.2 - b.2).abs() < 0.06);
         }
     }
 }

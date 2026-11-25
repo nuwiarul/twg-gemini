@@ -1,22 +1,38 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
+use twg_shared::{
+    group_anim::GroupAnimMode,
+    particle_anim::{is_particle_anim, particle_anim_position},
+    spawn_hide_anim::SpawnHideAction,
+};
+use uuid::Uuid;
 
 use crate::{
     scene::{
         gizmo::TransformGizmoState,
+        markers::MarkerWorldBounds,
         parse_hex_color,
+        play_rts::PlayRtsState,
+        playback::PlaybackOverrides,
+        resolve_group_highlight_entries,
         route_edit::RouteEditState,
     },
-    state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode},
+    state::{AppState, PlaybackState, SelectedEntity, ToolMode},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_lines_and_routes_system(
     state: Res<AppState>,
     playback: Res<PlaybackState>,
+    overrides: Res<PlaybackOverrides>,
+    play_rts: Res<PlayRtsState>,
+    marker_bounds: Res<MarkerWorldBounds>,
     gizmo_state: Res<TransformGizmoState>,
     route_edit: Res<RouteEditState>,
     mut gizmos: Gizmos,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         return;
     }
 
@@ -49,6 +65,18 @@ pub fn draw_lines_and_routes_system(
     // Route animation paths: always hidden during Play Skenario for a clean tactical view
     let show_route_gizmos = state.show_gizmos && !playback.play_test_mode;
     if show_route_gizmos {
+        let group_hl = resolve_group_highlight_entries(&state);
+        let group_hl_mode = group_hl.as_ref().map(|(m, _)| *m);
+        let group_hl_map: HashMap<Uuid, (Option<usize>, bool)> = group_hl
+            .as_ref()
+            .map(|(_, entries)| {
+                entries
+                    .iter()
+                    .map(|e| (e.anim_id, (e.step_number, e.is_focused_candidate)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for anim in &state.anims {
             if state.hidden_entity_ids.contains(&anim.id) || anim.geom.len() < 2 {
                 continue;
@@ -57,7 +85,18 @@ pub fn draw_lines_and_routes_system(
             let is_selected = matches!(state.selected, SelectedEntity::Anim(id) if id == anim.id);
             let is_hovered =
                 matches!(gizmo_state.hovered_entity, Some(SelectedEntity::Anim(id)) if id == anim.id);
-            let color = if is_selected {
+            let grp_info = group_hl_map.get(&anim.id).copied();
+            let is_grp_focused = grp_info.is_some_and(|(_, foc)| foc);
+            let is_grp_member = grp_info.is_some();
+
+            let color = if is_grp_focused {
+                Color::srgb(1.0, 0.88, 0.16)
+            } else if is_grp_member {
+                match group_hl_mode.unwrap_or_default() {
+                    GroupAnimMode::Combine => Color::srgb(0.28, 0.68, 1.0),
+                    GroupAnimMode::Sequence => Color::srgb(0.72, 0.44, 1.0),
+                }
+            } else if is_selected {
                 Color::srgb(0.15, 0.98, 0.65)
             } else if is_hovered {
                 Color::srgb(0.98, 0.84, 0.25)
@@ -77,13 +116,22 @@ pub fn draw_lines_and_routes_system(
                 .collect();
             for w in pts.windows(2) {
                 gizmos.line(w[0], w[1], color);
-                if is_hovered || is_selected {
-                    gizmos.line(w[0] + Vec3::Y * 0.08, w[1] + Vec3::Y * 0.08, color);
+                if is_hovered || is_selected || is_grp_member {
+                    gizmos.line(w[0] + Vec3::Y * 0.10, w[1] + Vec3::Y * 0.10, color);
+                }
+                if is_grp_focused {
+                    gizmos.line(w[0] + Vec3::Y * 0.22, w[1] + Vec3::Y * 0.22, color);
                 }
             }
             // Skip chunky wireframe spheres when crisp 2D numbered pins are active in route editor
             if !is_editing {
-                let sphere_r = if is_hovered { 0.85 } else { 0.55 };
+                let sphere_r = if is_grp_focused {
+                    0.95
+                } else if is_hovered || is_grp_member {
+                    0.82
+                } else {
+                    0.55
+                };
                 for (pt_geo, p) in anim.geom.iter().zip(pts.iter()) {
                     gizmos.sphere(Isometry3d::from_translation(*p), sphere_r, color);
                     if pt_geo[2] > 0.5 {
@@ -126,6 +174,35 @@ pub fn draw_lines_and_routes_system(
                         link_col,
                     );
                 }
+            }
+        }
+
+        // Highlight Particle member locations belonging to a selected Group (or hovered candidate)
+        if let Some((g_mode, ref entries)) = group_hl {
+            let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            for entry in entries {
+                let Some(anim) = state.anims.iter().find(|a| a.id == entry.anim_id) else {
+                    continue;
+                };
+                if !is_particle_anim(anim) || anim.geom.is_empty() {
+                    continue;
+                }
+                let [lng, lat, alt] = particle_anim_position(anim);
+                let loc = state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt.max(0.18));
+                let center = Vec3::from_array(loc);
+                let p_cfg = twg_shared::particle_anim::parse_particle_anim_config(anim);
+                let r = (p_cfg.radius_m as f32).clamp(1.6, 26.0);
+                let col = if entry.is_focused_candidate {
+                    Color::srgba(1.0, 0.88, 0.16, 0.96)
+                } else {
+                    match g_mode {
+                        GroupAnimMode::Combine => Color::srgba(0.28, 0.68, 1.0, 0.92),
+                        GroupAnimMode::Sequence => Color::srgba(0.72, 0.44, 1.0, 0.92),
+                    }
+                };
+                gizmos.circle(Isometry3d::new(center, flat_rot), r, col);
+                gizmos.circle(Isometry3d::new(center + Vec3::Y * 0.08, flat_rot), r * 0.65, col);
+                gizmos.line(center, center + Vec3::Y * (p_cfg.height_m as f32).clamp(3.0, 18.0), col);
             }
         }
     }
@@ -183,6 +260,120 @@ pub fn draw_lines_and_routes_system(
         }
         for w in pts.windows(2) {
             gizmos.line(w[0], w[1], color);
+        }
+    }
+
+    // Active Spawn & Hide expanding tactical ground FX rings (Play Skenario & Editor Preview)
+    if !overrides.spawn_hide_fx_rings.is_empty() {
+        let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        for ring in &overrides.spawn_hide_fx_rings {
+            let Some(m) = state.markers.iter().find(|m| m.id == ring.marker_id) else {
+                continue;
+            };
+            let (lng, lat, alt) = if let Some(ov) = overrides.markers.get(&m.id) {
+                (ov.lng, ov.lat, ov.altitude)
+            } else {
+                (m.lng, m.lat, m.altitude)
+            };
+            let loc = state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt);
+            let base_r = marker_bounds
+                .bounds
+                .get(&m.id)
+                .map(|b| {
+                    ((b.world_max.x - b.world_min.x)
+                        .hypot(b.world_max.z - b.world_min.z)
+                        * 0.55)
+                        .clamp(1.6, 32.0)
+                })
+                .unwrap_or(2.4);
+            let p = ring.progress.clamp(0.0, 1.0);
+            let alpha = (1.0 - p).powf(1.25).clamp(0.0, 1.0);
+            let (r_outer, r_inner, rgb) = match ring.action {
+                SpawnHideAction::Spawn => {
+                    let expand = 0.55 + 1.35 * (1.0 - (1.0 - p).powi(2));
+                    (base_r * expand, base_r * (expand * 0.72), (0.12, 0.96, 0.62))
+                }
+                SpawnHideAction::Hide => {
+                    let contract = 1.65 - 1.10 * p;
+                    (
+                        base_r * contract,
+                        base_r * (contract * 0.68),
+                        (0.98, 0.28, 0.42),
+                    )
+                }
+            };
+            let c_main = Color::srgba(rgb.0, rgb.1, rgb.2, (alpha * 0.95).clamp(0.0, 1.0));
+            let c_soft = Color::srgba(rgb.0, rgb.1, rgb.2, (alpha * 0.55).clamp(0.0, 1.0));
+            let center = Vec3::new(loc[0], loc[1] + 0.14, loc[2]);
+            gizmos.circle(Isometry3d::new(center, flat_rot), r_outer, c_main);
+            gizmos.circle(
+                Isometry3d::new(center + Vec3::Y * 0.06, flat_rot),
+                r_inner,
+                c_soft,
+            );
+            // 4 subtle rising tactical shimmer ticks around the ring
+            let tick_h = (base_r * 0.85).clamp(1.2, 7.0) * alpha;
+            let tick_y0 = center.y + (base_r * 0.45 * p);
+            for k in 0..4 {
+                let ang = (k as f32) * std::f32::consts::FRAC_PI_2 + p * 0.8;
+                let dir = Vec3::new(ang.cos(), 0.0, ang.sin());
+                let p0 = Vec3::new(
+                    center.x + dir.x * r_inner,
+                    tick_y0,
+                    center.z + dir.z * r_inner,
+                );
+                let p1 = p0 + Vec3::Y * tick_h;
+                gizmos.line(p0, p1, c_soft);
+            }
+        }
+    }
+
+    // Play Skenario interactive RTS active movement paths & Right-Click destination ripples
+    if playback.play_test_mode {
+        let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+
+        // Subtle tactical paths for moving RTS units
+        for (&uid, order) in &play_rts.unit_orders {
+            if !order.moving || order.waypoints_xz.is_empty() {
+                continue;
+            }
+            let is_selected = play_rts.selected_unit_ids.contains(&uid);
+            let line_col = if is_selected {
+                Color::srgba(0.18, 0.98, 0.68, 0.72)
+            } else {
+                Color::srgba(0.18, 0.90, 0.62, 0.34)
+            };
+            let loc = state
+                .geo_anchor
+                .lng_lat_alt_to_local(order.lng, order.lat, order.altitude);
+            let mut prev = Vec3::new(loc[0], 0.18, loc[2]);
+            for wp in order.waypoints_xz.iter().skip(order.waypoint_idx) {
+                let next = Vec3::new(wp[0] as f32, 0.18, wp[1] as f32);
+                gizmos.line(prev, next, line_col);
+                prev = next;
+            }
+            // Small destination slot marker on the ground
+            let dest_r = (order.agent_radius_m as f32 * 0.45).clamp(0.32, 0.95);
+            gizmos.circle(Isometry3d::new(prev, flat_rot), dest_r, line_col);
+        }
+
+        // Expanding target ripple pings on Right-Click move command
+        for ping in &play_rts.move_pings {
+            let p = (ping.age_sec / ping.duration_sec.max(0.05)).clamp(0.0, 1.0);
+            let alpha = (1.0 - p).powf(1.3).clamp(0.0, 1.0);
+            let c_main = Color::srgba(0.16, 0.98, 0.66, alpha * 0.95);
+            let c_soft = Color::srgba(0.35, 0.96, 0.88, alpha * 0.65);
+            let r_outer = 0.45 + p * 3.4;
+            let r_inner = (2.0 * (1.0 - p * 0.72)).max(0.25);
+            let center = Vec3::new(ping.world_pos.x, 0.16, ping.world_pos.z);
+            gizmos.circle(Isometry3d::new(center, flat_rot), r_outer, c_main);
+            gizmos.circle(
+                Isometry3d::new(center + Vec3::Y * 0.03, flat_rot),
+                r_inner,
+                c_soft,
+            );
+            let tick_h = (2.2 * (1.0 - p)).max(0.15);
+            gizmos.line(center, center + Vec3::Y * tick_h, c_main);
         }
     }
 }

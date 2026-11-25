@@ -18,12 +18,20 @@ use twg_shared::{
     particle_anim::{
         ParticleAnimConfig, is_particle_anim, particle_anim_position,
     },
+    pointer_anim::{ANIM_TYPE_POINTER_ARROW, PointerArrowConfig, is_pointer_arrow_anim},
     route_formation::{
-        ANIM_TYPE_ROUTE_MULTI, ANIM_TYPE_ROUTE_SINGLE, MultiRouteConfig, anim_bound_marker_ids,
-        is_multi_route_anim, parse_multi_route_config, write_multi_route_config,
+        ANIM_TYPE_ROUTE_MULTI, ANIM_TYPE_ROUTE_SINGLE, MultiRouteConfig, RouteFormationKind,
+        anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
+        write_multi_route_config,
     },
-    shoot_anim::{ANIM_TYPE_SHOOT_WATER_CANNON, WaterCannonConfig},
-    ws::TacticalCommand,
+    shoot_anim::{
+        AparSprayConfig, BulletShootConfig, ShootAnimKind, StoneThrowConfig, TearGasConfig,
+        WaterCannonConfig, shoot_anim_kind,
+    },
+    spawn_hide_anim::{
+        SpawnHideAction, SpawnHideConfig, parse_spawn_hide_config, spawn_hide_action,
+        write_spawn_hide_config,
+    },
 };
 use uuid::Uuid;
 
@@ -31,7 +39,7 @@ use crate::{
     map::camera::cursor_world_ground,
     net::{
         client::{ApiClientBridge, ApiCommand, AuthCredentials},
-        ws_client::{WsClientBridge, WsOutCommand},
+        ws_client::WsClientBridge,
     },
     scene::{
         basic_mesh::{
@@ -46,6 +54,7 @@ use crate::{
             gizmo_mode_for_tool, hit_test_gizmo, marker_quat, marker_world_origin,
             particle_anim_world_origin, update_gizmo_drag,
         },
+        play_rts::PlayRtsState,
         playback::{PlaybackOverrides, route_estimated_duration_sec},
         polygon_edit::{
             PolygonEditState, PolygonHoverTarget, PolygonVertexGizmoHandle, begin_vertex_drag,
@@ -100,23 +109,32 @@ pub struct ScenePickParams<'w, 's> {
     >,
 }
 
+#[derive(Clone)]
+pub struct SubtreeAnimGraph {
+    pub handle: Handle<AnimationGraph>,
+    pub idle_node: AnimationNodeIndex,
+    pub walk_node: AnimationNodeIndex,
+}
+
 #[derive(Component)]
 pub struct TacticalMarkerEntity {
     pub id: Uuid,
     pub model_path: String,
     pub gltf_handle: Option<Handle<Gltf>>,
     pub idle_child: Option<Entity>,
-    pub idle_anim_started: bool,
+    pub idle_anim_graph: Option<SubtreeAnimGraph>,
     pub walk_model_path: Option<String>,
     pub walk_gltf_handle: Option<Handle<Gltf>>,
     pub walk_child: Option<Entity>,
-    pub walk_anim_started: bool,
+    pub walk_anim_graph: Option<SubtreeAnimGraph>,
     pub is_walking_now: bool,
     pub basic_mesh_child: Option<Entity>,
     pub basic_geom_sig: u64,
     pub basic_mat_sig: u64,
-    pub basic_mat_handle: Option<Handle<StandardMaterial>>,
+    pub basic_mat_handle: Option<StandardMaterialHandleAlias>,
 }
+
+type StandardMaterialHandleAlias = Handle<StandardMaterial>;
 
 pub fn setup_selection_highlight_system(
     mut commands: Commands,
@@ -627,24 +645,7 @@ pub fn save_all_scenario_changes(
                     metadata: m.metadata.clone(),
                 },
             });
-            ws.send(WsOutCommand::SendCommand(TacticalCommand {
-                operasi_id: m.operasi_id,
-                skenario_id: m.skenario_id,
-                marker_id: Some(m.id),
-                command: "move_marker".to_string(),
-                payload: serde_json::json!({
-                    "lng": m.lng,
-                    "lat": m.lat,
-                    "altitude": m.altitude,
-                    "rot_x": m.rot_x,
-                    "rot_y": m.rot_y,
-                    "rot_z": m.rot_z,
-                    "scale_x": m.scale_x,
-                    "scale_y": m.scale_y,
-                    "scale_z": m.scale_z,
-                }),
-                save_history: true,
-            }));
+            let _ = ws;
             sent += 1;
         }
     }
@@ -724,6 +725,7 @@ pub fn save_all_scenario_changes(
     }
 
     if save_skenario
+        && state.can_write_admin()
         && let Some(sk) = state.active_skenario.clone()
     {
         api.send(ApiCommand::UpdateSkenario {
@@ -755,35 +757,64 @@ pub fn save_all_scenario_changes(
     }
 }
 
+fn normalize_rel_path(p: &str) -> String {
+    p.trim().replace('\\', "/").trim_start_matches('/').to_string()
+}
+
 fn resolve_walk_model_path(state: &AppState, marker: &Marker) -> Option<String> {
     let exists_locally = |p: &str| {
-        state.available_model_paths.contains(p) || state.assets_root.join(p).exists()
+        let norm = normalize_rel_path(p);
+        state.available_model_paths.contains(p)
+            || state.available_model_paths.contains(&norm)
+            || state.assets_root.join(&norm).exists()
     };
 
-    if let Some(entry) = state
-        .catalog
-        .iter()
-        .find(|c| c.model_path == marker.model_path || c.id == marker.unit_id)
-        && let Some(walk_path) = &entry.walk_model_path
+    let norm_marker_path = normalize_rel_path(&marker.model_path);
+
+    if let Some(entry) = state.catalog.iter().find(|c| {
+        normalize_rel_path(&c.model_path).eq_ignore_ascii_case(&norm_marker_path)
+            || c.id.eq_ignore_ascii_case(&marker.unit_id)
+    }) && let Some(walk_path) = &entry.walk_model_path
         && exists_locally(walk_path)
     {
-        return Some(walk_path.clone());
+        return Some(normalize_rel_path(walk_path));
     }
 
-    if let Some(asset) = state
-        .model_assets
-        .iter()
-        .find(|a| a.model_file.rel_path == marker.model_path)
-        && let Some(wf) = &asset.walk_file
-        && exists_locally(&wf.rel_path)
-    {
-        return Some(wf.rel_path.clone());
+    if let Some(asset) = state.model_assets.iter().find(|a| {
+        normalize_rel_path(&a.model_file.rel_path).eq_ignore_ascii_case(&norm_marker_path)
+            || a.lod2_file.as_ref().is_some_and(|lf| {
+                normalize_rel_path(&lf.rel_path).eq_ignore_ascii_case(&norm_marker_path)
+            })
+            || a.id.to_string().eq_ignore_ascii_case(&marker.unit_id)
+    }) {
+        if let Some(wf) = &asset.walk_file
+            && exists_locally(&wf.rel_path)
+        {
+            return Some(normalize_rel_path(&wf.rel_path));
+        }
+        if let Some(wl) = &asset.walk_lod2_file
+            && exists_locally(&wl.rel_path)
+        {
+            return Some(normalize_rel_path(&wl.rel_path));
+        }
     }
 
-    if let Some(stem) = marker.model_path.strip_suffix("_idle.glb") {
+    let lower = norm_marker_path.to_lowercase();
+    if lower.ends_with("_idle.glb") {
+        let stem = &norm_marker_path[..norm_marker_path.len() - "_idle.glb".len()];
         let candidate = format!("{stem}_walk.glb");
         if exists_locally(&candidate) {
             return Some(candidate);
+        }
+    } else if lower.ends_with("_idle_lod2.glb") {
+        let stem = &norm_marker_path[..norm_marker_path.len() - "_idle_lod2.glb".len()];
+        for candidate in [
+            format!("{stem}_walk_lod2.glb"),
+            format!("{stem}_walk.glb"),
+        ] {
+            if exists_locally(&candidate) {
+                return Some(candidate);
+            }
         }
     }
 
@@ -808,7 +839,7 @@ pub fn sync_markers_system(
     )>,
     mut child_vis_q: Query<&mut Visibility, Without<TacticalMarkerEntity>>,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         for (entity, _, _, _) in &existing_q {
             commands.entity(entity).despawn();
         }
@@ -819,7 +850,7 @@ pub fn sync_markers_system(
         .markers
         .iter()
         .map(|m| {
-            let is_moving = playback.play_test_mode
+            let is_moving = playback.is_playback_active()
                 && overrides.markers.get(&m.id).is_some_and(|ov| ov.moving);
             let walk_path = if parse_basic_mesh_config(m).is_some() {
                 None
@@ -906,11 +937,17 @@ pub fn sync_markers_system(
             }
         }
 
-        let (lng, lat, alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
+        let (lng, lat, base_alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
             (ov.lng, ov.lat, ov.altitude, ov.rot_y)
         } else {
             (marker.lng, marker.lat, marker.altitude, marker.rot_y)
         };
+        let vis_ov = overrides.visibility.get(&marker.id).copied();
+        let is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn);
+        let scale_mult = vis_ov
+            .map(|v| v.scale_factor.max(0.001))
+            .unwrap_or(1.0);
+        let alt = base_alt + vis_ov.map(|v| v.altitude_offset_m).unwrap_or(0.0);
 
         let local = state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt);
         tf.translation = Vec3::from_array(local);
@@ -921,11 +958,11 @@ pub fn sync_markers_system(
             (marker.rot_z as f32).to_radians(),
         );
         tf.scale = Vec3::new(
-            (marker.scale_x as f32).max(MIN_OBJECT_3D_SCALE as f32),
-            (marker.scale_y as f32).max(MIN_OBJECT_3D_SCALE as f32),
-            (marker.scale_z as f32).max(MIN_OBJECT_3D_SCALE as f32),
+            (marker.scale_x as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
+            (marker.scale_y as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
+            (marker.scale_z as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
         );
-        *vis = if marker.is_spawn {
+        *vis = if is_visible {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -944,11 +981,17 @@ pub fn sync_markers_system(
         let is_moving = *is_moving;
         let render_path = marker.model_path.clone();
 
-        let (lng, lat, alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
+        let (lng, lat, base_alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
             (ov.lng, ov.lat, ov.altitude, ov.rot_y)
         } else {
             (marker.lng, marker.lat, marker.altitude, marker.rot_y)
         };
+        let vis_ov = overrides.visibility.get(&marker.id).copied();
+        let is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn);
+        let scale_mult = vis_ov
+            .map(|v| v.scale_factor.max(0.001))
+            .unwrap_or(1.0);
+        let alt = base_alt + vis_ov.map(|v| v.altitude_offset_m).unwrap_or(0.0);
 
         let local = state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt);
         let root_tf = Transform {
@@ -960,13 +1003,13 @@ pub fn sync_markers_system(
                 (marker.rot_z as f32).to_radians(),
             ),
             scale: Vec3::new(
-                (marker.scale_x as f32).max(MIN_OBJECT_3D_SCALE as f32),
-                (marker.scale_y as f32).max(MIN_OBJECT_3D_SCALE as f32),
-                (marker.scale_z as f32).max(MIN_OBJECT_3D_SCALE as f32),
+                (marker.scale_x as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
+                (marker.scale_y as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
+                (marker.scale_z as f32).max(MIN_OBJECT_3D_SCALE as f32) * scale_mult,
             ),
         };
 
-        let vis = if marker.is_spawn {
+        let vis = if is_visible {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -1001,11 +1044,11 @@ pub fn sync_markers_system(
                         model_path: render_path,
                         gltf_handle: None,
                         idle_child: None,
-                        idle_anim_started: false,
+                        idle_anim_graph: None,
                         walk_model_path: None,
                         walk_gltf_handle: None,
                         walk_child: None,
-                        walk_anim_started: false,
+                        walk_anim_graph: None,
                         is_walking_now: is_moving,
                         basic_mesh_child: Some(child_id),
                         basic_geom_sig: geom_sig,
@@ -1078,11 +1121,11 @@ pub fn sync_markers_system(
                     model_path: render_path,
                     gltf_handle,
                     idle_child,
-                    idle_anim_started: false,
+                    idle_anim_graph: None,
                     walk_model_path: walk_path_opt,
                     walk_gltf_handle,
                     walk_child,
-                    walk_anim_started: false,
+                    walk_anim_graph: None,
                     is_walking_now: is_moving,
                     basic_mesh_child: None,
                     basic_geom_sig: 0,
@@ -1129,18 +1172,76 @@ pub fn sync_markers_system(
     }
 }
 
+/// Selects `(idle_clip, walk_clip)` from a loaded glTF asset.
+/// Supports both:
+/// - Dual-clip single-file models (e.g. vehicles/helicopters `*_anim_1.glb` containing `Idle|Idle` + `Idle|Walk`)
+/// - Single-clip files (e.g. humanoid `*_idle.glb` / `*_walk.glb` containing 1 clip).
+fn select_idle_and_walk_clips(gltf: &Gltf) -> Option<(Handle<AnimationClip>, Handle<AnimationClip>)> {
+    if gltf.animations.is_empty() {
+        return None;
+    }
+    if gltf.animations.len() == 1 {
+        let only = gltf.animations[0].clone();
+        return Some((only.clone(), only));
+    }
+
+    let mut named: Vec<(&str, &Handle<AnimationClip>)> = gltf
+        .named_animations
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v))
+        .collect();
+    named.sort_by_key(|(k, _)| *k);
+
+    let is_walk_name = |raw: &str| {
+        let lower = raw.to_lowercase();
+        let tail = lower.rsplit('|').next().unwrap_or(&lower);
+        tail.contains("walk")
+            || tail.contains("run")
+            || tail.contains("move")
+            || tail.contains("drive")
+            || tail.contains("fly")
+            || lower.contains("walk")
+    };
+    let is_idle_name = |raw: &str| {
+        let lower = raw.to_lowercase();
+        let tail = lower.rsplit('|').next().unwrap_or(&lower);
+        !is_walk_name(raw) && (tail.contains("idle") || tail.contains("stand") || tail.contains("rest"))
+    };
+
+    let walk_clip = named
+        .iter()
+        .find(|(name, _)| is_walk_name(name))
+        .map(|(_, h)| (*h).clone())
+        .unwrap_or_else(|| gltf.animations[1].clone());
+
+    let idle_clip = named
+        .iter()
+        .find(|(name, _)| is_idle_name(name))
+        .map(|(_, h)| (*h).clone())
+        .or_else(|| {
+            gltf.animations
+                .iter()
+                .find(|h| h.id() != walk_clip.id())
+                .cloned()
+        })
+        .unwrap_or_else(|| gltf.animations[0].clone());
+
+    Some((idle_clip, walk_clip))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive_subtree_gltf_anim(
     commands: &mut Commands,
     subtree_root: Entity,
     gltf_handle: &Handle<Gltf>,
-    started: &mut bool,
+    graph_slot: &mut Option<SubtreeAnimGraph>,
+    prefer_walk_clip: bool,
     should_play: bool,
     speed: f32,
     gltfs: &Assets<Gltf>,
     anim_graphs: &mut Assets<AnimationGraph>,
     children_q: &Query<&Children>,
-    anim_player_q: &mut Query<(Entity, &mut AnimationPlayer)>,
+    anim_player_q: &mut Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
 ) {
     let Some(gltf) = gltfs.get(gltf_handle) else {
         return;
@@ -1166,35 +1267,68 @@ fn drive_subtree_gltf_anim(
         return;
     }
 
-    if !*started {
-        let (graph, node_idx) = AnimationGraph::from_clip(gltf.animations[0].clone());
-        let graph_handle = anim_graphs.add(graph);
-        for pe in &player_entities {
+    // Lazily build the AnimationGraph once per subtree (supporting both 1-clip and Idle+Walk dual-clip GLBs)
+    let anim_graph = if let Some(existing) = graph_slot.as_ref() {
+        existing.clone()
+    } else {
+        let Some((idle_clip, walk_clip)) = select_idle_and_walk_clips(gltf) else {
+            return;
+        };
+        let built = if idle_clip.id() == walk_clip.id() {
+            let (graph, node) = AnimationGraph::from_clip(idle_clip);
+            SubtreeAnimGraph {
+                handle: anim_graphs.add(graph),
+                idle_node: node,
+                walk_node: node,
+            }
+        } else {
+            let (graph, indices) = AnimationGraph::from_clips([idle_clip, walk_clip]);
+            SubtreeAnimGraph {
+                handle: anim_graphs.add(graph),
+                idle_node: indices[0],
+                walk_node: indices[1],
+            }
+        };
+        *graph_slot = Some(built.clone());
+        built
+    };
+
+    let target_node = if prefer_walk_clip {
+        anim_graph.walk_node
+    } else {
+        anim_graph.idle_node
+    };
+
+    // Self-healing per-AnimationPlayer attachment & clip switching so late-spawned or multi-player
+    // GLB hierarchies always play the exact right clip (Walk vs Idle).
+    for pe in &player_entities {
+        let Ok((_, mut player, existing_graph_h)) = anim_player_q.get_mut(*pe) else {
+            continue;
+        };
+        let needs_graph = existing_graph_h.is_none_or(|gh| gh.0.id() != anim_graph.handle.id());
+        if needs_graph {
             commands
                 .entity(*pe)
-                .insert(AnimationGraphHandle(graph_handle.clone()));
-            if let Ok((_, mut player)) = anim_player_q.get_mut(*pe) {
-                let active = player.play(node_idx).repeat();
-                active.set_speed(speed);
-                if !should_play {
-                    active.pause();
-                }
-            }
+                .insert(AnimationGraphHandle(anim_graph.handle.clone()));
         }
-        *started = true;
-    } else {
-        for pe in &player_entities {
-            if let Ok((_, mut player)) = anim_player_q.get_mut(*pe) {
-                for (_, active) in player.playing_animations_mut() {
-                    active.set_speed(speed);
-                    if should_play {
-                        if active.is_paused() {
-                            active.resume();
-                        }
-                    } else if !active.is_paused() {
-                        active.pause();
-                    }
+
+        let needs_switch = !player.is_playing_animation(target_node)
+            || player.playing_animations().count() != 1;
+        if needs_graph || needs_switch {
+            player.stop_all();
+            let active = player.play(target_node).repeat();
+            active.set_speed(speed);
+            if !should_play {
+                active.pause();
+            }
+        } else if let Some(active) = player.animation_mut(target_node) {
+            active.set_speed(speed);
+            if should_play {
+                if active.is_paused() {
+                    active.resume();
                 }
+            } else if !active.is_paused() {
+                active.pause();
             }
         }
     }
@@ -1202,7 +1336,8 @@ fn drive_subtree_gltf_anim(
 
 /// Drives embedded glTF AnimationPlayers independently per marker:
 /// - Markers with separate Idle + Walk `.glb` files play Walk ONLY while moving and Idle when resting.
-/// - Single-file animated markers (e.g. vehicles/helicopters) play while moving along their route.
+/// - Single-file dual-clip animated markers (e.g. `*_anim_1.glb` vehicles/helicopters with `Idle|Idle`
+///   and `Idle|Walk`) switch cleanly to their Walk clip while moving along any route and Idle at rest.
 #[allow(clippy::too_many_arguments)]
 pub fn animate_markers_system(
     mut commands: Commands,
@@ -1212,26 +1347,28 @@ pub fn animate_markers_system(
     mut anim_graphs: ResMut<Assets<AnimationGraph>>,
     mut marker_q: Query<(Entity, &mut TacticalMarkerEntity)>,
     children_q: Query<&Children>,
-    mut anim_player_q: Query<(Entity, &mut AnimationPlayer)>,
+    mut anim_player_q: Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         return;
     }
 
     let speed = playback.speed_multiplier.max(0.1);
+    let playback_active = playback.is_playback_active();
 
     for (root_entity, mut comp) in &mut marker_q {
         let has_walk_variant = comp.walk_child.is_some() && comp.walk_gltf_handle.is_some();
 
-        // 1. Walk subtree: plays ONLY while this marker is actively moving on a route
+        // 1. Dedicated Walk subtree (`*_walk.glb`): plays ONLY while actively moving on a route
         if let (Some(walk_root), Some(walk_gltf)) = (comp.walk_child, comp.walk_gltf_handle.clone())
         {
-            let play_walk = playback.play_test_mode && comp.is_walking_now;
+            let play_walk = playback_active && comp.is_walking_now;
             drive_subtree_gltf_anim(
                 &mut commands,
                 walk_root,
                 &walk_gltf,
-                &mut comp.walk_anim_started,
+                &mut comp.walk_anim_graph,
+                true,
                 play_walk,
                 speed,
                 &gltfs,
@@ -1241,20 +1378,29 @@ pub fn animate_markers_system(
             );
         }
 
-        // 2. Idle / primary subtree
+        // 2. Primary / Idle subtree (also drives dual-clip single-file animated vehicles `*_anim_1.glb`)
         if let Some(idle_gltf) = comp.gltf_handle.clone() {
             let idle_root = comp.idle_child.unwrap_or(root_entity);
-            let play_idle = if has_walk_variant {
-                playback.play_test_mode && !comp.is_walking_now
+            let is_dual_clip = !has_walk_variant
+                && gltfs
+                    .get(&idle_gltf)
+                    .is_some_and(|g| g.animations.len() >= 2);
+            let prefer_walk = !has_walk_variant && comp.is_walking_now;
+            let play_primary = if has_walk_variant {
+                playback_active && !comp.is_walking_now
+            } else if is_dual_clip {
+                // Play Walk clip while moving, Idle clip while resting in Play Skenario / Preview
+                playback_active
             } else {
-                playback.play_test_mode && comp.is_walking_now
+                playback_active && comp.is_walking_now
             };
             drive_subtree_gltf_anim(
                 &mut commands,
                 idle_root,
                 &idle_gltf,
-                &mut comp.idle_anim_started,
-                play_idle,
+                &mut comp.idle_anim_graph,
+                prefer_walk,
+                play_primary,
                 speed,
                 &gltfs,
                 &mut anim_graphs,
@@ -1271,6 +1417,7 @@ pub fn selection_gizmo_system(
     state: Res<AppState>,
     playback: Res<PlaybackState>,
     overrides: Res<PlaybackOverrides>,
+    play_rts: Res<PlayRtsState>,
     gizmo_state: Res<TransformGizmoState>,
     mut marker_bounds: ResMut<MarkerWorldBounds>,
     marker_roots_q: Query<(Entity, &TacticalMarkerEntity, &Visibility)>,
@@ -1291,7 +1438,7 @@ pub fn selection_gizmo_system(
         }
     };
 
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         marker_bounds.bounds.clear();
         hide_all_discs(&mut disc_q);
         return;
@@ -1393,6 +1540,99 @@ pub fn selection_gizmo_system(
         );
     }
 
+    // Play Skenario Mode: render crisp RTS selection rings for selected units,
+    // selected `GizmoMove` (`tools`) object, and hovered selectable markers.
+    if playback.play_test_mode {
+        let elapsed = time.elapsed_secs();
+        let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let pulse = 1.0 + 0.03 * (elapsed * 4.2).sin();
+
+        let play_footprint = |m: &Marker| -> (Vec3, f32) {
+            if let Some(b) = marker_bounds.bounds.get(&m.id) {
+                (b.footprint_center, b.footprint_radius)
+            } else {
+                let p = play_rts.marker_runtime_world_origin(&state, &overrides, m);
+                (
+                    Vec3::new(p.x, 0.06, p.z),
+                    (m.scale_x.max(m.scale_z) as f32 * 2.2).max(0.75),
+                )
+            }
+        };
+
+        let mut sel_disc_pose: Option<(Vec3, f32)> = None;
+        let mut hov_disc_pose: Option<(Vec3, f32)> = None;
+
+        for &uid in &play_rts.selected_unit_ids {
+            let Some(m) = state.markers.iter().find(|x| x.id == uid) else {
+                continue;
+            };
+            if !overrides.is_marker_visible(m, true) {
+                continue;
+            }
+            let (center, r) = play_footprint(m);
+            let ring_y = center.y.max(0.08);
+            let c3 = Vec3::new(center.x, ring_y, center.z);
+            gizmos.circle(
+                Isometry3d::new(c3, flat_rot),
+                r * pulse,
+                Color::srgba(0.14, 0.98, 0.66, 0.96),
+            );
+            gizmos.circle(
+                Isometry3d::new(c3 + Vec3::Y * 0.02, flat_rot),
+                (r * 0.84) * pulse,
+                Color::srgba(0.24, 0.94, 0.88, 0.52),
+            );
+            if play_rts.selected_unit_ids.len() == 1 {
+                sel_disc_pose = Some((center, r));
+            }
+        }
+
+        if let Some(gid) = play_rts.selected_gizmo_marker_id
+            && let Some(m) = state.markers.iter().find(|x| x.id == gid)
+            && overrides.is_marker_visible(m, true)
+        {
+            let (center, r) = play_footprint(m);
+            let c3 = Vec3::new(center.x, center.y.max(0.08), center.z);
+            gizmos.circle(
+                Isometry3d::new(c3, flat_rot),
+                r * pulse,
+                Color::srgba(0.98, 0.78, 0.16, 0.96),
+            );
+            gizmos.circle(
+                Isometry3d::new(c3 + Vec3::Y * 0.02, flat_rot),
+                r * 0.80,
+                Color::srgba(0.22, 0.88, 0.98, 0.60),
+            );
+            sel_disc_pose = Some((center, r));
+        }
+
+        if let Some(hid) = play_rts.hovered_marker_id
+            && !play_rts.selected_unit_ids.contains(&hid)
+            && play_rts.selected_gizmo_marker_id != Some(hid)
+            && let Some(m) = state.markers.iter().find(|x| x.id == hid)
+            && overrides.is_marker_visible(m, true)
+        {
+            hov_disc_pose = Some(play_footprint(m));
+        }
+
+        for (kind, mut tf, mut vis) in &mut disc_q {
+            let pose = match kind {
+                HighlightDiscKind::Selected => sel_disc_pose,
+                HighlightDiscKind::Hover => hov_disc_pose,
+                HighlightDiscKind::RouteBound | HighlightDiscKind::PickCandidate => None,
+            };
+            if let Some((center, radius)) = pose {
+                tf.translation = center;
+                tf.rotation = Quat::IDENTITY;
+                tf.scale = Vec3::splat(radius);
+                *vis = Visibility::Visible;
+            } else {
+                *vis = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+
     if !state.show_gizmos || (playback.play_test_mode && playback.hide_gizmos_in_play) {
         hide_all_discs(&mut disc_q);
         return;
@@ -1420,11 +1660,14 @@ pub fn selection_gizmo_system(
     let is_pick_route_mode = !playback.play_test_mode
         && matches!(
             state.tool_mode,
-            ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+            ToolMode::PickRouteMarker
+                | ToolMode::PickShootMarker
+                | ToolMode::PickPointerMarker
+                | ToolMode::PickSpawnHideMarker
         );
 
-    // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold:
-    // either the animation currently being bound in Pick mode, or the currently selected animation!
+    // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold
+    // (or Emerald/Rose for Spawn/Hide): either currently being picked, or currently selected!
     let active_route_anim = if !playback.play_test_mode
         && state.tool_mode == ToolMode::PickRouteMarker
     {
@@ -1434,6 +1677,14 @@ pub fn selection_gizmo_system(
     } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickShootMarker {
         state
             .picking_shoot_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickPointerMarker {
+        state
+            .picking_pointer_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickSpawnHideMarker {
+        state
+            .picking_spawn_hide_for_anim_id
             .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
     } else if !playback.play_test_mode
         && let SelectedEntity::Anim(aid) = state.selected
@@ -1486,13 +1737,25 @@ pub fn selection_gizmo_system(
         }
     }
 
-    // 2. Route-Bound Marker Highlights (Warm Amber/Gold) for ALL bound units of the active route
+    // 2. Bound Marker Highlights for ALL targets of the active animation
     let bound_ids: Vec<Uuid> = active_route_anim
         .map(anim_bound_marker_ids)
         .unwrap_or_default();
     let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    let amber = Color::srgba(1.0, 0.72, 0.14, 0.96);
-    let amber_soft = Color::srgba(1.0, 0.84, 0.34, 0.68);
+    let (amber, amber_soft) = match active_route_anim.and_then(spawn_hide_action) {
+        Some(SpawnHideAction::Spawn) => (
+            Color::srgba(0.14, 0.94, 0.62, 0.96),
+            Color::srgba(0.35, 0.98, 0.76, 0.68),
+        ),
+        Some(SpawnHideAction::Hide) => (
+            Color::srgba(0.98, 0.34, 0.46, 0.96),
+            Color::srgba(1.0, 0.56, 0.64, 0.68),
+        ),
+        None => (
+            Color::srgba(1.0, 0.72, 0.14, 0.96),
+            Color::srgba(1.0, 0.84, 0.34, 0.68),
+        ),
+    };
     let mut used_primary_disc = false;
     for bound_mid in &bound_ids {
         if hovered_pick_marker_id == Some(*bound_mid) {
@@ -1521,6 +1784,86 @@ pub fn selection_gizmo_system(
         if let Some(start_w) = route_start_world {
             let from = Vec3::new(center.x, center.y.max(0.45), center.z);
             draw_dashed_tether_line(&mut gizmos, from, start_w, amber);
+        }
+    }
+
+    // 2b. Group (`Combine` / `Sequence`) Member & Hovered Candidate 3D Marker Highlights
+    if !playback.play_test_mode
+        && let Some((group_mode, entries)) = super::resolve_group_highlight_entries(&state)
+    {
+        // Map each unique marker_id -> (is_focused_candidate, optional route start world pos)
+        let mut marker_hl: HashMap<Uuid, (bool, Option<Vec3>)> = HashMap::new();
+        for entry in &entries {
+            let Some(child_anim) = state.anims.iter().find(|a| a.id == entry.anim_id) else {
+                continue;
+            };
+            let child_route_start = if child_anim.geom.len() >= 2 {
+                child_anim.geom.first().map(|p| {
+                    Vec3::from_array(
+                        state
+                            .geo_anchor
+                            .lng_lat_alt_to_local(p[0], p[1], p[2].max(0.45)),
+                    )
+                })
+            } else {
+                None
+            };
+            for mid in anim_bound_marker_ids(child_anim) {
+                let prev = marker_hl.get(&mid).copied();
+                let replace = prev.is_none_or(|(was_foc, _)| !was_foc && entry.is_focused_candidate);
+                if replace {
+                    marker_hl.insert(mid, (entry.is_focused_candidate, child_route_start));
+                }
+            }
+        }
+
+        let (base_col, base_soft) = match group_mode {
+            twg_shared::group_anim::GroupAnimMode::Combine => (
+                Color::srgba(0.28, 0.70, 1.0, 0.96),
+                Color::srgba(0.45, 0.82, 1.0, 0.65),
+            ),
+            twg_shared::group_anim::GroupAnimMode::Sequence => (
+                Color::srgba(0.72, 0.44, 1.0, 0.96),
+                Color::srgba(0.84, 0.64, 1.0, 0.65),
+            ),
+        };
+        let focus_col = Color::srgba(1.0, 0.88, 0.16, 0.98);
+        let focus_soft = Color::srgba(1.0, 0.94, 0.48, 0.72);
+
+        for (mid, (is_foc, child_start)) in marker_hl {
+            let Some(m) = state.markers.iter().find(|m| m.id == mid) else {
+                continue;
+            };
+            let (col, col_soft) = if is_foc {
+                (focus_col, focus_soft)
+            } else {
+                (base_col, base_soft)
+            };
+            let pulse = if is_foc {
+                1.0 + 0.055 * (elapsed * 5.8).sin()
+            } else {
+                1.0 + 0.03 * (elapsed * 3.2).sin()
+            };
+            let (center, radius, vol) = marker_footprint(m);
+            let r = radius * (if is_foc { 1.18 } else { 1.10 }) * pulse;
+            let ring_pos = Vec3::new(center.x, center.y + 0.03, center.z);
+            gizmos.circle(Isometry3d::new(ring_pos, flat_rot), r, col);
+            gizmos.circle(Isometry3d::new(ring_pos, flat_rot), r * 0.92, col);
+            gizmos.circle(Isometry3d::new(ring_pos, flat_rot), r * 0.68, col_soft);
+            draw_tactical_target_ticks(
+                &mut gizmos,
+                center,
+                r,
+                if is_foc { -elapsed * 1.5 } else { elapsed * 0.75 },
+                col,
+            );
+            if let Some((wmin, wmax)) = vol {
+                draw_3d_corner_brackets(&mut gizmos, wmin, wmax, col);
+            }
+            if let Some(start_w) = child_start {
+                let from = Vec3::new(center.x, center.y.max(0.45), center.z);
+                draw_dashed_tether_line(&mut gizmos, from, start_w, col);
+            }
         }
     }
 
@@ -1694,14 +2037,18 @@ pub fn map_interaction_system(
     }
 
     if playback.play_test_mode {
-        gizmo_state.cancel();
+        // Editor gizmos, polygon/route editing, and catalog placement are inactive in Play Skenario;
+        // Play Skenario RTS selection & `tools` 3D Move Gizmo are owned by `play_rts_interaction_system`.
         poly_edit.clear();
         route_edit.clear();
         state.picking_marker_for_anim_id = None;
         state.picking_shoot_for_anim_id = None;
+        state.picking_pointer_for_anim_id = None;
+        state.picking_spawn_hide_for_anim_id = None;
         state.dragging_catalog_entry = None;
         state.dragging_basic_mesh = None;
         state.catalog_drop_world_pos = None;
+        return;
     }
 
     // Keep RouteEditState synchronized with current selection & lock status
@@ -1831,7 +2178,31 @@ pub fn map_interaction_system(
             if state.tool_mode == ToolMode::PickShootMarker {
                 state.picking_shoot_for_anim_id = None;
                 state.tool_mode = ToolMode::Select;
-                state.status_banner = Some("Pemilihan unit Water Cannon dibatalkan.".into());
+                state.status_banner = Some("Pemilihan unit Shoot dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::PickPointerMarker {
+                state.picking_pointer_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Pemilihan target Panah Penunjuk 3D dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::PickSpawnHideMarker {
+                let picked_anim = state
+                    .picking_spawn_hide_for_anim_id
+                    .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                    .cloned();
+                state.picking_spawn_hide_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                if let Some(a) = picked_anim {
+                    let cnt = anim_bound_marker_ids(&a).len();
+                    state.status_banner = Some(format!(
+                        "Selesai pilih objek untuk '{}' ({cnt} objek terpilih).",
+                        a.name
+                    ));
+                } else {
+                    state.status_banner = Some("Pemilihan objek Spawn/Hide selesai.".into());
+                }
                 return;
             }
             if state.tool_mode == ToolMode::PickRouteMarker {
@@ -1881,6 +2252,8 @@ pub fn map_interaction_system(
             state.measure_points_lnglat.clear();
             state.picking_marker_for_anim_id = None;
             state.picking_shoot_for_anim_id = None;
+            state.picking_pointer_for_anim_id = None;
+            state.picking_spawn_hide_for_anim_id = None;
             state.dragging_catalog_entry = None;
             state.dragging_basic_mesh = None;
             state.catalog_drop_world_pos = None;
@@ -1905,6 +2278,22 @@ pub fn map_interaction_system(
                 }
                 return;
             }
+            if state.tool_mode == ToolMode::PickSpawnHideMarker {
+                let picked_anim = state
+                    .picking_spawn_hide_for_anim_id
+                    .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                    .cloned();
+                state.picking_spawn_hide_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                if let Some(a) = picked_anim {
+                    let cnt = anim_bound_marker_ids(&a).len();
+                    state.status_banner = Some(format!(
+                        "Selesai memilih objek untuk '{}' ({cnt} objek terpilih).",
+                        a.name
+                    ));
+                }
+                return;
+            }
             finish_active_draft(&mut state, &api);
             return;
         }
@@ -1913,6 +2302,7 @@ pub fn map_interaction_system(
                 state.tool_mode = ToolMode::Select;
                 state.draft_points_lnglat.clear();
                 state.picking_marker_for_anim_id = None;
+                state.picking_spawn_hide_for_anim_id = None;
                 gizmo_state.cancel();
                 poly_edit.clear();
                 route_edit.clear();
@@ -2178,7 +2568,10 @@ pub fn map_interaction_system(
         && (state.tool_mode.is_transform_tool()
             || matches!(
                 state.tool_mode,
-                ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+                ToolMode::PickRouteMarker
+                    | ToolMode::PickShootMarker
+                    | ToolMode::PickPointerMarker
+                    | ToolMode::PickSpawnHideMarker
             ))
         && gizmo_state.hovered_handle.is_none()
     {
@@ -2195,7 +2588,10 @@ pub fn map_interaction_system(
         );
         if matches!(
             state.tool_mode,
-            ToolMode::PickRouteMarker | ToolMode::PickShootMarker
+            ToolMode::PickRouteMarker
+                | ToolMode::PickShootMarker
+                | ToolMode::PickPointerMarker
+                | ToolMode::PickSpawnHideMarker
         ) {
             match picked {
                 Some(SelectedEntity::Marker(mid)) => Some(SelectedEntity::Marker(mid)),
@@ -2663,19 +3059,29 @@ pub fn map_interaction_system(
             if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
                 && let Some(anim_id) = state.picking_marker_for_anim_id
             {
-                let marker_info = state
+                let marker_clone = state
                     .markers
                     .iter()
                     .find(|m| m.id == marker_id)
-                    .map(|m| (m.name.clone(), m.altitude));
-                if let Some((m_name, m_alt)) = marker_info
+                    .cloned();
+                if let Some(m_obj) = marker_clone
                     && let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id)
                 {
+                    let m_name = m_obj.name.clone();
+                    let m_alt = m_obj.altitude;
                     let is_multi = is_multi_route_anim(anim);
                     let status_msg = if is_multi {
                         let mut cfg = parse_multi_route_config(anim);
                         let was_empty = cfg.marker_ids.is_empty();
                         let added = cfg.toggle_marker(marker_id);
+                        let assigned_role_lbl = if added && cfg.formation == RouteFormationKind::Patwal
+                        {
+                            let inferred = cfg.infer_patwal_role_for_marker(&m_obj);
+                            cfg.set_patwal_role(marker_id, inferred);
+                            Some(inferred.label())
+                        } else {
+                            None
+                        };
                         write_multi_route_config(anim, &cfg);
                         if was_empty && added {
                             for pt in &mut anim.geom {
@@ -2684,10 +3090,17 @@ pub fn map_interaction_system(
                         }
                         let cnt = cfg.marker_ids.len();
                         if added {
-                            format!(
-                                "Unit '{m_name}' ditambahkan (#{cnt}) ke '{}'! Klik unit lain untuk tambah/lepas, atau tekan Enter / Esc untuk selesai.",
-                                anim.name
-                            )
+                            if let Some(rlbl) = assigned_role_lbl {
+                                format!(
+                                    "Unit '{m_name}' ditambahkan (#{cnt}, peran: {rlbl}) ke '{}'! Klik unit lain atau Enter / Esc untuk selesai.",
+                                    anim.name
+                                )
+                            } else {
+                                format!(
+                                    "Unit '{m_name}' ditambahkan (#{cnt}) ke '{}'! Klik unit lain untuk tambah/lepas, atau tekan Enter / Esc untuk selesai.",
+                                    anim.name
+                                )
+                            }
                         } else {
                             format!(
                                 "Unit '{m_name}' dilepas dari '{}' (sisa {cnt} unit). Klik unit lain atau Enter / Esc untuk selesai.",
@@ -2768,6 +3181,182 @@ pub fn map_interaction_system(
                         state.line_edit = None;
                         state.text_edit = None;
                         state.dirty_anim_ids.insert(anim_id);
+                        let kind_label = shoot_anim_kind(&updated)
+                            .map(|k| k.label())
+                            .unwrap_or("Shoot");
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name.clone(),
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+                        state.shoot_preview_reset_nonce =
+                            state.shoot_preview_reset_nonce.wrapping_add(1);
+                        state.status_banner = Some(format!(
+                            "{kind_label} '{}' dipindahkan ke unit '{marker_name}' — preview aktif di peta!",
+                            updated.name
+                        ));
+                    }
+                } else if let Some(sk) = state.active_skenario.clone() {
+                    // Create a brand-new Shoot animation of `state.new_shoot_kind` bound to the clicked 3D marker
+                    let kind = state.new_shoot_kind;
+                    let auto_h = marker_bounds
+                        .bounds
+                        .get(&marker_id)
+                        .map(|b| (b.world_max.y - b.world_min.y) as f64)
+                        .filter(|&h| h.is_finite() && h >= 0.4)
+                        .map(|h| {
+                            ((h * kind.origin_height_ratio()).clamp(0.4, 30.0) * 10.0).round()
+                                / 10.0
+                        })
+                        .unwrap_or_else(|| kind.fallback_origin_height_m());
+                    let (data, duration_sec) = match kind {
+                        ShootAnimKind::WaterCannon => {
+                            let cfg = WaterCannonConfig {
+                                nozzle_height_m: auto_h,
+                                ..Default::default()
+                            };
+                            (serde_json::json!({ "water_cannon": cfg }), kind.default_duration_sec())
+                        }
+                        ShootAnimKind::StoneThrow => {
+                            let cfg = StoneThrowConfig {
+                                origin_height_m: auto_h,
+                                ..Default::default()
+                            };
+                            (serde_json::json!({ "stone_throw": cfg }), kind.default_duration_sec())
+                        }
+                        ShootAnimKind::TearGas => {
+                            let cfg = TearGasConfig {
+                                origin_height_m: auto_h,
+                                ..Default::default()
+                            };
+                            let dur = cfg.total_cycle_duration_sec();
+                            (serde_json::json!({ "tear_gas": cfg }), dur)
+                        }
+                        ShootAnimKind::Bullet => {
+                            let cfg = BulletShootConfig {
+                                origin_height_m: auto_h,
+                                ..Default::default()
+                            };
+                            (serde_json::json!({ "bullet": cfg }), kind.default_duration_sec())
+                        }
+                        ShootAnimKind::Apar => {
+                            let cfg = AparSprayConfig {
+                                origin_height_m: auto_h,
+                                ..Default::default()
+                            };
+                            (serde_json::json!({ "apar": cfg }), kind.default_duration_sec())
+                        }
+                    };
+                    let name = if state.new_shoot_name.trim().is_empty() {
+                        format!("{} — {marker_name}", kind.label())
+                    } else {
+                        state.new_shoot_name.trim().to_string()
+                    };
+                    let sort_order = (state.anims.len() + 1) as i32;
+                    let anim_type_str = kind.anim_type_str().to_string();
+
+                    if state.offline_preview {
+                        let now = chrono::Utc::now();
+                        let a = Anim {
+                            id: Uuid::new_v4(),
+                            operasi_id: sk.operasi_id,
+                            skenario_id: sk.id,
+                            marker_id: Some(marker_id),
+                            name: name.clone(),
+                            anim_type: anim_type_str,
+                            sort_order,
+                            speed: 1.0,
+                            duration_sec,
+                            replay: false,
+                            autoplay: false,
+                            geom: Vec::new(),
+                            data,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        let aid = a.id;
+                        state.selected = SelectedEntity::Anim(aid);
+                        state.anim_edit = Some(a.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.anims.push(a);
+                        state.sort_anims_by_order();
+                        state.shoot_preview_reset_nonce =
+                            state.shoot_preview_reset_nonce.wrapping_add(1);
+                        state.status_banner = Some(format!(
+                            "{} '{name}' dibuat pada '{marker_name}' — live preview aktif di peta!",
+                            kind.label()
+                        ));
+                    } else if let Some(auth) = current_auth(&state) {
+                        api.send(ApiCommand::CreateAnim {
+                            auth,
+                            req: CreateAnimRequest {
+                                operasi_id: sk.operasi_id,
+                                skenario_id: sk.id,
+                                marker_id: Some(marker_id),
+                                name: name.clone(),
+                                anim_type: anim_type_str,
+                                sort_order,
+                                speed: 1.0,
+                                duration_sec,
+                                replay: false,
+                                autoplay: false,
+                                geom: Vec::new(),
+                                data,
+                            },
+                        });
+                    }
+                    let next_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| shoot_anim_kind(a) == Some(kind))
+                        .count()
+                        + 2;
+                    state.new_shoot_name = kind.default_name(next_idx);
+                }
+                state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
+        ToolMode::PickPointerMarker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some(marker_name) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| m.name.clone())
+            {
+                if let Some(anim_id) = state.picking_pointer_for_anim_id.take() {
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        anim.marker_id = Some(marker_id);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
                         if !state.offline_preview
                             && let Some(auth) = current_auth(&state)
                         {
@@ -2789,28 +3378,17 @@ pub fn map_interaction_system(
                             });
                         }
                         state.status_banner = Some(format!(
-                            "Water Cannon '{}' dipindahkan ke unit '{marker_name}' — preview aktif di peta!",
+                            "Panah Penunjuk 3D '{}' dipindahkan ke '{marker_name}' — live preview aktif!",
                             updated.name
                         ));
                     }
                 } else if let Some(sk) = state.active_skenario.clone() {
-                    // Create a brand-new Water Cannon animation bound to the clicked 3D marker
-                    let auto_h = marker_bounds
-                        .bounds
-                        .get(&marker_id)
-                        .map(|b| (b.world_max.y - b.world_min.y) as f64)
-                        .filter(|&h| h.is_finite() && h >= 0.4)
-                        .map(|h| ((h * 0.96).clamp(0.8, 30.0) * 10.0).round() / 10.0)
-                        .unwrap_or(3.2);
-                    let cfg = WaterCannonConfig {
-                        nozzle_height_m: auto_h,
-                        ..Default::default()
-                    };
-                    let data = serde_json::json!({ "water_cannon": cfg });
-                    let name = if state.new_shoot_name.trim().is_empty() {
-                        format!("Water Cannon — {marker_name}")
+                    let cfg = PointerArrowConfig::default();
+                    let data = serde_json::json!({ "pointer_arrow": cfg });
+                    let name = if state.new_pointer_name.trim().is_empty() {
+                        format!("Panah — {marker_name}")
                     } else {
-                        state.new_shoot_name.trim().to_string()
+                        state.new_pointer_name.trim().to_string()
                     };
                     let sort_order = (state.anims.len() + 1) as i32;
 
@@ -2822,7 +3400,7 @@ pub fn map_interaction_system(
                             skenario_id: sk.id,
                             marker_id: Some(marker_id),
                             name: name.clone(),
-                            anim_type: ANIM_TYPE_SHOOT_WATER_CANNON.into(),
+                            anim_type: ANIM_TYPE_POINTER_ARROW.into(),
                             sort_order,
                             speed: 1.0,
                             duration_sec: 15.0,
@@ -2843,7 +3421,7 @@ pub fn map_interaction_system(
                         state.anims.push(a);
                         state.sort_anims_by_order();
                         state.status_banner = Some(format!(
-                            "Water Cannon '{name}' dibuat pada '{marker_name}' — live preview aktif di peta!"
+                            "Panah Penunjuk 3D '{name}' dipasang di atas '{marker_name}' — atur teks, warna & skala di Inspector!"
                         ));
                     } else if let Some(auth) = current_auth(&state) {
                         api.send(ApiCommand::CreateAnim {
@@ -2853,7 +3431,7 @@ pub fn map_interaction_system(
                                 skenario_id: sk.id,
                                 marker_id: Some(marker_id),
                                 name: name.clone(),
-                                anim_type: ANIM_TYPE_SHOOT_WATER_CANNON.into(),
+                                anim_type: ANIM_TYPE_POINTER_ARROW.into(),
                                 sort_order,
                                 speed: 1.0,
                                 duration_sec: 15.0,
@@ -2864,9 +3442,159 @@ pub fn map_interaction_system(
                             },
                         });
                     }
-                    state.new_shoot_name = format!("Water Cannon {}", state.anims.len() + 2);
+                    let next_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_pointer_arrow_anim(a))
+                        .count()
+                        + 2;
+                    state.new_pointer_name = format!("Panah Penunjuk {next_idx}");
                 }
                 state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
+        ToolMode::PickSpawnHideMarker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some(marker_name) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| m.name.clone())
+            {
+                if let Some(anim_id) = state.picking_spawn_hide_for_anim_id {
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        let mut cfg = parse_spawn_hide_config(anim);
+                        let added = cfg.toggle_marker(marker_id);
+                        write_spawn_hide_config(anim, &cfg);
+                        let cnt = cfg.marker_ids.len();
+                        let act_tag = cfg.action.short_tag();
+                        let anim_name = anim.name.clone();
+                        let updated = anim.clone();
+
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
+
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name,
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+
+                        state.status_banner = Some(if added {
+                            format!(
+                                "[{act_tag}] '{marker_name}' ditambahkan (#{cnt}) ke '{anim_name}'. Klik objek lain untuk tambah/lepas, atau Enter / Esc selesai."
+                            )
+                        } else {
+                            format!(
+                                "[{act_tag}] '{marker_name}' dilepas dari '{anim_name}' (sisa {cnt} objek). Klik objek lain atau Enter / Esc selesai."
+                            )
+                        });
+                    }
+                } else if let Some(sk) = state.active_skenario.clone() {
+                    // Fallback: create a new Spawn/Hide animation starting with this clicked marker
+                    let action = state.new_spawn_hide_action;
+                    let mut cfg = SpawnHideConfig::default_for(action);
+                    cfg.marker_ids.push(marker_id);
+                    let dur = cfg.total_duration_sec();
+                    let data = serde_json::json!({ "spawn_hide": cfg });
+                    let name = if state.new_spawn_hide_name.trim().is_empty() {
+                        let idx = state
+                            .anims
+                            .iter()
+                            .filter(|a| spawn_hide_action(a) == Some(action))
+                            .count()
+                            + 1;
+                        action.default_name(idx)
+                    } else {
+                        state.new_spawn_hide_name.trim().to_string()
+                    };
+                    let sort_order = (state.anims.len() + 1) as i32;
+                    let anim_type = action.anim_type_str().to_string();
+
+                    if state.offline_preview {
+                        let now = chrono::Utc::now();
+                        let a = Anim {
+                            id: Uuid::new_v4(),
+                            operasi_id: sk.operasi_id,
+                            skenario_id: sk.id,
+                            marker_id: Some(marker_id),
+                            name: name.clone(),
+                            anim_type,
+                            sort_order,
+                            speed: 1.0,
+                            duration_sec: dur,
+                            replay: false,
+                            autoplay: false,
+                            geom: Vec::new(),
+                            data,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        let aid = a.id;
+                        state.selected = SelectedEntity::Anim(aid);
+                        state.anim_edit = Some(a.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.anims.push(a);
+                        state.sort_anims_by_order();
+                        state.picking_spawn_hide_for_anim_id = Some(aid);
+                        state.status_banner = Some(format!(
+                            "[{}] '{marker_name}' ditambahkan (#1) ke '{name}'. Klik objek lain untuk tambah/lepas, atau Enter / Esc selesai.",
+                            action.short_tag()
+                        ));
+                    } else if let Some(auth) = current_auth(&state) {
+                        api.send(ApiCommand::CreateAnim {
+                            auth,
+                            req: CreateAnimRequest {
+                                operasi_id: sk.operasi_id,
+                                skenario_id: sk.id,
+                                marker_id: Some(marker_id),
+                                name: name.clone(),
+                                anim_type,
+                                sort_order,
+                                speed: 1.0,
+                                duration_sec: dur,
+                                replay: false,
+                                autoplay: false,
+                                geom: Vec::new(),
+                                data,
+                            },
+                        });
+                    }
+                    let next_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| spawn_hide_action(a) == Some(action))
+                        .count()
+                        + 2;
+                    state.new_spawn_hide_name = action.default_name(next_idx);
+                }
                 gizmo_state.suppress_camera_pan = true;
             }
         }
@@ -3087,6 +3815,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 return;
             }
             let is_multi = state.new_route_is_multi;
+            let is_patwal = is_multi && state.new_route_formation == RouteFormationKind::Patwal;
             let target_marker_id = if is_multi {
                 state.route_target_marker_id = None;
                 None
@@ -3102,7 +3831,9 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 .map(|[lng, lat]| [lng, lat, target_alt])
                 .collect();
             let name = if state.new_route_name.trim().is_empty() {
-                if is_multi {
+                if is_patwal {
+                    format!("Rute Patwal {}", state.anims.len() + 1)
+                } else if is_multi {
                     format!("Rute Formasi {}", state.anims.len() + 1)
                 } else {
                     format!("Rute Unit {}", state.anims.len() + 1)
@@ -3116,8 +3847,12 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 ANIM_TYPE_ROUTE_SINGLE.to_string()
             };
             let data = if is_multi {
+                let multi_cfg = MultiRouteConfig {
+                    formation: state.new_route_formation,
+                    ..Default::default()
+                };
                 serde_json::json!({
-                    "multi_route": MultiRouteConfig::default()
+                    "multi_route": multi_cfg
                 })
             } else {
                 serde_json::json!({})
@@ -3193,7 +3928,9 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 state.tool_mode = ToolMode::Select;
             }
             // Prepare next default route name cleanly
-            state.new_route_name = if is_multi {
+            state.new_route_name = if is_patwal {
+                format!("Rute Patwal {}", state.anims.len() + 2)
+            } else if is_multi {
                 format!("Rute Formasi {}", state.anims.len() + 2)
             } else {
                 format!("Rute Unit {}", state.anims.len() + 2)
@@ -3414,7 +4151,7 @@ fn intersect_ray_mesh_triangles(origin: Vec3, dir: Vec3, mesh: &Mesh) -> Option<
 
 /// Raycasts a single mesh node against `world_ray`.
 /// Because `local_dir` is kept unnormalized, the returned `t` is the exact world-space distance.
-fn raycast_mesh_node(
+pub(crate) fn raycast_mesh_node(
     world_ray: Ray3d,
     gtf: &GlobalTransform,
     aabb_opt: Option<&Aabb>,

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     scene::{parse_hex_color, playback::PlaybackOverrides},
-    state::{AnimRunStatus, AppScreen, AppState, PlaybackState, SelectedEntity},
+    state::{AnimRunStatus, AppState, PlaybackState, SelectedEntity},
 };
 
 const CORE_SEGMENTS: usize = 24;
@@ -101,7 +101,7 @@ pub fn water_cannon_visual_system(
     mut mesh3d_q: Query<&mut Mesh3d, With<WaterCannonFxEntity>>,
     mut gizmos: Gizmos,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         for (_, rig) in pool.rigs.drain() {
             WaterCannonVisualPool::despawn_rig(&mut commands, rig);
         }
@@ -120,9 +120,10 @@ pub fn water_cannon_visual_system(
         let Some(marker_id) = anim.marker_id else {
             continue;
         };
+        let playback_active = playback.is_playback_active();
         let is_editor_preview =
-            !playback.play_test_mode && state.selected == SelectedEntity::Anim(anim.id);
-        let play_phase_opt = if playback.play_test_mode {
+            !playback_active && state.selected == SelectedEntity::Anim(anim.id);
+        let play_phase_opt = if playback_active {
             let status = playback.track_status(anim.id);
             match status {
                 AnimRunStatus::Playing | AnimRunStatus::Paused => {
@@ -171,15 +172,20 @@ pub fn water_cannon_visual_system(
     let flat_rot = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
 
     for (anim_id, marker_id, cfg, anim_time, is_editor_preview) in to_render {
-        let Some(marker) = state.markers.iter().find(|m| m.id == marker_id && m.is_spawn) else {
+        let playback_active = playback.is_playback_active();
+        let Some(marker) = state
+            .markers
+            .iter()
+            .find(|m| m.id == marker_id && overrides.is_marker_visible(m, playback_active))
+        else {
             if let Some(rig) = pool.rigs.remove(&anim_id) {
                 WaterCannonVisualPool::despawn_rig(&mut commands, rig);
             }
             continue;
         };
 
-        // Track live vehicle pose during Play Skenario if a Route animation is moving it!
-        let (lng, lat, alt, rot_y) = if playback.play_test_mode
+        // Track live vehicle pose during Play Skenario or Plot-Editor Preview if a Route animation is moving it!
+        let (lng, lat, alt, rot_y) = if playback_active
             && let Some(ov) = overrides.markers.get(&marker_id)
         {
             (ov.lng, ov.lat, ov.altitude, ov.rot_y)

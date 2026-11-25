@@ -464,16 +464,37 @@ pub fn draw_operasi_screen(
                                                                 open_edit_for = Some(op.clone());
                                                             }
 
+                                                            let can_delete_op =
+                                                                op.skenario_count == 0;
                                                             let del_btn = egui::Button::new(
                                                                 egui::RichText::new("Hapus")
                                                                     .size(11.5)
-                                                                    .color(egui::Color32::from_rgb(
-                                                                        254, 202, 202,
-                                                                    )),
+                                                                    .color(if can_delete_op {
+                                                                        egui::Color32::from_rgb(
+                                                                            254, 202, 202,
+                                                                        )
+                                                                    } else {
+                                                                        egui::Color32::from_rgb(
+                                                                            148, 163, 184,
+                                                                        )
+                                                                    }),
                                                             )
-                                                            .fill(egui::Color32::from_rgb(127, 29, 29))
+                                                            .fill(if can_delete_op {
+                                                                egui::Color32::from_rgb(
+                                                                    127, 29, 29,
+                                                                )
+                                                            } else {
+                                                                egui::Color32::from_rgb(30, 41, 59)
+                                                            })
                                                             .min_size(egui::vec2(50.0, 24.0));
-                                                            if ui.add(del_btn).clicked() {
+                                                            if ui
+                                                                .add_enabled(can_delete_op, del_btn)
+                                                                .on_disabled_hover_text(format!(
+                                                                    "Tidak dapat dihapus: masih ada {} skenario di dalam operasi ini. Hapus atau pindahkan semua skenario terlebih dahulu.",
+                                                                    op.skenario_count
+                                                                ))
+                                                                .clicked()
+                                                            {
                                                                 open_delete_for = Some(op.clone());
                                                             }
                                                         }
@@ -677,14 +698,24 @@ fn draw_operasi_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClien
                                 .color(egui::Color32::WHITE),
                             );
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Semua {} skenario serta unit, bangunan, garis, dan animasi di dalamnya akan ikut terhapus permanen.",
-                                    op.skenario_count
-                                ))
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(148, 163, 184)),
-                            );
+                            let has_skenarios = op.skenario_count > 0;
+                            if has_skenarios {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(250, 204, 21),
+                                    format!(
+                                        "Operasi ini masih memiliki {} skenario dan tidak dapat dihapus. Hapus atau pindahkan semua skenario terlebih dahulu.",
+                                        op.skenario_count
+                                    ),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Operasi ini sudah kosong (0 skenario) dan akan dihapus permanen.",
+                                    )
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                );
+                            }
 
                             if let Some(err) = &state.operasi_table.form_error {
                                 ui.add_space(8.0);
@@ -708,7 +739,10 @@ fn draw_operasi_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClien
                                         .fill(egui::Color32::from_rgb(185, 28, 28))
                                         .min_size(egui::vec2(138.0, 30.0));
                                         if ui
-                                            .add_enabled(!state.operasi_table.submitting, del_btn)
+                                            .add_enabled(
+                                                !state.operasi_table.submitting && !has_skenarios,
+                                                del_btn,
+                                            )
                                             .clicked()
                                         {
                                             confirm_delete = true;

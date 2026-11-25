@@ -12,8 +12,14 @@ use crate::{
         ws_client::{WsClientBridge, WsOutCommand},
     },
     scene::markers::{finish_active_draft, save_all_scenario_changes},
-    state::{AppScreen, AppState, PlaybackState, SkyboxPreset, ToolMode},
-    ui::nav_bar::{trigger_load_operasis, trigger_load_skenarios},
+    state::{AppScreen, AppState, PlaySessionMode, PlaybackState, SkyboxPreset, ToolMode},
+    ui::{
+        app_icon::draw_app_brand_icon,
+        nav_bar::{
+            enter_layar_besar, open_profile_screen, trigger_load_operasis, trigger_load_satkers,
+            trigger_load_skenarios, trigger_load_tactical_operasis, trigger_load_users,
+        },
+    },
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -48,6 +54,7 @@ pub fn draw_top_bar(
         .show(viewport_ui, |ui| {
             // Row 1: Navigation Breadcrumb | Centered Godot/Unity Play Test Controls | Session Info
             ui.horizontal(|ui| {
+                draw_app_brand_icon(ui, 18.0);
                 ui.label(
                     egui::RichText::new("TWG-RUST 3D")
                         .size(13.0)
@@ -78,12 +85,54 @@ pub fn draw_top_bar(
 
                 if ui.selectable_label(false, "Operasi").clicked() {
                     playback.stop_play_test();
+                    state.play_session_mode = PlaySessionMode::LocalPreview;
                     state.screen = AppScreen::Operasis;
                     trigger_load_operasis(state, api);
                 }
 
+                if ui
+                    .selectable_label(
+                        false,
+                        egui::RichText::new("Tactical")
+                            .color(egui::Color32::from_rgb(110, 231, 183)),
+                    )
+                    .clicked()
+                {
+                    playback.stop_play_test();
+                    state.play_session_mode = PlaySessionMode::LocalPreview;
+                    state.screen = AppScreen::Tactical;
+                    trigger_load_tactical_operasis(state, api);
+                }
+
+                if ui
+                    .selectable_label(
+                        false,
+                        egui::RichText::new("Layar Besar")
+                            .color(egui::Color32::from_rgb(253, 224, 71)),
+                    )
+                    .clicked()
+                {
+                    enter_layar_besar(state, playback, ws);
+                }
+
+                if state.can_manage_satkers() && ui.selectable_label(false, "Satkers").clicked() {
+                    playback.stop_play_test();
+                    state.play_session_mode = PlaySessionMode::LocalPreview;
+                    state.screen = AppScreen::Satkers;
+                    trigger_load_satkers(state, api);
+                }
+
+                if state.can_manage_users() && ui.selectable_label(false, "Users").clicked() {
+                    playback.stop_play_test();
+                    state.play_session_mode = PlaySessionMode::LocalPreview;
+                    state.screen = AppScreen::Users;
+                    trigger_load_users(state, api);
+                    trigger_load_satkers(state, api);
+                }
+
                 if state.is_super_admin() && ui.selectable_label(false, "Assets 3D").clicked() {
                     playback.stop_play_test();
+                    state.play_session_mode = PlaySessionMode::LocalPreview;
                     state.screen = AppScreen::Assets;
                 }
 
@@ -208,9 +257,10 @@ pub fn draw_top_bar(
                                     state.draft_points_lnglat.clear();
                                     state.picking_marker_for_anim_id = None;
                                     state.tool_mode = ToolMode::Select;
+                                    state.play_session_mode = PlaySessionMode::LocalPreview;
                                     playback.enter_play_mode();
                                     state.status_banner = Some(
-                                        "Mode Play Skenario aktif — tekan Play pada Panel Animasi di kiri."
+                                        "Mode Play Skenario (Lokal Editor) aktif — tidak mempengaruhi app lain / Layar Besar."
                                             .into(),
                                     );
                                 }
@@ -289,16 +339,24 @@ pub fn draw_top_bar(
                         ui.colored_label(ws_color, ws_text);
                     }
 
-                    if let Some(user) = &state.current_user {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} [{}]",
-                                user.username,
-                                user.role.as_str()
-                            ))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(203, 213, 225)),
-                        );
+                    if let Some(user) = state.current_user.clone()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} [{}]  •  Profil",
+                                        user.username,
+                                        user.role.label()
+                                    ))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                                )
+                                .fill(egui::Color32::from_rgb(24, 34, 53)),
+                            )
+                            .on_hover_text("Buka halaman Profil & Ganti Password")
+                            .clicked()
+                    {
+                        open_profile_screen(state, playback, ws);
                     }
                 });
             });
@@ -374,6 +432,8 @@ pub fn draw_top_bar(
                         }
                         if tool == ToolMode::DrawRoute {
                             state.new_route_is_multi = false;
+                            state.new_route_formation =
+                                twg_shared::route_formation::RouteFormationKind::Grid;
                             state.route_target_marker_id = None;
                             state.picking_marker_for_anim_id = None;
                             state.new_route_name = format!("Rute Unit {}", state.anims.len() + 1);
@@ -494,6 +554,15 @@ pub fn draw_top_bar(
                 ui.checkbox(&mut state.show_unit_labels, "Labels");
                 ui.checkbox(&mut state.show_text_markers, "Text");
                 ui.checkbox(&mut state.show_gizmos, "Gizmos");
+                ui.checkbox(&mut state.trackpad_mode, "Trackpad")
+                    .on_hover_text(
+                        "Mode Trackpad (MacBook / Laptop):\n\
+                         • Scroll 2 jari = Pan peta 360°\n\
+                         • Pinch 2 jari / Ctrl+Scroll = Zoom\n\
+                         • Alt/Option + Drag Kiri (atau Scroll 2 jari) = Orbit / Pitch\n\
+                         • Space + Drag Kiri = Pan alternatif\n\
+                         • Putar 2 jari = Rotasi arah peta",
+                    );
 
                 if ui.button("Reset Cam (R)").clicked()
                     && let Some(sk) = &state.active_skenario
@@ -527,33 +596,53 @@ pub fn draw_top_bar(
         .height()
 }
 
+pub fn broadcast_tactical_anim_cmd(
+    state: &AppState,
+    ws: &WsClientBridge,
+    command: &str,
+    anim_id: Option<uuid::Uuid>,
+    play_all: bool,
+    speed_multiplier: f32,
+) {
+    // Strictly only broadcast when Play Skenario was opened from Tactical / Simulasi!
+    // Play Skenario opened from Plot Editor (`LocalPreview`) is 100% isolated locally.
+    if state.offline_preview || !state.is_tactical_live() {
+        return;
+    }
+    let Some(sk) = &state.active_skenario else {
+        return;
+    };
+    let marker_id = anim_id
+        .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+        .and_then(|a| a.marker_id);
+    ws.send(WsOutCommand::SendCommand(TacticalCommand {
+        operasi_id: sk.operasi_id,
+        skenario_id: sk.id,
+        marker_id,
+        command: command.into(),
+        payload: serde_json::json!({
+            "anim_id": anim_id,
+            "play_all": play_all,
+            "speed_multiplier": speed_multiplier,
+        }),
+        save_history: false,
+    }));
+}
+
 pub fn broadcast_playback_cmd(
     state: &AppState,
     playback: &PlaybackState,
     ws: &WsClientBridge,
     command: &str,
 ) {
-    if state.offline_preview {
-        return;
-    }
-    let Some(sk) = &state.active_skenario else {
-        return;
-    };
-    let anim = playback
-        .active_anim_id
-        .and_then(|id| state.anims.iter().find(|a| a.id == id))
-        .or_else(|| state.anims.first());
-    ws.send(WsOutCommand::SendCommand(TacticalCommand {
-        operasi_id: sk.operasi_id,
-        skenario_id: sk.id,
-        marker_id: anim.and_then(|a| a.marker_id),
-        command: command.into(),
-        payload: serde_json::json!({
-            "anim_id": anim.map(|a| a.id),
-            "play_all": playback.play_all_anims,
-        }),
-        save_history: false,
-    }));
+    broadcast_tactical_anim_cmd(
+        state,
+        ws,
+        command,
+        playback.active_anim_id,
+        playback.play_all_anims,
+        playback.speed_multiplier,
+    );
 }
 
 fn draw_transform_tool_btn(

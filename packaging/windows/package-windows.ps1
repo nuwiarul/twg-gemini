@@ -30,6 +30,11 @@ try {
 
     Copy-Item $ExePath (Join-Path $StageDir "twg-app.exe")
 
+    $IconSrc = Join-Path $RepoRoot "packaging\icons\twg-app.ico"
+    if (Test-Path $IconSrc) {
+        Copy-Item $IconSrc (Join-Path $StageDir "twg-app.ico")
+    }
+
     # Launcher batch script that configures writable per-user offline cache + server URL
     $LauncherBat = @"
 @echo off

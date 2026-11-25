@@ -8,7 +8,10 @@ use twg_shared::{
 };
 use uuid::Uuid;
 
-use crate::state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode};
+use crate::{
+    scene::{play_rts::PlayRtsState, playback::PlaybackOverrides},
+    state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode},
+};
 
 pub const GIZMO_SCREEN_RADIUS_PX: f32 = 82.0;
 
@@ -372,6 +375,112 @@ pub fn begin_gizmo_drag(
     })
 }
 
+/// Starts a 3D Move Gizmo drag at an arbitrary world-space `start_origin` (used by Play Skenario
+/// `GizmoMove` / `tools` objects so runtime moves never mutate the persisted Plot Editor marker).
+pub fn begin_move_gizmo_drag_at_origin(
+    marker_id: Uuid,
+    start_origin: Vec3,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let gizmo_radius_world =
+        compute_gizmo_world_radius(camera, cam_gtf, start_origin, GIZMO_SCREEN_RADIUS_PX);
+    let axis_world = match handle {
+        GizmoHandle::AxisX => Vec3::X,
+        GizmoHandle::AxisY => Vec3::Y,
+        GizmoHandle::AxisZ => Vec3::Z,
+        GizmoHandle::Free => Vec3::Y,
+    };
+    let ray = camera.viewport_to_world(cam_gtf, cursor_px).ok()?;
+    let start_axis_param = closest_axis_param(ray, start_origin, axis_world).unwrap_or(0.0);
+    let free_plane_offset = if handle == GizmoHandle::Free {
+        let hit = intersect_ray_plane(ray, start_origin, Vec3::Y).or_else(|| {
+            let cam_fwd = cam_gtf.forward().as_vec3();
+            intersect_ray_plane(ray, start_origin, -cam_fwd)
+                .map(|p| Vec3::new(p.x, start_origin.y, p.z))
+        });
+        hit.map(|h| start_origin - h).unwrap_or(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    };
+
+    Some(ActiveGizmoDrag {
+        marker_id,
+        is_particle_anim: false,
+        mode: GizmoMode::Move,
+        handle,
+        start_origin,
+        start_quat: Quat::IDENTITY,
+        current_quat: Quat::IDENTITY,
+        start_scale: Vec3::ONE,
+        start_cursor_px: cursor_px,
+        prev_cursor_px: cursor_px,
+        start_axis_param,
+        free_plane_offset,
+        axis_world,
+        rot_start_dir: None,
+        prev_rot_vec: None,
+        accumulated_angle_rad: 0.0,
+        gizmo_radius_world,
+        visual_scale_factor: 1.0,
+        moved: false,
+    })
+}
+
+/// Evaluates the new world position of a `GizmoMode::Move` drag without mutating `AppState`.
+pub fn compute_move_gizmo_drag_world_pos(
+    drag: &mut ActiveGizmoDrag,
+    cursor_px: Vec2,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<Vec3> {
+    let ray = camera.viewport_to_world(cam_gtf, cursor_px).ok()?;
+    let total_px = cursor_px - drag.start_cursor_px;
+    if !drag.moved && total_px.length_squared() < 2.25 {
+        drag.prev_cursor_px = cursor_px;
+        return None;
+    }
+    let cam_fwd = cam_gtf.forward().as_vec3();
+    let new_pos = match drag.handle {
+        GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ => {
+            let p = if let Some(s_curr) =
+                closest_axis_param(ray, drag.start_origin, drag.axis_world)
+            {
+                drag.start_origin + drag.axis_world * (s_curr - drag.start_axis_param)
+            } else if let (Ok(o2), Ok(t2)) = (
+                camera.world_to_viewport(cam_gtf, drag.start_origin),
+                camera.world_to_viewport(
+                    cam_gtf,
+                    drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                ),
+            ) {
+                let s_dir = (t2 - o2).normalize_or(Vec2::X);
+                let proj = total_px.dot(s_dir);
+                let world_delta = (proj / GIZMO_SCREEN_RADIUS_PX) * drag.gizmo_radius_world;
+                drag.start_origin + drag.axis_world * world_delta
+            } else {
+                drag.start_origin
+            };
+            Some(Vec3::new(p.x, p.y.clamp(-100.0, 20_000.0), p.z))
+        }
+        GizmoHandle::Free => {
+            let hit = intersect_ray_plane(ray, drag.start_origin, Vec3::Y).or_else(|| {
+                intersect_ray_plane(ray, drag.start_origin, -cam_fwd)
+                    .map(|p| Vec3::new(p.x, drag.start_origin.y, p.z))
+            });
+            hit.map(|h| {
+                let mut p = h + drag.free_plane_offset;
+                p.y = drag.start_origin.y;
+                p
+            })
+        }
+    };
+    drag.prev_cursor_px = cursor_px;
+    new_pos
+}
+
 pub fn begin_particle_move_drag(
     anim: &Anim,
     handle: GizmoHandle,
@@ -709,70 +818,98 @@ pub fn draw_transform_gizmo(
     clip_rect: egui::Rect,
     state: &AppState,
     playback: &PlaybackState,
+    overrides: &PlaybackOverrides,
+    play_rts: &PlayRtsState,
     gizmo_state: &TransformGizmoState,
     poly_edit: &crate::scene::polygon_edit::PolygonEditState,
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) {
-    if state.screen != AppScreen::PlotSkenario
-        || !state.show_gizmos
-        || playback.play_test_mode
-    {
+    if state.screen != AppScreen::PlotSkenario {
         return;
     }
+
     let (mode, origin, rot_quat, cur_lng, cur_lat, altitude, cur_rot, cur_scale) =
-        match state.selected {
-            SelectedEntity::Marker(marker_id) => {
-                let Some(mode) = gizmo_mode_for_tool(state.tool_mode) else {
-                    return;
-                };
-                if poly_edit.is_editing(marker_id) {
-                    return;
-                }
-                let Some(marker) = state.markers.iter().find(|m| m.id == marker_id) else {
-                    return;
-                };
-                if state.is_marker_locked(marker) {
-                    return;
-                }
-                (
-                    mode,
-                    marker_world_origin(state, marker),
-                    marker_quat(marker),
-                    marker.lng,
-                    marker.lat,
-                    marker.altitude,
-                    [marker.rot_x, marker.rot_y, marker.rot_z],
-                    [marker.scale_x, marker.scale_y, marker.scale_z],
-                )
+        if playback.play_test_mode {
+            // In Play Skenario, ONLY a selected `GizmoMove` (`tools`) marker displays the 3D Move Gizmo.
+            let Some(gid) = play_rts.selected_gizmo_marker_id else {
+                return;
+            };
+            let Some(marker) = state.markers.iter().find(|m| m.id == gid) else {
+                return;
+            };
+            if !overrides.is_marker_visible(marker, true) {
+                return;
             }
-            SelectedEntity::Anim(anim_id) => {
-                if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {
-                    return;
-                }
-                if state.locked_entity_ids.contains(&anim_id) {
-                    return;
-                }
-                let Some(anim) = state
-                    .anims
-                    .iter()
-                    .find(|a| a.id == anim_id && is_particle_anim(a) && !a.geom.is_empty())
-                else {
-                    return;
-                };
-                let pos = particle_anim_position(anim);
-                (
-                    GizmoMode::Move,
-                    particle_anim_world_origin(state, anim),
-                    Quat::IDENTITY,
-                    pos[0],
-                    pos[1],
-                    pos[2],
-                    [0.0, 0.0, 0.0],
-                    [1.0, 1.0, 1.0],
-                )
+            let (lng, lat, alt, rot_y) = play_rts.marker_runtime_pose(marker, overrides);
+            let origin = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt));
+            (
+                GizmoMode::Move,
+                origin,
+                Quat::IDENTITY,
+                lng,
+                lat,
+                alt,
+                [marker.rot_x, rot_y, marker.rot_z],
+                [marker.scale_x, marker.scale_y, marker.scale_z],
+            )
+        } else {
+            if !state.show_gizmos {
+                return;
             }
-            _ => return,
+            match state.selected {
+                SelectedEntity::Marker(marker_id) => {
+                    let Some(mode) = gizmo_mode_for_tool(state.tool_mode) else {
+                        return;
+                    };
+                    if poly_edit.is_editing(marker_id) {
+                        return;
+                    }
+                    let Some(marker) = state.markers.iter().find(|m| m.id == marker_id) else {
+                        return;
+                    };
+                    if state.is_marker_locked(marker) {
+                        return;
+                    }
+                    (
+                        mode,
+                        marker_world_origin(state, marker),
+                        marker_quat(marker),
+                        marker.lng,
+                        marker.lat,
+                        marker.altitude,
+                        [marker.rot_x, marker.rot_y, marker.rot_z],
+                        [marker.scale_x, marker.scale_y, marker.scale_z],
+                    )
+                }
+                SelectedEntity::Anim(anim_id) => {
+                    if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {
+                        return;
+                    }
+                    if state.locked_entity_ids.contains(&anim_id) {
+                        return;
+                    }
+                    let Some(anim) = state
+                        .anims
+                        .iter()
+                        .find(|a| a.id == anim_id && is_particle_anim(a) && !a.geom.is_empty())
+                    else {
+                        return;
+                    };
+                    let pos = particle_anim_position(anim);
+                    (
+                        GizmoMode::Move,
+                        particle_anim_world_origin(state, anim),
+                        Quat::IDENTITY,
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        [0.0, 0.0, 0.0],
+                        [1.0, 1.0, 1.0],
+                    )
+                }
+                _ => return,
+            }
         };
 
     let Ok(origin_2d_v) = camera.world_to_viewport(cam_gtf, origin) else {

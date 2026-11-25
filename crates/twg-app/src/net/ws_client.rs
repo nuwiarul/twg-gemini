@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use twg_shared::ws::{
-    OnlineOperator, TacticalCommand, TacticalCommandBroadcast, WsClientMessage, WsServerMessage,
+    BigScreenLiveState, OnlineOperator, TacticalCommand, TacticalCommandBroadcast, WsClientMessage,
+    WsClientMode, WsServerMessage,
 };
 use uuid::Uuid;
 
@@ -15,9 +18,13 @@ pub enum WsOutCommand {
         token: String,
         device_id: String,
         skenario_id: Option<Uuid>,
+        client_mode: WsClientMode,
     },
     Disconnect,
-    Subscribe(Option<Uuid>),
+    Subscribe {
+        skenario_id: Option<Uuid>,
+        client_mode: WsClientMode,
+    },
     SendCommand(TacticalCommand),
 }
 
@@ -27,6 +34,7 @@ pub enum WsInEvent {
     Disconnected(String),
     OnlineUsers(Vec<OnlineOperator>),
     Broadcast(TacticalCommandBroadcast),
+    BigScreenState(BigScreenLiveState),
     Error(String),
 }
 
@@ -68,6 +76,7 @@ impl WsClientBridge {
                                 token,
                                 device_id,
                                 skenario_id,
+                                client_mode,
                             } => {
                                 if let Some(handle) = active_task.take() {
                                     handle.abort();
@@ -77,18 +86,25 @@ impl WsClientBridge {
                                 active_out = Some(out_tx);
                                 let evt_tx_clone = evt_tx.clone();
 
-                                active_task = Some(tokio::spawn(run_ws_session(
+                                active_task = Some(tokio::spawn(run_ws_reconnect_loop(
                                     server_url,
                                     token,
                                     device_id,
                                     skenario_id,
+                                    client_mode,
                                     out_rx,
                                     evt_tx_clone,
                                 )));
                             }
-                            WsOutCommand::Subscribe(skenario_id) => {
+                            WsOutCommand::Subscribe {
+                                skenario_id,
+                                client_mode,
+                            } => {
                                 if let Some(tx) = &active_out {
-                                    let _ = tx.send(WsClientMessage::Subscribe { skenario_id });
+                                    let _ = tx.send(WsClientMessage::Subscribe {
+                                        skenario_id,
+                                        client_mode,
+                                    });
                                 }
                             }
                             WsOutCommand::SendCommand(tcmd) => {
@@ -114,65 +130,129 @@ impl WsClientBridge {
     }
 }
 
-async fn run_ws_session(
+fn client_mode_query(mode: WsClientMode) -> &'static str {
+    match mode {
+        WsClientMode::Idle => "idle",
+        WsClientMode::TacticalLive => "tactical_live",
+        WsClientMode::BigScreen => "big_screen",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_ws_reconnect_loop(
     server_url: String,
     token: String,
     device_id: String,
-    skenario_id: Option<Uuid>,
+    initial_skenario_id: Option<Uuid>,
+    initial_mode: WsClientMode,
     mut out_rx: mpsc::UnboundedReceiver<WsClientMessage>,
     evt_tx: Sender<WsInEvent>,
 ) {
+    let mut current_skenario_id = initial_skenario_id;
+    let mut current_mode = initial_mode;
+
     let ws_base = server_url
         .trim_end_matches('/')
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
 
-    let mut url = format!("{ws_base}/ws?token={token}&device_id={device_id}");
-    if let Some(sid) = skenario_id {
-        url.push_str(&format!("&skenario_id={sid}"));
-    }
+    loop {
+        let mut url = format!(
+            "{ws_base}/ws?token={token}&device_id={device_id}&client_mode={}",
+            client_mode_query(current_mode)
+        );
+        if let Some(sid) = current_skenario_id {
+            url.push_str(&format!("&skenario_id={sid}"));
+        }
 
-    let Ok((ws_stream, _)) = connect_async(&url).await else {
-        let _ = evt_tx.send(WsInEvent::Disconnected("WS connect failed".into()));
-        return;
-    };
+        let ws_stream = match connect_async(&url).await {
+            Ok((stream, _)) => stream,
+            Err(_) => {
+                let _ = evt_tx.send(WsInEvent::Disconnected("WS reconnecting...".into()));
+                // Keep draining outgoing subscriptions while waiting to reconnect
+                let sleep = tokio::time::sleep(Duration::from_secs(2));
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        _ = &mut sleep => break,
+                        maybe_msg = out_rx.recv() => {
+                            match maybe_msg {
+                                Some(WsClientMessage::Subscribe { skenario_id, client_mode }) => {
+                                    current_skenario_id = skenario_id;
+                                    current_mode = client_mode;
+                                }
+                                Some(_) => {}
+                                None => return,
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        };
 
-    let _ = evt_tx.send(WsInEvent::Connected);
-    let (mut write, mut read) = ws_stream.split();
+        let _ = evt_tx.send(WsInEvent::Connected);
+        let (mut write, mut read) = ws_stream.split();
 
-    let evt_tx_read = evt_tx.clone();
-    let read_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = read.next().await {
-            if let Message::Text(txt) = msg
-                && let Ok(server_msg) = serde_json::from_str::<WsServerMessage>(&txt)
-            {
-                match server_msg {
-                    WsServerMessage::Connected { .. } => {
-                        let _ = evt_tx_read.send(WsInEvent::Connected);
+        let mut channel_closed = false;
+        loop {
+            tokio::select! {
+                incoming = read.next() => {
+                    match incoming {
+                        Some(Ok(Message::Text(txt))) => {
+                            if let Ok(server_msg) = serde_json::from_str::<WsServerMessage>(&txt) {
+                                match server_msg {
+                                    WsServerMessage::Connected { .. } => {
+                                        let _ = evt_tx.send(WsInEvent::Connected);
+                                    }
+                                    WsServerMessage::OnlineUsers { operators } => {
+                                        let _ = evt_tx.send(WsInEvent::OnlineUsers(operators));
+                                    }
+                                    WsServerMessage::Command(b) => {
+                                        let _ = evt_tx.send(WsInEvent::Broadcast(b));
+                                    }
+                                    WsServerMessage::BigScreenState(st) => {
+                                        let _ = evt_tx.send(WsInEvent::BigScreenState(st));
+                                    }
+                                    WsServerMessage::Error { message } => {
+                                        let _ = evt_tx.send(WsInEvent::Error(message));
+                                    }
+                                    WsServerMessage::Pong => {}
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                            break;
+                        }
+                        Some(Ok(_)) => {}
                     }
-                    WsServerMessage::OnlineUsers { operators } => {
-                        let _ = evt_tx_read.send(WsInEvent::OnlineUsers(operators));
+                }
+                outgoing = out_rx.recv() => {
+                    match outgoing {
+                        Some(client_msg) => {
+                            if let WsClientMessage::Subscribe { skenario_id, client_mode } = &client_msg {
+                                current_skenario_id = *skenario_id;
+                                current_mode = *client_mode;
+                            }
+                            if let Ok(txt) = serde_json::to_string(&client_msg)
+                                && write.send(Message::Text(txt.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => {
+                            channel_closed = true;
+                            break;
+                        }
                     }
-                    WsServerMessage::Command(b) => {
-                        let _ = evt_tx_read.send(WsInEvent::Broadcast(b));
-                    }
-                    WsServerMessage::Error { message } => {
-                        let _ = evt_tx_read.send(WsInEvent::Error(message));
-                    }
-                    WsServerMessage::Pong => {}
                 }
             }
         }
-    });
 
-    while let Some(client_msg) = out_rx.recv().await {
-        if let Ok(txt) = serde_json::to_string(&client_msg)
-            && write.send(Message::Text(txt.into())).await.is_err()
-        {
-            break;
+        if channel_closed {
+            return;
         }
+        let _ = evt_tx.send(WsInEvent::Disconnected("WS reconnecting...".into()));
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-
-    read_task.abort();
-    let _ = evt_tx.send(WsInEvent::Disconnected("WS closed".into()));
 }

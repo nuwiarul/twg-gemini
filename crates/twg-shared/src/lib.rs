@@ -1,8 +1,12 @@
 pub mod api;
 pub mod geo;
 pub mod glb_skin;
+pub mod group_anim;
 pub mod models;
 pub mod particle_anim;
+pub mod pointer_anim;
 pub mod route_formation;
+pub mod rts_nav;
 pub mod shoot_anim;
+pub mod spawn_hide_anim;
 pub mod ws;

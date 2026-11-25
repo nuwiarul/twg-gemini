@@ -1,8 +1,8 @@
 use bevy_egui::egui;
 use twg_shared::{
     api::{
-        CreateLocationPresetRequest, CreateSkenarioRequest, UpdateLocationPresetRequest,
-        UpdateSkenarioRequest,
+        CopySkenarioRequest, CreateLocationPresetRequest, CreateSkenarioRequest,
+        MoveSkenarioRequest, UpdateLocationPresetRequest, UpdateSkenarioRequest,
     },
     models::{BaseLayer, IndoorConfig, LocationPreset, MapMode, Skenario, SkyboxPreset},
 };
@@ -1086,10 +1086,7 @@ pub fn draw_skenario_screen(
         .current_user
         .as_ref()
         .is_some_and(|u| u.role.can_write_admin());
-    let can_edit_skenario = state
-        .current_user
-        .as_ref()
-        .is_some_and(|u| !u.role.is_admin_monitor());
+    let can_edit_skenario = can_write_admin;
 
     let filtered_operasi = state
         .skenario_table
@@ -1385,15 +1382,15 @@ pub fn draw_skenario_screen(
 
             // 8 columns: No | Nama Skenario | Operasi | Mode & Layer | Koordinat & Zoom | Objek | Diperbarui | Aksi
             let col_no = 40.0_f32;
-            let col_updated = 122.0_f32;
-            let col_actions = 236.0_f32;
+            let col_updated = 116.0_f32;
+            let col_actions = 308.0_f32;
             let total_gaps = TABLE_COL_GAP * 7.0;
             let flex_w = (content_w - col_no - col_updated - col_actions - total_gaps).max(320.0);
-            let col_name = (flex_w * 0.25).max(100.0);
-            let col_operasi = (flex_w * 0.21).max(90.0);
-            let col_mode = (flex_w * 0.18).max(85.0);
-            let col_coord = (flex_w * 0.18).max(85.0);
-            let col_entities = (flex_w - col_name - col_operasi - col_mode - col_coord).max(80.0);
+            let col_name = (flex_w * 0.24).max(100.0);
+            let col_operasi = (flex_w * 0.20).max(90.0);
+            let col_mode = (flex_w * 0.17).max(82.0);
+            let col_coord = (flex_w * 0.17).max(82.0);
+            let col_entities = (flex_w - col_name - col_operasi - col_mode - col_coord).max(86.0);
             let col_widths = [
                 col_no,
                 col_name,
@@ -1407,6 +1404,8 @@ pub fn draw_skenario_screen(
 
             let mut plot_target: Option<Skenario> = None;
             let mut edit_target: Option<Skenario> = None;
+            let mut copy_target: Option<Skenario> = None;
+            let mut move_target: Option<Skenario> = None;
             let mut delete_target: Option<Skenario> = None;
 
             egui::Frame::new()
@@ -1642,19 +1641,21 @@ pub fn draw_skenario_screen(
                                                     );
                                                 }
                                                 5 => {
+                                                    let has_content = sk.has_simulation_content();
+                                                    let summary = sk.content_summary();
                                                     ui.add(
                                                         egui::Label::new(
-                                                            egui::RichText::new(format!(
-                                                                "{} Unit • {} Bldg • {} Line • {} Anim",
-                                                                sk.marker_count,
-                                                                sk.building_count,
-                                                                sk.line_count,
-                                                                sk.anim_count
-                                                            ))
-                                                            .size(11.0)
-                                                            .color(egui::Color32::from_rgb(
-                                                                186, 230, 253,
-                                                            )),
+                                                            egui::RichText::new(summary)
+                                                                .size(11.0)
+                                                                .color(if has_content {
+                                                                    egui::Color32::from_rgb(
+                                                                        186, 230, 253,
+                                                                    )
+                                                                } else {
+                                                                    egui::Color32::from_rgb(
+                                                                        100, 116, 139,
+                                                                    )
+                                                                }),
                                                         )
                                                         .wrap(),
                                                     );
@@ -1724,18 +1725,79 @@ pub fn draw_skenario_screen(
 
                                                         if can_write_admin && !state.offline_preview
                                                         {
-                                                            let del_btn = egui::Button::new(
-                                                                egui::RichText::new("Hapus")
+                                                            let copy_btn = egui::Button::new(
+                                                                egui::RichText::new("Salin")
                                                                     .size(11.5)
                                                                     .color(egui::Color32::from_rgb(
-                                                                        254, 202, 202,
+                                                                        186, 230, 253,
                                                                     )),
                                                             )
                                                             .fill(egui::Color32::from_rgb(
-                                                                127, 29, 29,
+                                                                14, 116, 144,
                                                             ))
+                                                            .min_size(egui::vec2(48.0, 24.0));
+                                                            if ui
+                                                                .add(copy_btn)
+                                                                .on_hover_text(
+                                                                    "Salin skenario beserta seluruh objek 3D, pengaturan peta & animasi ke operasi ini atau operasi lain",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                copy_target = Some(sk.clone());
+                                                            }
+
+                                                            let move_btn = egui::Button::new(
+                                                                egui::RichText::new("Pindah")
+                                                                    .size(11.5)
+                                                                    .color(egui::Color32::from_rgb(
+                                                                        233, 213, 255,
+                                                                    )),
+                                                            )
+                                                            .fill(egui::Color32::from_rgb(
+                                                                88, 28, 135,
+                                                            ))
+                                                            .min_size(egui::vec2(54.0, 24.0));
+                                                            if ui
+                                                                .add(move_btn)
+                                                                .on_hover_text(
+                                                                    "Pindahkan skenario & seluruh isinya ke operasi lain",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                move_target = Some(sk.clone());
+                                                            }
+
+                                                            let can_delete_sk =
+                                                                !sk.has_simulation_content();
+                                                            let del_btn = egui::Button::new(
+                                                                egui::RichText::new("Hapus")
+                                                                    .size(11.5)
+                                                                    .color(if can_delete_sk {
+                                                                        egui::Color32::from_rgb(
+                                                                            254, 202, 202,
+                                                                        )
+                                                                    } else {
+                                                                        egui::Color32::from_rgb(
+                                                                            148, 163, 184,
+                                                                        )
+                                                                    }),
+                                                            )
+                                                            .fill(if can_delete_sk {
+                                                                egui::Color32::from_rgb(
+                                                                    127, 29, 29,
+                                                                )
+                                                            } else {
+                                                                egui::Color32::from_rgb(30, 41, 59)
+                                                            })
                                                             .min_size(egui::vec2(52.0, 24.0));
-                                                            if ui.add(del_btn).clicked() {
+                                                            if ui
+                                                                .add_enabled(can_delete_sk, del_btn)
+                                                                .on_disabled_hover_text(format!(
+                                                                    "Tidak dapat dihapus: skenario masih memiliki isi simulasi ({}). Kosongkan di Plot Skenario terlebih dahulu.",
+                                                                    sk.content_summary()
+                                                                ))
+                                                                .clicked()
+                                                            {
                                                                 delete_target = Some(sk.clone());
                                                             }
                                                         }
@@ -1764,6 +1826,14 @@ pub fn draw_skenario_screen(
             }
             if let Some(sk) = edit_target {
                 state.skenario_table.open_edit(&sk);
+            }
+            if let Some(sk) = copy_target {
+                trigger_load_operasi_options(state, api);
+                state.skenario_table.open_copy(&sk);
+            }
+            if let Some(sk) = move_target {
+                trigger_load_operasi_options(state, api);
+                state.skenario_table.open_move(&sk);
             }
             if let Some(sk) = delete_target {
                 state.skenario_table.open_delete(&sk);
@@ -2405,10 +2475,347 @@ fn draw_skenario_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClie
     let mode = state.skenario_table.modal_mode.clone();
     match mode {
         SkenarioModalMode::None | SkenarioModalMode::Create | SkenarioModalMode::Edit(_) => {}
+        SkenarioModalMode::Copy(sk) => {
+            draw_modal_backdrop(ctx, "skenario_copy_backdrop");
+            let mut close = false;
+            let mut submit_copy = false;
+            let op_options = state.skenario_table.operasi_options.clone();
+            if state.skenario_table.form_operasi_id.is_none() {
+                state.skenario_table.form_operasi_id = Some(sk.operasi_id);
+            }
+
+            egui::Area::new(egui::Id::new("skenario_copy_modal"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(17, 24, 39))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(56, 189, 248),
+                        ))
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin::same(22))
+                        .show(ui, |ui| {
+                            ui.set_min_width(460.0);
+                            ui.set_max_width(520.0);
+
+                            ui.label(
+                                egui::RichText::new("Salin Skenario & Seluruh Isinya")
+                                    .size(17.5)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(125, 211, 252)),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Sumber: \"{}\"",
+                                    sk.name
+                                ))
+                                .size(12.5)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Akan menyalin pengaturan peta (Zoom {:.1}, Pitch {:.0}°, Bearing {:.0}°, {}, {}) serta seluruh isi simulasi: {}.",
+                                    sk.zoom,
+                                    sk.pitch,
+                                    sk.bearing,
+                                    sk.base_layer.label(),
+                                    sk.skybox.short_label(),
+                                    sk.content_summary()
+                                ))
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.add_space(12.0);
+
+                            ui.label(
+                                egui::RichText::new("Nama Skenario Hasil Salinan *")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.skenario_table.form_name)
+                                    .hint_text("Contoh: Pengamanan Rute VIP (Salinan)")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add_space(10.0);
+
+                            ui.label(
+                                egui::RichText::new("Operasi Tujuan *")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                            );
+                            let selected_op_label = state
+                                .skenario_table
+                                .form_operasi_id
+                                .and_then(|oid| {
+                                    op_options.iter().find(|o| o.id == oid).map(|o| {
+                                        if o.id == sk.operasi_id {
+                                            format!("{} (Operasi saat ini)", o.name)
+                                        } else {
+                                            o.name.clone()
+                                        }
+                                    })
+                                })
+                                .or_else(|| {
+                                    sk.operasi_name
+                                        .as_ref()
+                                        .map(|n| format!("{n} (Operasi saat ini)"))
+                                })
+                                .unwrap_or_else(|| "Pilih Operasi Tujuan...".to_string());
+
+                            egui::ComboBox::from_id_salt("skenario_copy_target_operasi")
+                                .selected_text(selected_op_label)
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for op in &op_options {
+                                        let lbl = if op.id == sk.operasi_id {
+                                            format!("{} (Operasi saat ini)", op.name)
+                                        } else {
+                                            op.name.clone()
+                                        };
+                                        ui.selectable_value(
+                                            &mut state.skenario_table.form_operasi_id,
+                                            Some(op.id),
+                                            lbl,
+                                        );
+                                    }
+                                });
+
+                            if let Some(err) = &state.skenario_table.form_error {
+                                ui.add_space(8.0);
+                                ui.colored_label(egui::Color32::from_rgb(248, 113, 113), err);
+                            }
+
+                            ui.add_space(16.0);
+                            ui.horizontal(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let copy_btn = egui::Button::new(
+                                            egui::RichText::new(if state.skenario_table.submitting {
+                                                "Menyalin..."
+                                            } else {
+                                                "Salin Skenario"
+                                            })
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(14, 116, 144))
+                                        .min_size(egui::vec2(126.0, 30.0));
+                                        if ui
+                                            .add_enabled(!state.skenario_table.submitting, copy_btn)
+                                            .clicked()
+                                        {
+                                            submit_copy = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !state.skenario_table.submitting,
+                                                egui::Button::new("Batal")
+                                                    .min_size(egui::vec2(76.0, 30.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            close = true;
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                });
+
+            if submit_copy {
+                let new_name = state.skenario_table.form_name.trim().to_string();
+                let target_op = state.skenario_table.form_operasi_id.unwrap_or(sk.operasi_id);
+                if new_name.is_empty() {
+                    state.skenario_table.form_error =
+                        Some("Nama skenario hasil salinan wajib diisi.".into());
+                } else if let Some(auth) = current_auth(state) {
+                    state.skenario_table.submitting = true;
+                    state.skenario_table.form_error = None;
+                    api.send(ApiCommand::CopySkenario {
+                        auth,
+                        id: sk.id,
+                        req: CopySkenarioRequest {
+                            target_operasi_id: target_op,
+                            new_name: Some(new_name),
+                        },
+                    });
+                }
+            } else if close {
+                state.skenario_table.close_modal();
+            }
+        }
+        SkenarioModalMode::Move(sk) => {
+            draw_modal_backdrop(ctx, "skenario_move_backdrop");
+            let mut close = false;
+            let mut submit_move = false;
+            let other_ops: Vec<_> = state
+                .skenario_table
+                .operasi_options
+                .iter()
+                .filter(|o| o.id != sk.operasi_id)
+                .cloned()
+                .collect();
+            if state
+                .skenario_table
+                .form_operasi_id
+                .is_none_or(|oid| oid == sk.operasi_id || !other_ops.iter().any(|o| o.id == oid))
+            {
+                state.skenario_table.form_operasi_id = other_ops.first().map(|o| o.id);
+            }
+
+            egui::Area::new(egui::Id::new("skenario_move_modal"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(17, 24, 39))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(168, 85, 247),
+                        ))
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin::same(22))
+                        .show(ui, |ui| {
+                            ui.set_min_width(450.0);
+                            ui.set_max_width(510.0);
+
+                            ui.label(
+                                egui::RichText::new("Pindah Skenario ke Operasi Lain")
+                                    .size(17.5)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(216, 180, 254)),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Skenario: \"{}\"",
+                                    sk.name
+                                ))
+                                .size(12.5)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                            );
+                            let cur_op_name = sk
+                                .operasi_name
+                                .as_deref()
+                                .unwrap_or("Operasi saat ini");
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Dari operasi \"{cur_op_name}\" — seluruh isi ({}) ikut dipindahkan.",
+                                    sk.content_summary()
+                                ))
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.add_space(12.0);
+
+                            ui.label(
+                                egui::RichText::new("Operasi Tujuan *")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                            );
+                            if other_ops.is_empty() {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(250, 204, 21),
+                                    "Belum ada operasi tujuan lain yang tersedia. Buat operasi baru terlebih dahulu di halaman Operasi.",
+                                );
+                            } else {
+                                let selected_label = state
+                                    .skenario_table
+                                    .form_operasi_id
+                                    .and_then(|oid| {
+                                        other_ops.iter().find(|o| o.id == oid).map(|o| o.name.clone())
+                                    })
+                                    .unwrap_or_else(|| "Pilih Operasi Tujuan...".to_string());
+                                egui::ComboBox::from_id_salt("skenario_move_target_operasi")
+                                    .selected_text(selected_label)
+                                    .width(ui.available_width())
+                                    .show_ui(ui, |ui| {
+                                        for op in &other_ops {
+                                            ui.selectable_value(
+                                                &mut state.skenario_table.form_operasi_id,
+                                                Some(op.id),
+                                                &op.name,
+                                            );
+                                        }
+                                    });
+                            }
+
+                            if let Some(err) = &state.skenario_table.form_error {
+                                ui.add_space(8.0);
+                                ui.colored_label(egui::Color32::from_rgb(248, 113, 113), err);
+                            }
+
+                            ui.add_space(16.0);
+                            ui.horizontal(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let can_submit = !state.skenario_table.submitting
+                                            && state.skenario_table.form_operasi_id.is_some()
+                                            && !other_ops.is_empty();
+                                        let move_btn = egui::Button::new(
+                                            egui::RichText::new(if state.skenario_table.submitting {
+                                                "Memindahkan..."
+                                            } else {
+                                                "Pindah Skenario"
+                                            })
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(126, 34, 206))
+                                        .min_size(egui::vec2(130.0, 30.0));
+                                        if ui.add_enabled(can_submit, move_btn).clicked() {
+                                            submit_move = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !state.skenario_table.submitting,
+                                                egui::Button::new("Batal")
+                                                    .min_size(egui::vec2(76.0, 30.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            close = true;
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                });
+
+            if submit_move {
+                if let Some(target_op) = state.skenario_table.form_operasi_id {
+                    if let Some(auth) = current_auth(state) {
+                        state.skenario_table.submitting = true;
+                        state.skenario_table.form_error = None;
+                        api.send(ApiCommand::MoveSkenario {
+                            auth,
+                            id: sk.id,
+                            req: MoveSkenarioRequest {
+                                target_operasi_id: target_op,
+                            },
+                        });
+                    }
+                } else {
+                    state.skenario_table.form_error =
+                        Some("Pilih operasi tujuan terlebih dahulu.".into());
+                }
+            } else if close {
+                state.skenario_table.close_modal();
+            }
+        }
         SkenarioModalMode::DeleteConfirm(sk) => {
             draw_modal_backdrop(ctx, "skenario_delete_backdrop");
             let mut close = false;
             let mut confirm_delete = false;
+            let has_content = sk.has_simulation_content();
             egui::Area::new(egui::Id::new("skenario_delete_modal"))
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -2437,14 +2844,23 @@ fn draw_skenario_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClie
                                 .color(egui::Color32::WHITE),
                             );
                             ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Semua objek di dalamnya ({} unit, {} bangunan, {} garis, {} animasi) akan terhapus permanen.",
-                                    sk.marker_count, sk.building_count, sk.line_count, sk.anim_count
-                                ))
-                                .size(12.0)
-                                .color(egui::Color32::from_rgb(148, 163, 184)),
-                            );
+                            if has_content {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(250, 204, 21),
+                                    format!(
+                                        "Skenario ini tidak dapat dihapus karena masih memiliki isi simulasi: {}. Kosongkan seluruh isi di Plot Skenario terlebih dahulu.",
+                                        sk.content_summary()
+                                    ),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Skenario ini sudah kosong (tidak memiliki objek simulasi) dan akan dihapus permanen.",
+                                    )
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                );
+                            }
 
                             if let Some(err) = &state.skenario_table.form_error {
                                 ui.add_space(8.0);
@@ -2468,7 +2884,10 @@ fn draw_skenario_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClie
                                         .fill(egui::Color32::from_rgb(185, 28, 28))
                                         .min_size(egui::vec2(142.0, 30.0));
                                         if ui
-                                            .add_enabled(!state.skenario_table.submitting, del_btn)
+                                            .add_enabled(
+                                                !state.skenario_table.submitting && !has_content,
+                                                del_btn,
+                                            )
                                             .clicked()
                                         {
                                             confirm_delete = true;
@@ -2489,7 +2908,7 @@ fn draw_skenario_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClie
                         });
                 });
 
-            if confirm_delete {
+            if confirm_delete && !has_content {
                 if let Some(auth) = current_auth(state) {
                     state.skenario_table.submitting = true;
                     state.skenario_table.form_error = None;

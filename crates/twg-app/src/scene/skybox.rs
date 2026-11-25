@@ -12,7 +12,7 @@ use bevy::{
 
 use crate::{
     map::camera::TacticalCamera,
-    state::{AppScreen, AppState, SkyboxPreset},
+    state::{AppState, SkyboxPreset},
 };
 
 const CUBEMAP_FACE_SIZE: u32 = 256;
@@ -42,7 +42,7 @@ pub fn sync_skybox_system(
     mut sun_q: Query<(&mut DirectionalLight, &mut Transform), (With<PrimarySunLight>, Without<FillSkyLight>)>,
     mut fill_q: Query<(&mut DirectionalLight, &mut Transform), (With<FillSkyLight>, Without<PrimarySunLight>)>,
 ) {
-    let on_map = state.screen == AppScreen::PlotSkenario || state.is_skenario_map_preview_active();
+    let on_map = state.is_3d_map_screen() || state.is_skenario_map_preview_active();
     let effective = if on_map {
         state.active_skybox
     } else {

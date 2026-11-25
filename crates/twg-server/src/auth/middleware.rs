@@ -34,7 +34,7 @@ impl AuthUser {
     }
 
     pub fn require_super_admin_write(&self) -> Result<(), AppError> {
-        if self.role.is_admin() {
+        if self.role.is_global_admin() {
             Ok(())
         } else {
             Err(AppError::Forbidden("super admin permission required".into()))
@@ -50,7 +50,7 @@ impl AuthUser {
     }
 
     pub fn can_access_satker(&self, resource_satker_id: Option<Uuid>) -> bool {
-        if self.role.is_admin() || self.role.is_admin_monitor() {
+        if self.role.is_global_admin() || self.role == UserRole::LayarBesar {
             return true;
         }
         if self.role.is_satker_role() {
@@ -61,7 +61,7 @@ impl AuthUser {
     }
 
     pub fn can_mutate_satker(&self, resource_satker_id: Option<Uuid>) -> bool {
-        if self.role.is_admin() {
+        if self.role.is_global_admin() {
             return true;
         }
         if self.role.is_admin_satker() {

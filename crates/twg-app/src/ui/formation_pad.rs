@@ -1,7 +1,7 @@
 use bevy_egui::egui;
 use twg_shared::{
     models::Marker,
-    route_formation::{MultiRouteConfig, RouteFormationKind},
+    route_formation::{MultiRouteConfig, PatwalUnitRole, RouteFormationKind},
 };
 use uuid::Uuid;
 
@@ -28,6 +28,7 @@ pub fn draw_formation_pad(
 ) -> bool {
     let mut changed = false;
     let is_custom = cfg.formation == RouteFormationKind::Custom;
+    let is_patwal = cfg.formation == RouteFormationKind::Patwal;
     let offsets = cfg.compute_all_offsets();
 
     // Ensure selected_marker still belongs to this route
@@ -284,6 +285,14 @@ pub fn draw_formation_pad(
             };
             let fill = if is_sel {
                 egui::Color32::from_rgb(250, 204, 21)
+            } else if is_patwal {
+                match cfg.patwal_role_for(mid) {
+                    PatwalUnitRole::LeadMoto => egui::Color32::from_rgb(34, 211, 238),
+                    PatwalUnitRole::FrontPolice => egui::Color32::from_rgb(59, 130, 246),
+                    PatwalUnitRole::Vip => egui::Color32::from_rgb(251, 191, 36),
+                    PatwalUnitRole::SideMoto => egui::Color32::from_rgb(45, 212, 191),
+                    PatwalUnitRole::RearPolice => egui::Color32::from_rgb(129, 140, 248),
+                }
             } else if idx == 0 {
                 egui::Color32::from_rgb(6, 182, 212)
             } else {
@@ -342,13 +351,24 @@ pub fn draw_formation_pad(
             .find(|m| m.id == mid)
             .map(|m| m.name.as_str())
             .unwrap_or("Unit");
-        let tip = format!(
-            "#{} {} ({:+.1}m, {:+.1}m)",
-            idx + 1,
-            uname,
-            lat_m,
-            lon_m
-        );
+        let tip = if is_patwal {
+            format!(
+                "#{} {} [{}] ({:+.1}m, {:+.1}m)",
+                idx + 1,
+                uname,
+                cfg.patwal_role_for(mid).short_tag(),
+                lat_m,
+                lon_m
+            )
+        } else {
+            format!(
+                "#{} {} ({:+.1}m, {:+.1}m)",
+                idx + 1,
+                uname,
+                lat_m,
+                lon_m
+            )
+        };
         let font = egui::FontId::proportional(9.5);
         let galley = painter.layout_no_wrap(tip, font, egui::Color32::WHITE);
         let pad = egui::vec2(5.0, 2.5);
@@ -483,6 +503,26 @@ pub fn draw_formation_pad(
                     }
                 });
         }
+    } else if is_patwal {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (tag, col) in [
+                ("MTR-DPN", egui::Color32::from_rgb(34, 211, 238)),
+                ("PTW-DPN", egui::Color32::from_rgb(59, 130, 246)),
+                ("VIP", egui::Color32::from_rgb(251, 191, 36)),
+                ("MTR-SMP", egui::Color32::from_rgb(45, 212, 191)),
+                ("PTW-BLK", egui::Color32::from_rgb(129, 140, 248)),
+            ] {
+                ui.label(egui::RichText::new(format!("● {tag}")).size(9.0).color(col));
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Pratinjau Konvoi Patwal (arah gerak ke atas). Klik 'Ubah ke Bebas' di atas untuk drag pin manual.",
+            )
+            .size(9.5)
+            .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
     } else {
         ui.label(
             egui::RichText::new(

@@ -22,8 +22,10 @@ use crate::{
 };
 
 fn ensure_can_edit(auth: &AuthUser) -> AppResult<()> {
-    if auth.role.is_admin_monitor() {
-        return Err(AppError::Forbidden("admin_monitor is read-only".into()));
+    if auth.role.is_big_screen_only_role() {
+        return Err(AppError::Forbidden(
+            "Akun Layar Besar bersifat read-only dan tidak dapat mengedit skenario".into(),
+        ));
     }
     Ok(())
 }

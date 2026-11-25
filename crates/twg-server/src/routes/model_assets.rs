@@ -532,6 +532,8 @@ async fn fetch_all_categories(db: &PgPool) -> AppResult<Vec<ModelCategoryDto>> {
             c.supports_idle_walk,
             c.default_scale,
             c.sort_order,
+            c.play_behavior,
+            c.is_system,
             c.created_at,
             c.updated_at,
             COUNT(m.id)::BIGINT AS total_models,
@@ -539,7 +541,7 @@ async fn fetch_all_categories(db: &PgPool) -> AppResult<Vec<ModelCategoryDto>> {
             COUNT(m.id) FILTER (WHERE m.model_type = 'animated')::BIGINT AS animated_count
         FROM model_categories c
         LEFT JOIN model_assets m ON m.category = c.slug
-        GROUP BY c.slug, c.name, c.supports_idle_walk, c.default_scale, c.sort_order, c.created_at, c.updated_at
+        GROUP BY c.slug, c.name, c.supports_idle_walk, c.default_scale, c.sort_order, c.play_behavior, c.is_system, c.created_at, c.updated_at
         ORDER BY c.sort_order ASC, c.slug ASC
         "#,
     )
@@ -548,8 +550,13 @@ async fn fetch_all_categories(db: &PgPool) -> AppResult<Vec<ModelCategoryDto>> {
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
+        let slug: String = row.try_get("slug")?;
+        let behavior_str: String = row.try_get("play_behavior")?;
+        let is_system: bool = row.try_get("is_system")?;
         out.push(ModelCategoryDto {
-            slug: row.try_get("slug")?,
+            play_behavior: twg_shared::models::CategoryPlayBehavior::from_db(&behavior_str),
+            is_system: is_system || twg_shared::models::is_system_category_slug(&slug),
+            slug,
             name: row.try_get("name")?,
             supports_idle_walk: row.try_get("supports_idle_walk")?,
             default_scale: row.try_get("default_scale")?,
@@ -573,6 +580,8 @@ async fn fetch_category_by_slug(db: &PgPool, slug: &str) -> AppResult<ModelCateg
             c.supports_idle_walk,
             c.default_scale,
             c.sort_order,
+            c.play_behavior,
+            c.is_system,
             c.created_at,
             c.updated_at,
             COUNT(m.id)::BIGINT AS total_models,
@@ -581,7 +590,7 @@ async fn fetch_category_by_slug(db: &PgPool, slug: &str) -> AppResult<ModelCateg
         FROM model_categories c
         LEFT JOIN model_assets m ON m.category = c.slug
         WHERE c.slug = $1
-        GROUP BY c.slug, c.name, c.supports_idle_walk, c.default_scale, c.sort_order, c.created_at, c.updated_at
+        GROUP BY c.slug, c.name, c.supports_idle_walk, c.default_scale, c.sort_order, c.play_behavior, c.is_system, c.created_at, c.updated_at
         "#,
     )
     .bind(slug)
@@ -589,8 +598,13 @@ async fn fetch_category_by_slug(db: &PgPool, slug: &str) -> AppResult<ModelCateg
     .await?
     .ok_or_else(|| AppError::NotFound(format!("Kategori '{slug}' tidak ditemukan")))?;
 
+    let slug_val: String = row.try_get("slug")?;
+    let behavior_str: String = row.try_get("play_behavior")?;
+    let is_system: bool = row.try_get("is_system")?;
     Ok(ModelCategoryDto {
-        slug: row.try_get("slug")?,
+        play_behavior: twg_shared::models::CategoryPlayBehavior::from_db(&behavior_str),
+        is_system: is_system || twg_shared::models::is_system_category_slug(&slug_val),
+        slug: slug_val,
         name: row.try_get("name")?,
         supports_idle_walk: row.try_get("supports_idle_walk")?,
         default_scale: row.try_get("default_scale")?,
@@ -671,8 +685,8 @@ pub async fn create_model_category(
 
     sqlx::query(
         r#"
-        INSERT INTO model_categories (slug, name, supports_idle_walk, default_scale, sort_order)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO model_categories (slug, name, supports_idle_walk, default_scale, sort_order, play_behavior, is_system)
+        VALUES ($1, $2, $3, $4, $5, $6, FALSE)
         "#,
     )
     .bind(&slug)
@@ -680,6 +694,7 @@ pub async fn create_model_category(
     .bind(req.supports_idle_walk)
     .bind(scale)
     .bind(req.sort_order)
+    .bind(req.play_behavior.as_str())
     .execute(&state.db)
     .await?;
 
@@ -712,7 +727,7 @@ pub async fn update_model_category(
     let res = sqlx::query(
         r#"
         UPDATE model_categories
-        SET name = $2, supports_idle_walk = $3, default_scale = $4, sort_order = $5, updated_at = NOW()
+        SET name = $2, supports_idle_walk = $3, default_scale = $4, sort_order = $5, play_behavior = $6, updated_at = NOW()
         WHERE slug = $1
         "#,
     )
@@ -721,6 +736,7 @@ pub async fn update_model_category(
     .bind(req.supports_idle_walk)
     .bind(scale)
     .bind(req.sort_order)
+    .bind(req.play_behavior.as_str())
     .execute(&state.db)
     .await?;
 
@@ -739,8 +755,11 @@ pub async fn delete_model_category(
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
     auth.require_super_admin_write()?;
 
-    if !category_exists(&state.db, &slug).await? {
-        return Err(AppError::NotFound(format!("Kategori '{slug}' tidak ditemukan")));
+    let existing = fetch_category_by_slug(&state.db, &slug).await?;
+    if existing.is_system {
+        return Err(AppError::Forbidden(format!(
+            "Kategori bawaan '{slug}' tidak dapat dihapus. Hanya kategori baru buatan pengguna yang boleh dihapus."
+        )));
     }
 
     let model_count: i64 =
@@ -1491,13 +1510,11 @@ async fn relocate_file_to_category(
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
     }
-    if old_abs.exists() {
-        if let Err(_) = tokio::fs::rename(&old_abs, &new_abs).await {
-            tokio::fs::copy(&old_abs, &new_abs)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
-            let _ = tokio::fs::remove_file(&old_abs).await;
-        }
+    if old_abs.exists() && tokio::fs::rename(&old_abs, &new_abs).await.is_err() {
+        tokio::fs::copy(&old_abs, &new_abs)
+            .await
+            .map_err(|e| AppError::Internal(e.into()))?;
+        let _ = tokio::fs::remove_file(&old_abs).await;
     }
     Ok(new_rel)
 }
@@ -1826,7 +1843,7 @@ async fn ensure_glb_file_normalized(
 }
 
 async fn move_file(src: &Path, dst: &Path) -> AppResult<()> {
-    if let Err(_) = tokio::fs::rename(src, dst).await {
+    if tokio::fs::rename(src, dst).await.is_err() {
         tokio::fs::copy(src, dst)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;

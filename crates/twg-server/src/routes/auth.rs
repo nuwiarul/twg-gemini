@@ -162,7 +162,7 @@ pub async fn update_profile(
     Json(req): Json<ProfileUpdateRequest>,
 ) -> AppResult<Json<ApiResponse<UserDto>>> {
     if req.name.trim().is_empty() {
-        return Err(AppError::BadRequest("name cannot be empty".into()));
+        return Err(AppError::BadRequest("Nama lengkap tidak boleh kosong".into()));
     }
 
     sqlx::query(
@@ -185,7 +185,7 @@ pub async fn change_password(
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
     if req.new_password.len() < 6 {
         return Err(AppError::BadRequest(
-            "new password must be at least 6 characters".into(),
+            "Password baru minimal 6 karakter".into(),
         ));
     }
 
@@ -193,11 +193,11 @@ pub async fn change_password(
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("user not found".into()))?;
+        .ok_or_else(|| AppError::NotFound("User tidak ditemukan".into()))?;
     let current_hash: String = row.try_get("password")?;
 
     if !verify_password(&req.old_password, &current_hash) {
-        return Err(AppError::Unauthorized("old password does not match".into()));
+        return Err(AppError::Unauthorized("Password lama tidak sesuai".into()));
     }
 
     let new_hash = hash_password(&req.new_password)?;

@@ -13,6 +13,8 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\..\dist
 OutputBaseFilename=TWG-3D-Setup-x64-v{#MyAppVersion}
+SetupIconFile=..\icons\twg-app.ico
+UninstallDisplayIcon={app}\twg-app.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -27,13 +29,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\..\dist\twg-app-windows-x64\twg-app.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\twg-app-windows-x64\twg-app.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\twg-app-windows-x64\TWG-3D.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\twg-app-windows-x64\README.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Tactical Wall Game 3D"; Filename: "{app}\TWG-3D.bat"; WorkingDir: "{localappdata}\TWG-3D"
+Name: "{group}\Tactical Wall Game 3D"; Filename: "{app}\TWG-3D.bat"; WorkingDir: "{localappdata}\TWG-3D"; IconFilename: "{app}\twg-app.ico"
 Name: "{group}\{cm:UninstallProgram,Tactical Wall Game 3D}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Tactical Wall Game 3D"; Filename: "{app}\TWG-3D.bat"; WorkingDir: "{localappdata}\TWG-3D"; Tasks: desktopicon
+Name: "{autodesktop}\Tactical Wall Game 3D"; Filename: "{app}\TWG-3D.bat"; WorkingDir: "{localappdata}\TWG-3D"; IconFilename: "{app}\twg-app.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\TWG-3D.bat"; Description: "Launch Tactical Wall Game 3D"; Flags: nowait postinstall skipifsilent shellexec

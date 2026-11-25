@@ -11,9 +11,27 @@ pub enum UserRole {
     UserSatker,
     #[default]
     User,
+    LayarBesar,
+    LayarBesarSatker,
 }
 
 impl UserRole {
+    pub const ALL: &'static [Self] = &[
+        Self::Admin,
+        Self::AdminMonitor,
+        Self::AdminSatker,
+        Self::User,
+        Self::UserSatker,
+        Self::LayarBesar,
+        Self::LayarBesarSatker,
+    ];
+
+    pub const SATKER_ROLES: &'static [Self] = &[
+        Self::AdminSatker,
+        Self::UserSatker,
+        Self::LayarBesarSatker,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Admin => "admin",
@@ -21,6 +39,20 @@ impl UserRole {
             Self::AdminSatker => "admin_satker",
             Self::UserSatker => "user_satker",
             Self::User => "user",
+            Self::LayarBesar => "layar_besar",
+            Self::LayarBesarSatker => "layar_besar_satker",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Admin => "Admin",
+            Self::AdminMonitor => "Admin Monitor",
+            Self::AdminSatker => "Admin Satker",
+            Self::User => "User",
+            Self::UserSatker => "User Satker",
+            Self::LayarBesar => "Layar Besar",
+            Self::LayarBesarSatker => "Layar Besar Satker",
         }
     }
 
@@ -30,6 +62,8 @@ impl UserRole {
             "admin_monitor" => Self::AdminMonitor,
             "admin_satker" => Self::AdminSatker,
             "user_satker" => Self::UserSatker,
+            "layar_besar" | "layer_besar" => Self::LayarBesar,
+            "layar_besar_satker" | "layer_besar_satker" => Self::LayarBesarSatker,
             _ => Self::User,
         }
     }
@@ -50,16 +84,65 @@ impl UserRole {
         matches!(self, Self::UserSatker)
     }
 
+    /// Dedicated read-only Layar Besar display accounts (`layar_besar` & `layar_besar_satker`).
+    pub fn is_big_screen_only_role(&self) -> bool {
+        matches!(self, Self::LayarBesar | Self::LayarBesarSatker)
+    }
+
+    /// Global administrators (`admin` and `admin_monitor`): full CRUD on satkers, users,
+    /// assets/categories, operasis, skenarios, and plot editor.
+    pub fn is_global_admin(&self) -> bool {
+        matches!(self, Self::Admin | Self::AdminMonitor)
+    }
+
     pub fn is_admin_like(&self) -> bool {
         matches!(self, Self::Admin | Self::AdminMonitor | Self::AdminSatker)
     }
 
     pub fn is_satker_role(&self) -> bool {
-        matches!(self, Self::AdminSatker | Self::UserSatker)
+        matches!(
+            self,
+            Self::AdminSatker | Self::UserSatker | Self::LayarBesarSatker
+        )
     }
 
+    /// Roles allowed to create/edit/delete Operasis, Skenarios, and Users (scoped by satker
+    /// for `admin_satker`).
     pub fn can_write_admin(&self) -> bool {
-        matches!(self, Self::Admin | Self::AdminSatker)
+        matches!(self, Self::Admin | Self::AdminMonitor | Self::AdminSatker)
+    }
+
+    pub fn can_manage_satkers(&self) -> bool {
+        self.is_global_admin()
+    }
+
+    pub fn can_manage_assets(&self) -> bool {
+        self.is_global_admin()
+    }
+
+    pub fn can_manage_users(&self) -> bool {
+        self.can_write_admin()
+    }
+
+    /// Whether this role can drive Layar Besar camera (pan/zoom/pitch/bearing) and load/reload
+    /// scenarios on Layar Besar from Tactical Play Skenario.
+    /// - `admin`: all scenarios
+    /// - `admin_satker`: only scenarios belonging to their own satker
+    /// - all other roles: never
+    pub fn can_control_big_screen(
+        &self,
+        skenario_satker_id: Option<Uuid>,
+        user_satker_id: Option<Uuid>,
+    ) -> bool {
+        match self {
+            Self::Admin => true,
+            Self::AdminSatker => user_satker_id.is_some() && skenario_satker_id == user_satker_id,
+            Self::AdminMonitor
+            | Self::User
+            | Self::UserSatker
+            | Self::LayarBesar
+            | Self::LayarBesarSatker => false,
+        }
     }
 }
 
@@ -286,6 +369,13 @@ pub struct Operasi {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Paginated card item for the Tactical / Simulasi screen: one Operasi + all its Skenarios.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TacticalOperasiCard {
+    pub operasi: Operasi,
+    pub skenarios: Vec<Skenario>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skenario {
     pub id: Uuid,
@@ -313,9 +403,66 @@ pub struct Skenario {
     #[serde(default)]
     pub line_count: i64,
     #[serde(default)]
+    pub text_count: i64,
+    #[serde(default)]
+    pub particle_count: i64,
+    #[serde(default)]
+    pub alur_count: i64,
+    #[serde(default)]
     pub anim_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Skenario {
+    pub fn total_content_count(&self) -> i64 {
+        self.marker_count
+            + self.building_count
+            + self.line_count
+            + self.text_count
+            + self.particle_count
+            + self.alur_count
+            + self.anim_count
+    }
+
+    pub fn has_simulation_content(&self) -> bool {
+        self.total_content_count() > 0
+    }
+
+    pub fn content_breakdown(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.marker_count > 0 {
+            parts.push(format!("{} marker/objek 3D", self.marker_count));
+        }
+        if self.building_count > 0 {
+            parts.push(format!("{} polygon/bangunan", self.building_count));
+        }
+        if self.line_count > 0 {
+            parts.push(format!("{} garis", self.line_count));
+        }
+        if self.text_count > 0 {
+            parts.push(format!("{} teks 3D", self.text_count));
+        }
+        if self.particle_count > 0 {
+            parts.push(format!("{} partikel", self.particle_count));
+        }
+        if self.alur_count > 0 {
+            parts.push(format!("{} alur", self.alur_count));
+        }
+        if self.anim_count > 0 {
+            parts.push(format!("{} animasi", self.anim_count));
+        }
+        parts
+    }
+
+    pub fn content_summary(&self) -> String {
+        let parts = self.content_breakdown();
+        if parts.is_empty() {
+            "Kosong".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,6 +747,68 @@ impl ModelAssetDto {
     }
 }
 
+/// Interaction & movement behavior of a 3D model category during `Play Skenario`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CategoryPlayBehavior {
+    /// Buildings / static props: non-selectable in Play Skenario and act as pathfinding obstacles.
+    StaticObstacle,
+    /// Tactical equipment / tools: selectable in Play Skenario and moved via 3D Move Gizmo (X/Y/Z + Free XZ).
+    GizmoMove,
+    /// Personnel, animals, vehicles: single-select or drag-box multi-select, moved via right-click
+    /// in formation with obstacle avoidance.
+    #[default]
+    RtsUnit,
+}
+
+impl CategoryPlayBehavior {
+    pub const ALL: &'static [Self] = &[Self::RtsUnit, Self::GizmoMove, Self::StaticObstacle];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StaticObstacle => "static_obstacle",
+            Self::GizmoMove => "gizmo_move",
+            Self::RtsUnit => "rts_unit",
+        }
+    }
+
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "static_obstacle" => Self::StaticObstacle,
+            "gizmo_move" => Self::GizmoMove,
+            _ => Self::RtsUnit,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StaticObstacle => "Bangunan / Statis (Tidak bisa dipilih, Obstacle)",
+            Self::GizmoMove => "Peralatan / Gizmo (Geser pakai Gizmo Move 3D)",
+            Self::RtsUnit => "Unit / Orang / Kendaraan (Klik Kanan + Formasi)",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::StaticObstacle => "Statis / Obstacle",
+            Self::GizmoMove => "Gizmo Move 3D",
+            Self::RtsUnit => "Gerak RTS",
+        }
+    }
+
+    pub fn default_for_slug(slug: &str) -> Self {
+        match slug.trim().to_lowercase().as_str() {
+            "bangunans" | "bangunan" => Self::StaticObstacle,
+            "tools" | "alat" | "peralatan" => Self::GizmoMove,
+            _ => Self::RtsUnit,
+        }
+    }
+}
+
+pub fn is_system_category_slug(slug: &str) -> bool {
+    MODEL_CATEGORIES.contains(&slug)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCategoryDto {
     pub slug: String,
@@ -607,6 +816,10 @@ pub struct ModelCategoryDto {
     pub supports_idle_walk: bool,
     pub default_scale: f64,
     pub sort_order: i32,
+    #[serde(default)]
+    pub play_behavior: CategoryPlayBehavior,
+    #[serde(default)]
+    pub is_system: bool,
     #[serde(default)]
     pub total_models: usize,
     #[serde(default)]
@@ -632,6 +845,10 @@ pub struct ModelCategoryCount {
     pub default_scale: f64,
     #[serde(default)]
     pub sort_order: i32,
+    #[serde(default)]
+    pub play_behavior: CategoryPlayBehavior,
+    #[serde(default)]
+    pub is_system: bool,
     pub total: usize,
     pub static_count: usize,
     pub animated_count: usize,
@@ -653,6 +870,8 @@ impl ModelCategoryCount {
             supports_idle_walk: dto.supports_idle_walk,
             default_scale: dto.default_scale,
             sort_order: dto.sort_order,
+            play_behavior: dto.play_behavior,
+            is_system: dto.is_system || is_system_category_slug(&dto.slug),
             total: dto.total_models,
             static_count: dto.static_count,
             animated_count: dto.animated_count,
@@ -670,6 +889,8 @@ pub fn default_model_category_counts() -> Vec<ModelCategoryCount> {
             supports_idle_walk: category_supports_idle_walk(slug),
             default_scale: 0.1,
             sort_order: ((idx + 1) * 10) as i32,
+            play_behavior: CategoryPlayBehavior::default_for_slug(slug),
+            is_system: true,
             total: 0,
             static_count: 0,
             animated_count: 0,

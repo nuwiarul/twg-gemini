@@ -2,7 +2,9 @@
 Name=Tactical Wall Game 3D
 Comment=Tactical 3D Map & glTF 3D Model Manager
 Exec=twg-app
+Icon=twg-app
 Terminal=false
 Type=Application
 Categories=Graphics;Utility;
 StartupNotify=true
+StartupWMClass=twg-app

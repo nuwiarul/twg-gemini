@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     map::camera::TacticalCamera,
     scene::parse_hex_color,
-    state::{AnimRunStatus, AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode},
+    state::{AnimRunStatus, AppState, PlaybackState, SelectedEntity, ToolMode},
 };
 
 const TEX_SIZE: u32 = 128;
@@ -552,7 +552,7 @@ pub fn particle_fx_visual_system(
     mut tf_q: Query<(&mut Transform, &mut Visibility), With<ParticleFxEntity>>,
     mut gizmos: Gizmos,
 ) {
-    if state.screen != AppScreen::PlotSkenario {
+    if !state.is_3d_map_screen() {
         for (_, rig) in pool.rigs.drain() {
             rig.despawn(&mut commands, &mut materials);
         }
@@ -600,7 +600,7 @@ pub fn particle_fx_visual_system(
         let pos = particle_anim_position(anim);
         let dur_sec = anim.duration_sec.max(0.5);
 
-        if playback.play_test_mode {
+        if playback.is_playback_active() {
             let status = playback.track_status(anim.id);
             if matches!(status, AnimRunStatus::Playing | AnimRunStatus::Paused) {
                 let elapsed = playback
