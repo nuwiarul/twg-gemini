@@ -1110,6 +1110,7 @@ fn process_net_events_system(
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
                 let is_traffic_queue = twg_shared::traffic_queue::is_traffic_queue_anim(&a);
+                let is_traffic_gridlock = twg_shared::traffic_queue::is_traffic_gridlock_anim(&a);
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
@@ -1146,9 +1147,15 @@ fn process_net_events_system(
                         "Simulasi Traffic '{anim_name}' dibuat — tambah jalur balik / atur pool kendaraan di Inspector lalu klik Preview!"
                     ));
                 } else if is_traffic_queue {
-                    state.status_banner = Some(format!(
-                        "Antrean & Urai Simpang '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
-                    ));
+                    state.status_banner = Some(if is_traffic_gridlock {
+                        format!(
+                            "Macet Total & Urai '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
+                        )
+                    } else {
+                        format!(
+                            "Antrean & Urai Simpang '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
+                        )
+                    });
                 } else if is_shoot {
                     let kind_label = twg_shared::shoot_anim::shoot_anim_kind(
                         state.anims.iter().find(|x| x.id == anim_id).unwrap(),

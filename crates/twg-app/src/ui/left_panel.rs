@@ -23,7 +23,9 @@ use twg_shared::{
         spawn_hide_action,
     },
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
-    traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
+    traffic_queue::{
+        is_traffic_gridlock_anim, is_traffic_queue_anim, parse_traffic_queue_config,
+    },
 };
 use uuid::Uuid;
 
@@ -4283,12 +4285,48 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                         + 1;
                     state.tool_mode = ToolMode::DrawTrafficQueueLane;
                     state.drawing_traffic_queue_target = None;
+                    state.drawing_traffic_queue_is_gridlock = false;
                     state.draft_points_lnglat.clear();
                     state.route_target_marker_id = None;
                     state.picking_marker_for_anim_id = None;
                     state.new_traffic_queue_name = format!("Urai Simpang {q_idx}");
                     state.status_banner = Some(
                         "Antrean & Urai Simpang: Klik titik Jalur Antre A di peta (min 2 titik), tekan Enter / Finish. Lalu gambar Jalur Lancar wajibnya di Inspector."
+                            .into(),
+                    );
+                }
+
+                ui.add_space(4.0);
+                let gridlock_btn = egui::Button::new(
+                    egui::RichText::new("+ Macet Total & Urai")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(190, 18, 60))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, gridlock_btn)
+                    .on_hover_text(
+                        "Simulasi macet total (semua jalur tertahan diam / mengalir lalu berhenti) hingga tombol 'Lancar' diklik untuk mengurai kendaraan sampai habis",
+                    )
+                    .clicked()
+                {
+                    let g_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_traffic_gridlock_anim(a))
+                        .count()
+                        + 1;
+                    state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                    state.drawing_traffic_queue_target = None;
+                    state.drawing_traffic_queue_is_gridlock = true;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_gridlock_name = format!("Macet Total {g_idx}");
+                    state.status_banner = Some(
+                        "Macet Total & Urai: Klik titik Jalur Antre A di peta (min 2 titik), tekan Enter / Finish. Lalu gambar Jalur Lancar wajibnya di Inspector."
                             .into(),
                     );
                 }
@@ -4421,6 +4459,9 @@ fn draw_ordered_animation_list(
                 let (cat_tag, cat_col) = match cat {
                     AnimCategory::Route if is_traffic_anim(a) => {
                         ("TRAFFIC", egui::Color32::from_rgb(217, 119, 6))
+                    }
+                    AnimCategory::Route if is_traffic_gridlock_anim(a) => {
+                        ("MACET TOTAL", egui::Color32::from_rgb(190, 18, 60))
                     }
                     AnimCategory::Route if is_traffic_queue_anim(a) => {
                         ("URAI SIMPANG", egui::Color32::from_rgb(13, 148, 136))
@@ -4683,11 +4724,23 @@ fn draw_ordered_animation_list(
                             let cfg = parse_traffic_queue_config(a);
                             let complete = cfg.corridors.iter().filter(|c| c.enabled && c.is_complete()).count();
                             let total = cfg.corridors.iter().filter(|c| c.enabled).count();
-                            format!(
-                                "{complete}/{total} Jalur Lengkap  •  {} Model  •  {:.0}s giliran",
-                                cfg.vehicle_pool.len(),
-                                cfg.turn_duration_sec
-                            )
+                            if is_traffic_gridlock_anim(a) {
+                                format!(
+                                    "{complete}/{total} Jalur  •  {} Model  •  {}",
+                                    cfg.vehicle_pool.len(),
+                                    if cfg.prefill_initial_queue {
+                                        "Pre-fill Diam"
+                                    } else {
+                                        "Mengalir Macet"
+                                    }
+                                )
+                            } else {
+                                format!(
+                                    "{complete}/{total} Jalur Lengkap  •  {} Model  •  {:.0}s giliran",
+                                    cfg.vehicle_pool.len(),
+                                    cfg.turn_duration_sec
+                                )
+                            }
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a

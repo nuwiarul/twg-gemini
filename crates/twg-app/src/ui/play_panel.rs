@@ -16,7 +16,9 @@ use twg_shared::{
     },
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
-    traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
+    traffic_queue::{
+        is_traffic_gridlock_anim, is_traffic_queue_anim, parse_traffic_queue_config,
+    },
 };
 use uuid::Uuid;
 
@@ -629,6 +631,7 @@ pub fn draw_play_animation_panel(
                         let is_shoot = shoot_kind.is_some();
                         let is_particle = is_particle_anim(anim);
                         let is_traffic = is_traffic_anim(anim);
+                        let is_traffic_gridlock = is_traffic_gridlock_anim(anim);
                         let is_traffic_queue = is_traffic_queue_anim(anim);
                         let is_pointer = is_pointer_arrow_anim(anim);
                         let is_spawn_hide = is_spawn_hide_anim(anim);
@@ -883,6 +886,13 @@ pub fn draw_play_animation_panel(
                                             egui::Color32::from_rgb(110, 231, 183),
                                             egui::Color32::from_rgb(16, 185, 129),
                                         )
+                                    } else if is_traffic_gridlock {
+                                        (
+                                            "MACET TOTAL",
+                                            egui::Color32::from_rgb(136, 19, 55),
+                                            egui::Color32::from_rgb(253, 164, 175),
+                                            egui::Color32::from_rgb(225, 29, 72),
+                                        )
                                     } else {
                                         (
                                             "URAI SIMPANG",
@@ -1067,6 +1077,8 @@ pub fn draw_play_animation_panel(
                                         }
                                     } else if is_traffic {
                                         ("[TRAFFIC]", egui::Color32::from_rgb(251, 191, 36))
+                                    } else if is_traffic_gridlock {
+                                        ("[MACET TOTAL]", egui::Color32::from_rgb(251, 113, 133))
                                     } else if is_traffic_queue {
                                         ("[URAI SIMPANG]", egui::Color32::from_rgb(45, 212, 191))
                                     } else if is_multi {
@@ -1239,6 +1251,14 @@ pub fn draw_play_animation_panel(
                                                     live.clearing_vehicles
                                                 ),
                                                 egui::Color32::from_rgb(110, 231, 183),
+                                            )
+                                        } else if live.is_all_stopped {
+                                            (
+                                                format!(
+                                                    "MACET TOTAL  •  {} kendaraan tertahan diam — klik LANCAR untuk urai",
+                                                    live.total_vehicles
+                                                ),
+                                                egui::Color32::from_rgb(253, 164, 175),
                                             )
                                         } else if live.is_switch_pause {
                                             (
@@ -2137,7 +2157,7 @@ fn anim_matches_play_search(
         }
     } else if is_traffic_queue_anim(anim) {
         let cfg = parse_traffic_queue_config(anim);
-        haystack.push_str(" urai simpang antrean lancar buka tutup konvoi traffic ");
+        haystack.push_str(" urai simpang antrean lancar buka tutup konvoi macet total stuck blokade traffic ");
         for c in &cfg.corridors {
             haystack.push(' ');
             haystack.push_str(&c.name);

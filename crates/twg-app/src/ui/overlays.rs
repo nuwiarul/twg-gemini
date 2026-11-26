@@ -252,8 +252,9 @@ pub fn draw_projected_labels(
             ToolMode::DrawTrafficQueueLane => format!(
                 "Gambar {} ({} titik) — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
                 match state.drawing_traffic_queue_target {
-                    Some((_, Some(_))) => "Jalur Lancar (Urai Simpang)",
-                    Some((_, None)) => "Jalur Antre Baru (Urai Simpang)",
+                    Some((_, Some(_))) => "Jalur Lancar (Wajib)",
+                    Some((_, None)) => "Jalur Antre Baru",
+                    None if state.drawing_traffic_queue_is_gridlock => "Jalur Antre A (Macet Total)",
                     None => "Jalur Antre A (Urai Simpang)",
                 },
                 state.draft_points_lnglat.len()

@@ -1601,7 +1601,11 @@ pub struct AppState {
     /// - `Some((anim_id, None))`: add a new `Jalur Antre` to existing `anim_id`
     /// - `Some((anim_id, Some(corridor_idx)))`: draw/replace the mandatory `Jalur Lancar` of `corridors[corridor_idx]`
     pub drawing_traffic_queue_target: Option<(Uuid, Option<usize>)>,
+    /// When `true` and `drawing_traffic_queue_target` is `None`, finishing the draft creates a
+    /// `Macet Total & Urai` (`traffic_gridlock`) animation (all corridors stuck until Lancar, Pre-fill default ON).
+    pub drawing_traffic_queue_is_gridlock: bool,
     pub new_traffic_queue_name: String,
+    pub new_traffic_gridlock_name: String,
     /// Live runtime status snapshots for active `traffic_queue` animations (for Play Panel & Preview UI).
     pub traffic_queue_live_status: HashMap<Uuid, twg_shared::traffic_queue::TrafficQueueLiveStatus>,
     pub traffic_pool_search: String,
@@ -1843,7 +1847,9 @@ impl AppState {
             traffic_preview_gap_m: 4.0,
             traffic_model_unit_dims: HashMap::new(),
             drawing_traffic_queue_target: None,
+            drawing_traffic_queue_is_gridlock: false,
             new_traffic_queue_name: "Urai Simpang 1".to_string(),
+            new_traffic_gridlock_name: "Macet Total 1".to_string(),
             traffic_queue_live_status: HashMap::new(),
             new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind::WaterCannon,
             new_shoot_name: "Water Cannon 1".to_string(),
@@ -2089,6 +2095,8 @@ impl AppState {
                         "Shoot Animation"
                     } else if twg_shared::traffic_anim::is_traffic_anim(a) {
                         "Simulasi Traffic"
+                    } else if twg_shared::traffic_queue::is_traffic_gridlock_anim(a) {
+                        "Macet Total & Urai"
                     } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
                         "Antrean & Urai Simpang"
                     } else if twg_shared::particle_anim::is_particle_anim(a) {

@@ -19,6 +19,7 @@ use crate::{
 };
 
 pub const TRAFFIC_QUEUE_ANIM_TYPE: &str = "traffic_queue";
+pub const TRAFFIC_GRIDLOCK_ANIM_TYPE: &str = "traffic_gridlock";
 
 /// Strategy used when the operator clicks the live **"Lancar"** button to drain remaining vehicles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -138,6 +139,10 @@ pub struct TrafficQueueConfig {
     /// Strategy used when live **"Lancar"** clearance mode is triggered.
     #[serde(default)]
     pub clearance_mode: QueueClearanceMode,
+    /// When `true` (`Macet Total & Urai` / `traffic_gridlock`), ALL corridors remain RED/stuck
+    /// during the initial phase until the operator clicks **"Lancar"**.
+    #[serde(default)]
+    pub gridlock_mode: bool,
     /// Deterministic PRNG seed so Operator & Layar Besar always match identically.
     #[serde(default = "default_seed")]
     pub seed: u64,
@@ -182,6 +187,7 @@ impl Default for TrafficQueueConfig {
             spawn_interval_sec: default_spawn_interval_sec(),
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::default(),
+            gridlock_mode: false,
             seed: default_seed(),
         }
     }
@@ -203,6 +209,7 @@ impl TrafficQueueConfig {
             spawn_interval_sec: self.spawn_interval_sec.clamp(0.3, 20.0),
             prefill_initial_queue: self.prefill_initial_queue,
             clearance_mode: self.clearance_mode,
+            gridlock_mode: self.gridlock_mode,
             seed: if self.seed == 0 { default_seed() } else { self.seed },
         }
     }
@@ -242,6 +249,7 @@ impl TrafficQueueConfig {
         self.spawn_interval_sec.to_bits().hash(&mut h);
         self.prefill_initial_queue.hash(&mut h);
         (self.clearance_mode as u8).hash(&mut h);
+        self.gridlock_mode.hash(&mut h);
         self.seed.hash(&mut h);
         self.corridors.len().hash(&mut h);
         for c in &self.corridors {
@@ -274,8 +282,16 @@ impl TrafficQueueConfig {
     }
 }
 
+pub fn is_traffic_gridlock_anim(anim: &Anim) -> bool {
+    anim.anim_type.eq_ignore_ascii_case(TRAFFIC_GRIDLOCK_ANIM_TYPE)
+}
+
+/// Returns `true` for both `Antrean & Urai Simpang` (`traffic_queue`) and
+/// `Macet Total & Urai` (`traffic_gridlock`), which share paired queue+clearance corridors and
+/// the deterministic queue/clearance engine.
 pub fn is_traffic_queue_anim(anim: &Anim) -> bool {
     anim.anim_type.eq_ignore_ascii_case(TRAFFIC_QUEUE_ANIM_TYPE)
+        || is_traffic_gridlock_anim(anim)
 }
 
 pub fn parse_traffic_queue_config(anim: &Anim) -> TrafficQueueConfig {
@@ -284,6 +300,9 @@ pub fn parse_traffic_queue_config(anim: &Anim) -> TrafficQueueConfig {
         .get("traffic_queue")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    if is_traffic_gridlock_anim(anim) {
+        cfg.gridlock_mode = true;
+    }
     if cfg.corridors.is_empty() && anim.geom.len() >= 2 {
         cfg.corridors
             .push(TrafficQueueCorridor::new("Jalur A", anim.geom.clone()));
@@ -292,8 +311,15 @@ pub fn parse_traffic_queue_config(anim: &Anim) -> TrafficQueueConfig {
 }
 
 pub fn write_traffic_queue_config(anim: &mut Anim, cfg: &TrafficQueueConfig) {
-    let clean = cfg.sanitized();
-    anim.anim_type = TRAFFIC_QUEUE_ANIM_TYPE.to_string();
+    let mut clean = cfg.sanitized();
+    if is_traffic_gridlock_anim(anim) {
+        clean.gridlock_mode = true;
+    }
+    anim.anim_type = if clean.gridlock_mode {
+        TRAFFIC_GRIDLOCK_ANIM_TYPE.to_string()
+    } else {
+        TRAFFIC_QUEUE_ANIM_TYPE.to_string()
+    };
     anim.marker_id = None;
     if let Some(first) = clean
         .corridors
@@ -318,6 +344,7 @@ pub struct TrafficQueueLiveStatus {
     pub active_corridor_name: Option<String>,
     pub remaining_turn_sec: f64,
     pub is_switch_pause: bool,
+    pub is_all_stopped: bool,
     pub clearance_active: bool,
     pub is_completed: bool,
     pub total_vehicles: usize,
@@ -480,6 +507,8 @@ struct QueueVehicle {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum QueuePhase {
+    /// Gridlock (`Macet Total & Urai`): ALL corridors are held RED until **"Lancar"** is clicked.
+    AllStopped,
     NormalGreen {
         corridor_idx: usize,
         timer: f64,
@@ -574,6 +603,8 @@ impl TrafficQueueSimEngine {
         let rng = SplitMix64::new(clean.seed);
         let initial_phase = if corridors.is_empty() {
             QueuePhase::Completed
+        } else if clean.gridlock_mode {
+            QueuePhase::AllStopped
         } else {
             QueuePhase::NormalGreen {
                 corridor_idx: 0,
@@ -613,6 +644,8 @@ impl TrafficQueueSimEngine {
         }
         self.phase = if self.corridors.is_empty() {
             QueuePhase::Completed
+        } else if self.cfg.gridlock_mode {
+            QueuePhase::AllStopped
         } else {
             QueuePhase::NormalGreen {
                 corridor_idx: 0,
@@ -646,22 +679,28 @@ impl TrafficQueueSimEngine {
                 }
                 let id = self.next_vehicle_id;
                 self.next_vehicle_id += 1;
+                let init_speed = if self.cfg.gridlock_mode {
+                    0.0
+                } else if c_idx == 0 {
+                    self.cfg.convoy_speed_mps * 0.65
+                } else if k == 0 {
+                    0.0
+                } else {
+                    self.cfg.convoy_speed_mps * 0.2
+                };
                 self.vehicles.push(QueueVehicle {
                     id,
                     corridor_idx: c_idx,
                     pool_idx,
                     s,
-                    speed: if c_idx == 0 {
-                        self.cfg.convoy_speed_mps * 0.65
-                    } else if k == 0 {
-                        0.0
-                    } else {
-                        self.cfg.convoy_speed_mps * 0.2
-                    },
+                    speed: init_speed,
                     length_m,
                     committed_to_clear: false,
                 });
-                cursor_front_bumper = s - 0.5 * length_m - self.cfg.min_safe_gap_m - 0.35;
+                cursor_front_bumper = s
+                    - 0.5 * length_m
+                    - self.cfg.min_safe_gap_m
+                    - if self.cfg.gridlock_mode { 0.0 } else { 0.35 };
             }
         }
     }
@@ -710,7 +749,9 @@ impl TrafficQueueSimEngine {
                 queued += 1;
             }
         }
+        let is_all_stopped = self.phase == QueuePhase::AllStopped;
         let (active_corridor_name, remaining_turn_sec, is_switch_pause) = match self.phase {
+            QueuePhase::AllStopped => (None, 0.0, false),
             QueuePhase::NormalGreen {
                 corridor_idx,
                 timer,
@@ -755,6 +796,7 @@ impl TrafficQueueSimEngine {
             active_corridor_name,
             remaining_turn_sec,
             is_switch_pause,
+            is_all_stopped,
             clearance_active: self.clearance_active,
             is_completed: self.is_completely_cleared(),
             total_vehicles: self.vehicles.len(),
@@ -948,12 +990,12 @@ impl TrafficQueueSimEngine {
     fn activate_clearance_mode(&mut self) {
         self.clearance_active = true;
         let preferred_start = match self.phase {
+            QueuePhase::AllStopped | QueuePhase::Completed => 0,
             QueuePhase::NormalGreen { corridor_idx, .. }
             | QueuePhase::ClearanceDrain { corridor_idx, .. } => corridor_idx,
             QueuePhase::SwitchPause {
                 next_corridor_idx, ..
             } => next_corridor_idx,
-            QueuePhase::Completed => 0,
         };
         if let Some(c_idx) = self.find_next_queued_corridor(preferred_start) {
             self.phase = QueuePhase::ClearanceDrain {
@@ -980,8 +1022,9 @@ impl TrafficQueueSimEngine {
             self.activate_clearance_mode();
         }
 
-        // 2. Spawn vehicles ONLY during normal mode (Mode Lancar stops all generation!)
-        if !self.clearance_active {
+        // 2. Spawn vehicles ONLY during normal mode (Mode Lancar stops all generation,
+        // and gridlock + pre-fill starts completely packed & frozen without extra spawning)
+        if !self.clearance_active && !(self.cfg.gridlock_mode && self.cfg.prefill_initial_queue) {
             let n_corridors = self.corridors.len();
             for c_idx in 0..n_corridors {
                 self.corridors[c_idx].spawn_cooldown -= dt;
@@ -994,9 +1037,10 @@ impl TrafficQueueSimEngine {
             }
         }
 
-        // 3. Advance turn state machine (Smart Actuated timed turns vs Rapid sequential Lancar drain)
+        // 3. Advance turn state machine (AllStopped gridlock vs Smart Actuated vs Lancar drain)
         let n_corridors = self.corridors.len();
         match self.phase {
+            QueuePhase::AllStopped => {}
             QueuePhase::NormalGreen {
                 corridor_idx,
                 mut timer,
@@ -1172,6 +1216,10 @@ impl TrafficQueueSimEngine {
         }
 
         // 4. Update all vehicle motions front-to-back per corridor (pure constant-speed convoy, no overtaking)
+        // In Gridlock + Pre-fill mode before "Lancar" is clicked, keep every vehicle 100% frozen in place.
+        if self.phase == QueuePhase::AllStopped && self.cfg.prefill_initial_queue {
+            return;
+        }
         let cruise_speed = if self.clearance_active {
             self.cfg
                 .clear_speed_mps
@@ -1339,10 +1387,16 @@ mod tests {
         };
         let flow = make(crate::traffic_anim::ANIM_TYPE_TRAFFIC_FLOW);
         let queue = make(TRAFFIC_QUEUE_ANIM_TYPE);
+        let gridlock = make(TRAFFIC_GRIDLOCK_ANIM_TYPE);
         assert!(crate::traffic_anim::is_traffic_anim(&flow));
         assert!(!is_traffic_queue_anim(&flow));
+        assert!(!is_traffic_gridlock_anim(&flow));
         assert!(is_traffic_queue_anim(&queue));
+        assert!(!is_traffic_gridlock_anim(&queue));
         assert!(!crate::traffic_anim::is_traffic_anim(&queue));
+        assert!(is_traffic_queue_anim(&gridlock));
+        assert!(is_traffic_gridlock_anim(&gridlock));
+        assert!(!crate::traffic_anim::is_traffic_anim(&gridlock));
     }
 
     #[test]
@@ -1405,6 +1459,7 @@ mod tests {
             spawn_interval_sec: 1.0,
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::DrainCorridor,
+            gridlock_mode: false,
             seed: 42,
         };
         let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
@@ -1489,6 +1544,7 @@ mod tests {
             spawn_interval_sec: 1.0,
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::DrainCorridor,
+            gridlock_mode: false,
             seed: 99,
         };
         let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
@@ -1799,5 +1855,126 @@ mod tests {
             "AlternatingTimed Lancar must eventually drain ALL corridors to 0 (remaining={})",
             engine.vehicles.len()
         );
+    }
+
+    #[test]
+    fn gridlock_prefill_stays_completely_frozen_until_lancar_then_drains_all() {
+        let anchor = test_anchor();
+        let cor_a = corridor_local(
+            anchor,
+            "Jalur A",
+            [-125.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [65.0, 0.0, 0.0],
+        );
+        let cor_b = corridor_local(
+            anchor,
+            "Jalur B",
+            [0.0, 0.0, -125.0],
+            [0.0, 0.0, -5.0],
+            [0.0, 0.0, 65.0],
+        );
+        let cfg = TrafficQueueConfig {
+            corridors: vec![cor_a, cor_b],
+            vehicle_pool: sample_pool(),
+            convoy_speed_mps: 8.0,
+            clear_speed_mps: 18.0,
+            turn_duration_sec: 5.0,
+            switch_pause_sec: 0.5,
+            prefill_initial_queue: true,
+            clearance_mode: QueueClearanceMode::AlternatingTimed,
+            gridlock_mode: true,
+            seed: 404,
+            ..Default::default()
+        };
+        let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
+        let initial_positions: Vec<(u64, f64)> =
+            engine.vehicles.iter().map(|v| (v.id, v.s)).collect();
+        assert!(
+            initial_positions.len() >= 24,
+            "Gridlock pre-fill must fill both corridors end-to-start"
+        );
+
+        // Advance 20 seconds WITHOUT clicking Lancar: EVERY vehicle on EVERY corridor must stay 100% frozen!
+        engine.advance_to(20.0, None);
+        assert!(engine.live_status().is_all_stopped);
+        assert_eq!(engine.vehicles.len(), initial_positions.len());
+        for (v, &(id, s0)) in engine.vehicles.iter().zip(initial_positions.iter()) {
+            assert_eq!(v.id, id);
+            assert!(
+                (v.s - s0).abs() < 1e-4 && v.speed < 1e-4 && !v.committed_to_clear,
+                "Gridlock pre-fill vehicle must not move before Lancar (id={}, s0={}, s={}, spd={})",
+                v.id,
+                s0,
+                v.s,
+                v.speed
+            );
+        }
+
+        // Now click Lancar at t = 20.0s -> must drain ALL vehicles to 0!
+        engine.advance_to(75.0, Some(20.0));
+        assert!(
+            engine.is_completely_cleared(),
+            "Gridlock Lancar must drain all corridors to 0 (remaining={})",
+            engine.vehicles.len()
+        );
+    }
+
+    #[test]
+    fn gridlock_flow_then_stop_halts_all_corridors_at_stop_line_until_lancar() {
+        let anchor = test_anchor();
+        let cor_a = corridor_local(
+            anchor,
+            "Jalur A",
+            [-65.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [60.0, 0.0, 0.0],
+        );
+        let cor_b = corridor_local(
+            anchor,
+            "Jalur B",
+            [0.0, 0.0, -65.0],
+            [0.0, 0.0, -5.0],
+            [0.0, 0.0, 60.0],
+        );
+        let cfg = TrafficQueueConfig {
+            corridors: vec![cor_a, cor_b],
+            vehicle_pool: sample_pool(),
+            convoy_speed_mps: 10.0,
+            clear_speed_mps: 18.0,
+            prefill_initial_queue: false,
+            clearance_mode: QueueClearanceMode::DrainCorridor,
+            gridlock_mode: true,
+            seed: 505,
+            ..Default::default()
+        };
+        let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
+        assert!(engine.vehicles.is_empty());
+
+        // Advance 20s without Lancar: vehicles drive in from start and stop at stop line on BOTH corridors!
+        engine.advance_to(20.0, None);
+        assert!(engine.vehicles.len() >= 6);
+        assert!(
+            engine.vehicles.iter().all(|v| !v.committed_to_clear),
+            "No vehicle may cross stop line during Macet Total before Lancar is clicked"
+        );
+        assert!(
+            engine
+                .vehicles
+                .iter()
+                .any(|v| v.corridor_idx == 0 && v.speed < 0.1),
+            "Front vehicle on Jalur A must stop at stop line"
+        );
+        assert!(
+            engine
+                .vehicles
+                .iter()
+                .any(|v| v.corridor_idx == 1 && v.speed < 0.1),
+            "Front vehicle on Jalur B must stop at stop line"
+        );
+
+        // Trigger Lancar -> drains all to 0!
+        engine.advance_to(50.0, Some(20.0));
+        assert!(engine.is_completely_cleared());
     }
 }

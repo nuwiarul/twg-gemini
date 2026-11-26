@@ -37,8 +37,9 @@ use twg_shared::{
         is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config,
     },
     traffic_queue::{
-        TRAFFIC_QUEUE_ANIM_TYPE, TrafficQueueConfig, TrafficQueueCorridor,
-        is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
+        TRAFFIC_GRIDLOCK_ANIM_TYPE, TRAFFIC_QUEUE_ANIM_TYPE, TrafficQueueConfig,
+        TrafficQueueCorridor, is_traffic_gridlock_anim, is_traffic_queue_anim,
+        parse_traffic_queue_config, write_traffic_queue_config,
     },
 };
 use uuid::Uuid;
@@ -2262,9 +2263,10 @@ pub fn map_interaction_system(
             if state.tool_mode == ToolMode::DrawTrafficQueueLane {
                 state.draft_points_lnglat.clear();
                 state.drawing_traffic_queue_target = None;
+                state.drawing_traffic_queue_is_gridlock = false;
                 state.tool_mode = ToolMode::Select;
                 state.status_banner =
-                    Some("Penggambaran Jalur Antrean & Urai Simpang dibatalkan.".into());
+                    Some("Penggambaran Jalur Antrean / Macet Total dibatalkan.".into());
                 return;
             }
             if state.tool_mode == ToolMode::PickShootMarker {
@@ -4482,14 +4484,27 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 return;
             }
 
-            let queue_cnt = state
+            let is_gridlock = state.drawing_traffic_queue_is_gridlock;
+            let same_cnt = state
                 .anims
                 .iter()
-                .filter(|a| is_traffic_queue_anim(a))
+                .filter(|a| {
+                    if is_gridlock {
+                        is_traffic_gridlock_anim(a)
+                    } else {
+                        is_traffic_queue_anim(a) && !is_traffic_gridlock_anim(a)
+                    }
+                })
                 .count()
                 + 1;
-            let name = if state.new_traffic_queue_name.trim().is_empty() {
-                format!("Urai Simpang {queue_cnt}")
+            let name = if is_gridlock {
+                if state.new_traffic_gridlock_name.trim().is_empty() {
+                    format!("Macet Total {same_cnt}")
+                } else {
+                    state.new_traffic_gridlock_name.trim().to_string()
+                }
+            } else if state.new_traffic_queue_name.trim().is_empty() {
+                format!("Urai Simpang {same_cnt}")
             } else {
                 state.new_traffic_queue_name.trim().to_string()
             };
@@ -4531,11 +4546,18 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             let cfg = TrafficQueueConfig {
                 corridors: vec![TrafficQueueCorridor::new("Jalur A", geom.clone())],
                 vehicle_pool: auto_pool,
+                prefill_initial_queue: is_gridlock,
+                gridlock_mode: is_gridlock,
                 seed: 20_261_127_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
                 ..Default::default()
             };
             let data = serde_json::json!({ "traffic_queue": cfg });
             let sort_order = (state.anims.len() + 1) as i32;
+            let anim_type_str = if is_gridlock {
+                TRAFFIC_GRIDLOCK_ANIM_TYPE.to_string()
+            } else {
+                TRAFFIC_QUEUE_ANIM_TYPE.to_string()
+            };
 
             if state.offline_preview {
                 let now = chrono::Utc::now();
@@ -4545,7 +4567,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     skenario_id: sk.id,
                     marker_id: None,
                     name: name.clone(),
-                    anim_type: TRAFFIC_QUEUE_ANIM_TYPE.to_string(),
+                    anim_type: anim_type_str,
                     sort_order,
                     speed: 8.0,
                     duration_sec: 0.0,
@@ -4564,8 +4586,13 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 state.line_edit = None;
                 state.text_edit = None;
                 state.anims.push(a);
+                let title_lbl = if is_gridlock {
+                    "Macet Total & Urai"
+                } else {
+                    "Antrean & Urai Simpang"
+                };
                 state.status_banner = Some(format!(
-                    "Antrean & Urai Simpang '{name}' dibuat! Sekarang klik '+ Gambar Jalur Lancar' untuk Jalur A di Inspector."
+                    "{title_lbl} '{name}' dibuat! Sekarang klik '+ Gambar Jalur Lancar' untuk Jalur A di Inspector."
                 ));
             } else if let Some(auth) = current_auth(state) {
                 api.send(ApiCommand::CreateAnim {
@@ -4575,7 +4602,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         skenario_id: sk.id,
                         marker_id: None,
                         name,
-                        anim_type: TRAFFIC_QUEUE_ANIM_TYPE.to_string(),
+                        anim_type: anim_type_str,
                         sort_order,
                         speed: 8.0,
                         duration_sec: 0.0,
@@ -4587,7 +4614,12 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 });
             }
             state.tool_mode = ToolMode::Select;
-            state.new_traffic_queue_name = format!("Urai Simpang {}", queue_cnt + 1);
+            state.drawing_traffic_queue_is_gridlock = false;
+            if is_gridlock {
+                state.new_traffic_gridlock_name = format!("Macet Total {}", same_cnt + 1);
+            } else {
+                state.new_traffic_queue_name = format!("Urai Simpang {}", same_cnt + 1);
+            }
         }
         _ => {}
     }

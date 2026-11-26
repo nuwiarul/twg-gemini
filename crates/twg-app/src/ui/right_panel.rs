@@ -36,8 +36,8 @@ use twg_shared::{
         parse_traffic_anim_config, write_traffic_anim_config,
     },
     traffic_queue::{
-        QueueClearanceMode, TrafficQueueCorridor, is_traffic_queue_anim,
-        parse_traffic_queue_config, write_traffic_queue_config,
+        QueueClearanceMode, TrafficQueueCorridor, is_traffic_gridlock_anim,
+        is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
     },
     ws::TacticalCommand,
 };
@@ -133,7 +133,9 @@ pub fn draw_right_panel(
                         }
                         SelectedEntity::Anim(id) => {
                             let anim_ref = state.anims.iter().find(|a| a.id == id);
-                            if anim_ref.is_some_and(is_traffic_queue_anim) {
+                            if anim_ref.is_some_and(is_traffic_gridlock_anim) {
+                                ("MACET TOTAL", egui::Color32::from_rgb(190, 18, 60))
+                            } else if anim_ref.is_some_and(is_traffic_queue_anim) {
                                 ("URAI SIMPANG", egui::Color32::from_rgb(13, 148, 136))
                             } else if anim_ref.is_some_and(is_traffic_anim) {
                                 ("TRAFFIC ANIM", egui::Color32::from_rgb(217, 119, 6))
@@ -547,7 +549,14 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
             });
         }
         ToolMode::DrawTrafficQueueLane => {
+            let is_gridlock_new = state.drawing_traffic_queue_target.is_none()
+                && state.drawing_traffic_queue_is_gridlock;
             let (title, show_name_input, hint_extra) = match state.drawing_traffic_queue_target {
+                None if is_gridlock_new => (
+                    "Buat Macet Total & Urai (Jalur Antre A)",
+                    true,
+                    "Gambar jalur tempat mobil/motor tertahan macet total; default Pre-fill penuh & diam hingga tombol 'Lancar' diklik.",
+                ),
                 None => (
                     "Buat Antrean & Urai Simpang (Jalur Antre A)",
                     true,
@@ -567,10 +576,12 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
             inspector_card(ui, title, true, |ui| {
                 if show_name_input {
                     ui.label("Nama Animasi:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.new_traffic_queue_name)
-                            .desired_width(f32::INFINITY),
-                    );
+                    let name_buf = if is_gridlock_new {
+                        &mut state.new_traffic_gridlock_name
+                    } else {
+                        &mut state.new_traffic_queue_name
+                    };
+                    ui.add(egui::TextEdit::singleline(name_buf).desired_width(f32::INFINITY));
                     ui.add_space(4.0);
                 }
                 ui.label(
@@ -606,6 +617,7 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                     if ui.button("Batal (Esc)").clicked() {
                         state.draft_points_lnglat.clear();
                         state.drawing_traffic_queue_target = None;
+                        state.drawing_traffic_queue_is_gridlock = false;
                         state.tool_mode = ToolMode::Select;
                     }
                 });
@@ -3042,6 +3054,11 @@ fn draw_editor_preview_card(
                             format!(
                                 "MODE LANCAR  •  Sisa {} kendaraan ({} antre, {} keluar)  •  t = {elapsed:.1}s",
                                 live.total_vehicles, live.queued_vehicles, live.clearing_vehicles
+                            )
+                        } else if live.is_all_stopped {
+                            format!(
+                                "MACET TOTAL  •  {} kendaraan tertahan diam — klik LANCAR untuk urai  •  t = {elapsed:.1}s",
+                                live.total_vehicles
                             )
                         } else if live.is_switch_pause {
                             format!(
@@ -8093,6 +8110,8 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         sk.short_tag()
     } else if is_traffic_anim(a) {
         "TRAFFIC"
+    } else if is_traffic_gridlock_anim(a) {
+        "MACET TOTAL"
     } else if is_traffic_queue_anim(a) {
         "URAI SIMPANG"
     } else if is_multi_route_anim(a) {
@@ -9452,9 +9471,15 @@ fn draw_traffic_queue_inspector_cards(
 ) {
     let mut cfg = parse_traffic_queue_config(a);
     let mut cfg_changed = false;
+    let is_gridlock = is_traffic_gridlock_anim(a);
 
     // 1. General Info & Validation Summary
-    inspector_card(ui, "Antrean & Urai Simpang", true, |ui| {
+    let card1_title = if is_gridlock {
+        "Macet Total & Urai"
+    } else {
+        "Antrean & Urai Simpang"
+    };
+    inspector_card(ui, card1_title, true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
             ui.label("Nama Animasi:");
             ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
@@ -9480,12 +9505,15 @@ fn draw_traffic_queue_inspector_cards(
                     );
                 });
         } else if cfg.has_playable_setup() {
+            let ready_msg = if is_gridlock {
+                "Siap dijalankan! Semua jalur tertahan macet total (diam) sampai tombol 'Lancar' diklik untuk mengurai seluruh kendaraan hingga habis."
+            } else {
+                "Siap dijalankan! Kendaraan bergerak konvoi bergantian per durasi; klik 'Lancar' saat Play/Preview untuk mengurai seluruh kendaraan sampai habis."
+            };
             ui.label(
-                egui::RichText::new(
-                    "Siap dijalankan! Kendaraan bergerak konvoi bergantian per durasi; klik 'Lancar' saat Play/Preview untuk mengurai seluruh kendaraan sampai habis.",
-                )
-                .size(10.0)
-                .color(egui::Color32::from_rgb(153, 246, 228)),
+                egui::RichText::new(ready_msg)
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(153, 246, 228)),
             );
         }
     });
@@ -9828,41 +9856,90 @@ fn draw_traffic_queue_inspector_cards(
     }
 
     // 4. Convoy Speed, Turn Duration & Live "Lancar" Speed Settings
-    inspector_card(ui, "Pengaturan Konvoi, Giliran & Mode Lancar", true, |ui| {
+    let card4_title = if is_gridlock {
+        "Pengaturan Macet Total & Mode Lancar"
+    } else {
+        "Pengaturan Konvoi, Giliran & Mode Lancar"
+    };
+    inspector_card(ui, card4_title, true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Kecepatan Konvoi:");
-                let prev = cfg.convoy_speed_mps;
-                numeric_spinner(
-                    ui,
-                    ("tq_convoy_spd", a.id),
-                    &mut cfg.convoy_speed_mps,
-                    SpinnerConfig {
-                        min: 1.5,
-                        max: 40.0,
-                        step: 0.5,
-                        drag_speed: 0.2,
-                        decimals: 1,
-                        suffix: " m/s",
-                        wrap_around: false,
-                    },
+            if is_gridlock {
+                ui.label(
+                    egui::RichText::new("Kondisi Awal Saat Play:")
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(253, 164, 175)),
                 );
-                if (cfg.convoy_speed_mps - prev).abs() > 1e-6 {
-                    if cfg.clear_speed_mps < cfg.convoy_speed_mps {
-                        cfg.clear_speed_mps = cfg.convoy_speed_mps;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui
+                        .selectable_value(
+                            &mut cfg.prefill_initial_queue,
+                            true,
+                            egui::RichText::new("Pre-fill (Penuh & Diam)").size(10.0),
+                        )
+                        .on_hover_text(
+                            "Semua jalur langsung penuh kendaraan dari garis akhir sampai garis awal dalam posisi diam total hingga tombol 'Lancar' diklik",
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
                     }
-                    cfg_changed = true;
-                }
-            });
-            ui.label(
-                egui::RichText::new(format!(
-                    "Konstan tanpa menyalip (~{:.0} km/jam)",
-                    cfg.convoy_speed_mps * 3.6
-                ))
-                .size(9.5)
-                .color(egui::Color32::from_rgb(148, 163, 184)),
-            );
-            ui.add_space(3.0);
+                    if ui
+                        .selectable_value(
+                            &mut cfg.prefill_initial_queue,
+                            false,
+                            egui::RichText::new("Mengalir Lalu Macet").size(10.0),
+                        )
+                        .on_hover_text(
+                            "Kendaraan bergerak masuk dari pangkal tiap jalur hingga garis akhir lalu berhenti mengular di semua jalur",
+                        )
+                        .changed()
+                    {
+                        cfg_changed = true;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+
+            if !is_gridlock || !cfg.prefill_initial_queue {
+                ui.horizontal(|ui| {
+                    ui.label(if is_gridlock {
+                        "Kecepatan Masuk:"
+                    } else {
+                        "Kecepatan Konvoi:"
+                    });
+                    let prev = cfg.convoy_speed_mps;
+                    numeric_spinner(
+                        ui,
+                        ("tq_convoy_spd", a.id),
+                        &mut cfg.convoy_speed_mps,
+                        SpinnerConfig {
+                            min: 1.5,
+                            max: 40.0,
+                            step: 0.5,
+                            drag_speed: 0.2,
+                            decimals: 1,
+                            suffix: " m/s",
+                            wrap_around: false,
+                        },
+                    );
+                    if (cfg.convoy_speed_mps - prev).abs() > 1e-6 {
+                        if cfg.clear_speed_mps < cfg.convoy_speed_mps {
+                            cfg.clear_speed_mps = cfg.convoy_speed_mps;
+                        }
+                        cfg_changed = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Konstan tanpa menyalip (~{:.0} km/jam)",
+                        cfg.convoy_speed_mps * 3.6
+                    ))
+                    .size(9.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(3.0);
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Kecepatan Lancar:");
@@ -10039,18 +10116,20 @@ fn draw_traffic_queue_inspector_cards(
                 }
             });
 
-            ui.add_space(4.0);
-            if ui
-                .checkbox(
-                    &mut cfg.prefill_initial_queue,
-                    "Mulai penuh antrean (Pre-fill)",
-                )
-                .on_hover_text(
-                    "Jika aktif, seluruh Jalur Antre langsung terisi penuh dari garis akhir sampai garis awal saat Play ditekan, dan terus diisi penuh selama fase normal",
-                )
-                .changed()
-            {
-                cfg_changed = true;
+            if !is_gridlock {
+                ui.add_space(4.0);
+                if ui
+                    .checkbox(
+                        &mut cfg.prefill_initial_queue,
+                        "Mulai penuh antrean (Pre-fill)",
+                    )
+                    .on_hover_text(
+                        "Jika aktif, seluruh Jalur Antre langsung terisi penuh dari garis akhir sampai garis awal saat Play ditekan, dan terus diisi penuh selama fase normal",
+                    )
+                    .changed()
+                {
+                    cfg_changed = true;
+                }
             }
 
             ui.add_space(4.0);

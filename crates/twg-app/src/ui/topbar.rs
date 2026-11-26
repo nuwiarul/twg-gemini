@@ -431,6 +431,7 @@ pub fn draw_top_bar(
                         state.draft_points_lnglat.clear();
                         state.drawing_traffic_lane_for_anim_id = None;
                         state.drawing_traffic_queue_target = None;
+                        state.drawing_traffic_queue_is_gridlock = false;
                         state.tool_mode = ToolMode::Select;
                     }
                 }
