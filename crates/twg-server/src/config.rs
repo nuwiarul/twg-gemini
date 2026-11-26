@@ -19,8 +19,7 @@ impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://twg:twg_dev_password@127.0.0.1:5435/twg_rust".into());
-        let bind_addr =
-            std::env::var("SERVER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8010".into());
+        let bind_addr = std::env::var("SERVER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8010".into());
 
         let key_raw = std::env::var("PASETO_SYMMETRIC_KEY").unwrap_or_else(|_| {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()

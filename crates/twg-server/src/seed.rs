@@ -12,7 +12,9 @@ pub async fn run_seed_if_empty(db: &PgPool) -> Result<()> {
         return Ok(());
     }
 
-    tracing::info!("Empty database detected — seeding initial Satker, users, and Denpasar 3D demo scenario...");
+    tracing::info!(
+        "Empty database detected — seeding initial Satker, users, and Denpasar 3D demo scenario..."
+    );
 
     let satker_id = Uuid::new_v4();
     let admin_id = Uuid::new_v4();
@@ -20,13 +22,15 @@ pub async fn run_seed_if_empty(db: &PgPool) -> Result<()> {
     let operasi_id = Uuid::new_v4();
     let skenario_id = Uuid::new_v4();
 
-    sqlx::query("INSERT INTO satkers (id, code, name, is_active, created_by) VALUES ($1, $2, $3, TRUE, $4)")
-        .bind(satker_id)
-        .bind("POLDA-BALI")
-        .bind("Polda Bali")
-        .bind(admin_id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO satkers (id, code, name, is_active, created_by) VALUES ($1, $2, $3, TRUE, $4)",
+    )
+    .bind(satker_id)
+    .bind("POLDA-BALI")
+    .bind("Polda Bali")
+    .bind(admin_id)
+    .execute(db)
+    .await?;
 
     let admin_hash = hash_password("admin123")?;
     let operator_hash = hash_password("operator123")?;

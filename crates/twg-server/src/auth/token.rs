@@ -121,8 +121,14 @@ impl TokenService {
         let rules = ClaimsValidationRules::new();
         let untrusted = UntrustedToken::<Local, V4>::try_from(token_str)
             .map_err(|e| anyhow!("malformed paseto token: {e}"))?;
-        let trusted = local::decrypt(&self.key, &untrusted, &rules, None, Some(IMPLICIT_ASSERTION))
-            .map_err(|e| anyhow!("invalid or expired token: {e}"))?;
+        let trusted = local::decrypt(
+            &self.key,
+            &untrusted,
+            &rules,
+            None,
+            Some(IMPLICIT_ASSERTION),
+        )
+        .map_err(|e| anyhow!("invalid or expired token: {e}"))?;
         let claims = trusted
             .payload_claims()
             .ok_or_else(|| anyhow!("missing token claims"))?;

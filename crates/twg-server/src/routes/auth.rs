@@ -162,7 +162,9 @@ pub async fn update_profile(
     Json(req): Json<ProfileUpdateRequest>,
 ) -> AppResult<Json<ApiResponse<UserDto>>> {
     if req.name.trim().is_empty() {
-        return Err(AppError::BadRequest("Nama lengkap tidak boleh kosong".into()));
+        return Err(AppError::BadRequest(
+            "Nama lengkap tidak boleh kosong".into(),
+        ));
     }
 
     sqlx::query(

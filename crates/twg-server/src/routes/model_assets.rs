@@ -106,7 +106,10 @@ struct UploadedFile {
 }
 
 fn file_download_url(rel_path: &str) -> String {
-    format!("/api/v1/assets/models/file/{}", rel_path.trim_start_matches('/'))
+    format!(
+        "/api/v1/assets/models/file/{}",
+        rel_path.trim_start_matches('/')
+    )
 }
 
 fn row_to_dto(row: &sqlx::postgres::PgRow) -> AppResult<ModelAssetDto> {
@@ -135,19 +138,17 @@ fn row_to_dto(row: &sqlx::postgres::PgRow) -> AppResult<ModelAssetDto> {
     let default_rot_y: f64 = row.try_get("default_rot_y")?;
     let default_rot_z: f64 = row.try_get("default_rot_z")?;
 
-    let make_opt = |p: Option<String>, h: Option<String>, sz: i64, tris: i32| {
-        match (p, h) {
-            (Some(rel_path), Some(sha256)) if !rel_path.is_empty() && !sha256.is_empty() => {
-                Some(ModelFileMeta {
-                    download_url: file_download_url(&rel_path),
-                    rel_path,
-                    sha256,
-                    size_bytes: sz,
-                    tris,
-                })
-            }
-            _ => None,
+    let make_opt = |p: Option<String>, h: Option<String>, sz: i64, tris: i32| match (p, h) {
+        (Some(rel_path), Some(sha256)) if !rel_path.is_empty() && !sha256.is_empty() => {
+            Some(ModelFileMeta {
+                download_url: file_download_url(&rel_path),
+                rel_path,
+                sha256,
+                size_bytes: sz,
+                tris,
+            })
         }
+        _ => None,
     };
 
     Ok(ModelAssetDto {
@@ -261,12 +262,27 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
             _ => hash_and_size(&primary_abs).await?,
         };
 
-        let (lod2_path, lod2_sha256, lod2_size_bytes) =
-            resolve_optional_file(assets_dir, entry.lod2_path, entry.lod2_sha256, entry.lod2_size_bytes).await?;
-        let (walk_path, walk_sha256, walk_size_bytes) =
-            resolve_optional_file(assets_dir, entry.walk_model_path, entry.walk_sha256, entry.walk_size_bytes).await?;
-        let (walk_lod2_path, walk_lod2_sha256, walk_lod2_size_bytes) =
-            resolve_optional_file(assets_dir, entry.walk_lod2_path, entry.walk_lod2_sha256, entry.walk_lod2_size_bytes).await?;
+        let (lod2_path, lod2_sha256, lod2_size_bytes) = resolve_optional_file(
+            assets_dir,
+            entry.lod2_path,
+            entry.lod2_sha256,
+            entry.lod2_size_bytes,
+        )
+        .await?;
+        let (walk_path, walk_sha256, walk_size_bytes) = resolve_optional_file(
+            assets_dir,
+            entry.walk_model_path,
+            entry.walk_sha256,
+            entry.walk_size_bytes,
+        )
+        .await?;
+        let (walk_lod2_path, walk_lod2_sha256, walk_lod2_size_bytes) = resolve_optional_file(
+            assets_dir,
+            entry.walk_lod2_path,
+            entry.walk_lod2_sha256,
+            entry.walk_lod2_size_bytes,
+        )
+        .await?;
 
         let id = Uuid::parse_str(&entry.id).unwrap_or_else(|_| Uuid::new_v4());
         let slug = if entry.slug.trim().is_empty() {
@@ -360,15 +376,15 @@ pub async fn repair_unnormalized_skin_weights_if_needed(
     let mut seen = std::collections::HashSet::new();
     for m in &models {
         for f in m.all_files() {
-            if f.rel_path.to_ascii_lowercase().ends_with(".glb")
-                && seen.insert(f.rel_path.clone())
+            if f.rel_path.to_ascii_lowercase().ends_with(".glb") && seen.insert(f.rel_path.clone())
             {
                 unique_paths.push(f.rel_path.clone());
             }
         }
     }
 
-    let mut actual_meta: HashMap<String, (String, i64)> = HashMap::with_capacity(unique_paths.len());
+    let mut actual_meta: HashMap<String, (String, i64)> =
+        HashMap::with_capacity(unique_paths.len());
     let mut repaired_files = 0usize;
     let mut repaired_vertices = 0usize;
 
@@ -640,7 +656,9 @@ fn sanitize_category_slug(raw: &str) -> String {
     }
     let trimmed = out.trim_matches(|c| c == '_' || c == '-').to_string();
     if trimmed.len() > 63 {
-        trimmed[..63].trim_matches(|c| c == '_' || c == '-').to_string()
+        trimmed[..63]
+            .trim_matches(|c| c == '_' || c == '-')
+            .to_string()
     } else {
         trimmed
     }
@@ -673,7 +691,8 @@ pub async fn create_model_category(
     let slug = sanitize_category_slug(raw_slug);
     if slug.is_empty() || slug == "all" {
         return Err(AppError::BadRequest(
-            "Slug kategori tidak valid (gunakan huruf kecil, angka, '_' atau '-', bukan 'all')".into(),
+            "Slug kategori tidak valid (gunakan huruf kecil, angka, '_' atau '-', bukan 'all')"
+                .into(),
         ));
     }
 
@@ -716,7 +735,9 @@ pub async fn update_model_category(
 
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Nama kategori tidak boleh kosong".into()));
+        return Err(AppError::BadRequest(
+            "Nama kategori tidak boleh kosong".into(),
+        ));
     }
     let scale = if req.default_scale.is_finite() && req.default_scale > 0.0 {
         req.default_scale.clamp(0.01, 100.0)
@@ -741,7 +762,9 @@ pub async fn update_model_category(
     .await?;
 
     if res.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!("Kategori '{slug}' tidak ditemukan")));
+        return Err(AppError::NotFound(format!(
+            "Kategori '{slug}' tidak ditemukan"
+        )));
     }
 
     let dto = fetch_category_by_slug(&state.db, &slug).await?;
@@ -828,10 +851,8 @@ pub async fn get_sync_manifest(
         }
     }
 
-    let categories: Vec<ModelCategoryCount> = cat_dtos
-        .iter()
-        .map(ModelCategoryCount::from_dto)
-        .collect();
+    let categories: Vec<ModelCategoryCount> =
+        cat_dtos.iter().map(ModelCategoryCount::from_dto).collect();
 
     let manifest = ModelSyncManifest {
         manifest_hash: hex::encode(manifest_hasher.finalize()),
@@ -853,10 +874,18 @@ pub async fn list_model_assets(
     Query(q): Query<ListModelAssetsQuery>,
 ) -> AppResult<Json<ApiResponse<Vec<ModelAssetDto>>>> {
     let mut models = fetch_all_models(&state.db).await?;
-    if let Some(cat) = q.category.as_deref().filter(|s| !s.is_empty() && *s != "all") {
+    if let Some(cat) = q
+        .category
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
         models.retain(|m| m.category == cat);
     }
-    if let Some(mt) = q.model_type.as_deref().filter(|s| !s.is_empty() && *s != "all") {
+    if let Some(mt) = q
+        .model_type
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
         models.retain(|m| m.model_type.as_str() == mt);
     }
     if let Some(search) = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -1026,7 +1055,16 @@ pub async fn create_model_asset(
                 "any",
             )
             .await?;
-            (rel_lod0, s0, Some(rel_lod2), Some(s2), None, None, None, None)
+            (
+                rel_lod0,
+                s0,
+                Some(rel_lod2),
+                Some(s2),
+                None,
+                None,
+                None,
+                None,
+            )
         }
         ModelAssetType::Animated => {
             let idle_file = form.files.get("idle_file").ok_or_else(|| {
@@ -1172,7 +1210,11 @@ pub async fn update_model_asset(
         _ => existing.category.clone(),
     };
 
-    let model_type = match form.fields.get("model_type").map(|s| s.trim().to_lowercase()) {
+    let model_type = match form
+        .fields
+        .get("model_type")
+        .map(|s| s.trim().to_lowercase())
+    {
         Some(t) if t == "static" || t == "statis" => ModelAssetType::Static,
         Some(t) if t == "animated" || t == "animasi" => ModelAssetType::Animated,
         Some(t) if !t.is_empty() => {
@@ -1223,12 +1265,20 @@ pub async fn update_model_asset(
 
     let mut lod2_path = existing.lod2_file.as_ref().map(|f| f.rel_path.clone());
     let mut lod2_sha = existing.lod2_file.as_ref().map(|f| f.sha256.clone());
-    let mut lod2_size = existing.lod2_file.as_ref().map(|f| f.size_bytes).unwrap_or(0);
+    let mut lod2_size = existing
+        .lod2_file
+        .as_ref()
+        .map(|f| f.size_bytes)
+        .unwrap_or(0);
     let mut lod2_tris = existing.lod2_file.as_ref().map(|f| f.tris).unwrap_or(0);
 
     let mut walk_path = existing.walk_file.as_ref().map(|f| f.rel_path.clone());
     let mut walk_sha = existing.walk_file.as_ref().map(|f| f.sha256.clone());
-    let mut walk_size = existing.walk_file.as_ref().map(|f| f.size_bytes).unwrap_or(0);
+    let mut walk_size = existing
+        .walk_file
+        .as_ref()
+        .map(|f| f.size_bytes)
+        .unwrap_or(0);
     let mut walk_tris = existing.walk_file.as_ref().map(|f| f.tris).unwrap_or(0);
 
     let mut walk_lod2_path = existing.walk_lod2_file.as_ref().map(|f| f.rel_path.clone());
@@ -1238,7 +1288,11 @@ pub async fn update_model_asset(
         .as_ref()
         .map(|f| f.size_bytes)
         .unwrap_or(0);
-    let mut walk_lod2_tris = existing.walk_lod2_file.as_ref().map(|f| f.tris).unwrap_or(0);
+    let mut walk_lod2_tris = existing
+        .walk_lod2_file
+        .as_ref()
+        .map(|f| f.tris)
+        .unwrap_or(0);
 
     let mut files_to_cleanup_after: Vec<String> = Vec::new();
 
@@ -1258,7 +1312,11 @@ pub async fn update_model_asset(
 
     match model_type {
         ModelAssetType::Static => {
-            if let Some(file) = form.files.get("model_file").or_else(|| form.files.get("idle_file")) {
+            if let Some(file) = form
+                .files
+                .get("model_file")
+                .or_else(|| form.files.get("idle_file"))
+            {
                 validate_gltf_extension(&file.filename)?;
                 let target_lod0 = format!("models/{category}/{new_base}.glb");
                 let target_lod2 = format!("models/{category}/{new_base}_lod2.glb");
@@ -1660,13 +1718,11 @@ async fn make_unique_base_slug(
         let slug = format!("{category}/{candidate}");
         let exists: i64 = match exclude_id {
             Some(eid) => {
-                sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM model_assets WHERE slug = $1 AND id <> $2",
-                )
-                .bind(&slug)
-                .bind(eid)
-                .fetch_one(db)
-                .await?
+                sqlx::query_scalar("SELECT COUNT(*) FROM model_assets WHERE slug = $1 AND id <> $2")
+                    .bind(&slug)
+                    .bind(eid)
+                    .fetch_one(db)
+                    .await?
             }
             None => {
                 sqlx::query_scalar("SELECT COUNT(*) FROM model_assets WHERE slug = $1")
@@ -1782,7 +1838,10 @@ async fn convert_uploaded_model(
                 }
             }
             Err(err) => {
-                tracing::warn!(?err, "Node converter unavailable; using pure-Rust GLB fallback");
+                tracing::warn!(
+                    ?err,
+                    "Node converter unavailable; using pure-Rust GLB fallback"
+                );
                 rust_glb_fallback(&upload.bytes, &tmp_lod0, &tmp_lod2, expect_anim_mode).await
             }
         }
@@ -1816,10 +1875,7 @@ async fn convert_uploaded_model(
     }
 }
 
-async fn ensure_glb_file_normalized(
-    path: &Path,
-    stats: &mut ConverterFileStats,
-) -> AppResult<()> {
+async fn ensure_glb_file_normalized(path: &Path, stats: &mut ConverterFileStats) -> AppResult<()> {
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
@@ -1861,7 +1917,8 @@ async fn rust_glb_fallback(
 ) -> AppResult<(ConverterFileStats, ConverterFileStats)> {
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         return Err(AppError::BadRequest(
-            "File harus berupa binary GLB valid (atau aktifkan Node gltf-transform untuk .gltf)".into(),
+            "File harus berupa binary GLB valid (atau aktifkan Node gltf-transform untuk .gltf)"
+                .into(),
         ));
     }
     let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;

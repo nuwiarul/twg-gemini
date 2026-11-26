@@ -11,6 +11,7 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sqlx::Row;
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
 use twg_shared::{
     models::UserRole,
@@ -264,6 +265,8 @@ async fn handle_socket(
     let (sub_tx, sub_rx) = watch::channel((initial_skenario_id, initial_mode));
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<WsServerMessage>();
     let mut hub_rx = state.ws_hub.tx.subscribe();
+    let mut send_shutdown = state.shutdown.clone();
+    let mut receive_shutdown = state.shutdown.clone();
 
     let (mut sender, mut receiver) = socket.split();
 
@@ -303,6 +306,10 @@ async fn handle_socket(
     let send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
+                _ = send_shutdown.changed() => {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
                 Some(direct_msg) = direct_rx.recv() => {
                     if let Ok(txt) = serde_json::to_string(&direct_msg)
                         && sender.send(Message::Text(txt.into())).await.is_err()
@@ -368,7 +375,19 @@ async fn handle_socket(
         }
     });
 
-    while let Some(Ok(msg)) = receiver.next().await {
+    let mut shutdown_requested = false;
+    loop {
+        let next_message = tokio::select! {
+            _ = receive_shutdown.changed() => {
+                shutdown_requested = true;
+                None
+            }
+            message = receiver.next() => message,
+        };
+        let Some(Ok(msg)) = next_message else {
+            break;
+        };
+
         match msg {
             Message::Text(text) => {
                 let Ok(client_msg) = serde_json::from_str::<WsClientMessage>(&text) else {
@@ -402,13 +421,7 @@ async fn handle_socket(
                     }
                     WsClientMessage::Command(cmd) => {
                         if let Err(err) = process_command(
-                            &state,
-                            user_id,
-                            &username,
-                            role,
-                            satker_id,
-                            &device_id,
-                            cmd,
+                            &state, user_id, &username, role, satker_id, &device_id, cmd,
                         )
                         .await
                         {
@@ -425,7 +438,12 @@ async fn handle_socket(
         }
     }
 
-    send_task.abort();
+    if shutdown_requested {
+        drop(direct_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), send_task).await;
+    } else {
+        send_task.abort();
+    }
     state.ws_hub.remove_connection(conn_id).await;
 }
 

@@ -50,7 +50,10 @@ pub async fn list_users(
         .await?
     };
 
-    let items = rows.iter().map(map_user_row).collect::<Result<Vec<_>, _>>()?;
+    let items = rows
+        .iter()
+        .map(map_user_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(ApiResponse { data: items }))
 }
 
@@ -160,7 +163,9 @@ pub async fn update_user(
     }
     let existing = fetch_user_by_id(&state, id).await?;
     if !auth.can_mutate_satker(existing.satker_id) {
-        return Err(AppError::Forbidden("cross-satker user update denied".into()));
+        return Err(AppError::Forbidden(
+            "cross-satker user update denied".into(),
+        ));
     }
 
     let target_satker_id = if auth.role.is_admin_satker() {
@@ -252,11 +257,15 @@ pub async fn delete_user(
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
     auth.require_admin_write()?;
     if auth.user_id == id {
-        return Err(AppError::BadRequest("cannot delete active self account".into()));
+        return Err(AppError::BadRequest(
+            "cannot delete active self account".into(),
+        ));
     }
     let existing = fetch_user_by_id(&state, id).await?;
     if !auth.can_mutate_satker(existing.satker_id) {
-        return Err(AppError::Forbidden("cross-satker user delete denied".into()));
+        return Err(AppError::Forbidden(
+            "cross-satker user delete denied".into(),
+        ));
     }
 
     sqlx::query("DELETE FROM users WHERE id = $1")

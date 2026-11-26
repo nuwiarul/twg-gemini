@@ -972,9 +972,21 @@ mod tests {
             remapped["formation"]["extra_marker_ids"][1].as_str(),
             Some(new_m2.to_string().as_str())
         );
-        assert!(remapped["formation"]["offsets_by_marker"].get(new_m1.to_string()).is_some());
-        assert!(remapped["formation"]["offsets_by_marker"].get(old_m1.to_string()).is_none());
-        assert!(remapped["formation"]["offsets_by_marker"].get(untouched.to_string()).is_some());
+        assert!(
+            remapped["formation"]["offsets_by_marker"]
+                .get(new_m1.to_string())
+                .is_some()
+        );
+        assert!(
+            remapped["formation"]["offsets_by_marker"]
+                .get(old_m1.to_string())
+                .is_none()
+        );
+        assert!(
+            remapped["formation"]["offsets_by_marker"]
+                .get(untouched.to_string())
+                .is_some()
+        );
         assert_eq!(
             remapped["group_config"]["steps"][0]["anim_id"].as_str(),
             Some(new_anim.to_string().as_str())

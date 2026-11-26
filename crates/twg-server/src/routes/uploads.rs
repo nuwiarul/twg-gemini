@@ -32,7 +32,13 @@ pub async fn upload_file(
             .file_name()
             .unwrap_or("upload.bin")
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
 
         let data = field
@@ -72,12 +78,14 @@ pub async fn get_model_catalog(
     }
 
     let catalog_path = state.config.assets_dir.join("catalog").join("models.json");
-    let raw = tokio::fs::read_to_string(&catalog_path).await.map_err(|e| {
-        AppError::NotFound(format!(
-            "catalog not found at {}: {e}",
-            catalog_path.display()
-        ))
-    })?;
+    let raw = tokio::fs::read_to_string(&catalog_path)
+        .await
+        .map_err(|e| {
+            AppError::NotFound(format!(
+                "catalog not found at {}: {e}",
+                catalog_path.display()
+            ))
+        })?;
     let items: Vec<ModelCatalogEntry> =
         serde_json::from_str(&raw).map_err(|e| AppError::Internal(e.into()))?;
     Ok(Json(ApiResponse { data: items }))

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
@@ -50,18 +51,50 @@ async fn main() -> Result<()> {
         config.refresh_token_ttl_secs,
     )?);
     let ws_hub = Arc::new(WsHub::new());
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
 
     let state = AppState {
-        db,
+        db: db.clone(),
         config: Arc::clone(&config),
         tokens,
         ws_hub,
+        shutdown: shutdown_rx,
     };
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("twg-server listening on http://{}", config.bind_addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_tx))
+        .await?;
+
+    tracing::info!("All connections drained; closing PostgreSQL pool");
+    db.close().await;
+    tracing::info!("twg-server shutdown complete");
     Ok(())
+}
+
+async fn shutdown_signal(shutdown_tx: watch::Sender<()>) {
+    #[cfg(unix)]
+    let signal = async {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.expect("failed to install Ctrl+C handler"),
+            _ = terminate.recv() => {},
+        }
+    };
+
+    #[cfg(not(unix))]
+    let signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    signal.await;
+    tracing::info!("Shutdown signal received; draining active requests and WebSocket connections");
+    let _ = shutdown_tx.send(());
 }

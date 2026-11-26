@@ -40,7 +40,10 @@ pub async fn list_satkers(
         .await?
     };
 
-    let items = rows.iter().map(map_satker_row).collect::<Result<Vec<_>, _>>()?;
+    let items = rows
+        .iter()
+        .map(map_satker_row)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(ApiResponse { data: items }))
 }
 
@@ -75,7 +78,9 @@ pub async fn create_satker(
     let code = req.code.trim();
     let name = req.name.trim();
     if code.is_empty() || name.is_empty() {
-        return Err(AppError::BadRequest("Kode dan nama satker wajib diisi".into()));
+        return Err(AppError::BadRequest(
+            "Kode dan nama satker wajib diisi".into(),
+        ));
     }
     let dup: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM satkers WHERE LOWER(code) = LOWER($1))")
@@ -117,7 +122,9 @@ pub async fn update_satker(
     let code = req.code.trim();
     let name = req.name.trim();
     if code.is_empty() || name.is_empty() {
-        return Err(AppError::BadRequest("Kode dan nama satker wajib diisi".into()));
+        return Err(AppError::BadRequest(
+            "Kode dan nama satker wajib diisi".into(),
+        ));
     }
     let dup: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM satkers WHERE LOWER(code) = LOWER($1) AND id <> $2)",

@@ -78,7 +78,10 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(location_presets::delete_location_preset),
         )
         // Operasis & Skenarios
-        .route("/api/v1/tactical/operasis", get(operasis::list_tactical_operasis))
+        .route(
+            "/api/v1/tactical/operasis",
+            get(operasis::list_tactical_operasis),
+        )
         .route(
             "/api/v1/operasis",
             get(operasis::list_operasis).post(operasis::create_operasi),

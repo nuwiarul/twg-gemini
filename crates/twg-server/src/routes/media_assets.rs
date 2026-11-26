@@ -158,7 +158,11 @@ pub async fn list_media_assets(
     Query(q): Query<ListMediaQuery>,
 ) -> AppResult<Json<ApiResponse<Vec<MediaAssetDto>>>> {
     let mut items = fetch_all_media(&state.db).await?;
-    if let Some(mt) = q.media_type.as_deref().filter(|s| !s.is_empty() && *s != "all") {
+    if let Some(mt) = q
+        .media_type
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
         items.retain(|m| m.media_type.as_str() == mt);
     }
     if let Some(search) = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -199,7 +203,9 @@ pub async fn create_media_asset(
         .fields
         .get("media_type")
         .map(|s| s.trim().to_lowercase())
-        .ok_or_else(|| AppError::BadRequest("media_type wajib diisi (texture, sound, video)".into()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("media_type wajib diisi (texture, sound, video)".into())
+        })?;
     let media_type = match media_type_raw.as_str() {
         "texture" | "image" => MediaAssetType::Texture,
         "sound" | "audio" => MediaAssetType::Sound,
@@ -239,14 +245,8 @@ pub async fn create_media_asset(
     let assets_dir = &state.config.assets_dir;
     let id = Uuid::new_v4();
 
-    let processed = process_and_store_media(
-        assets_dir,
-        media_type,
-        &unique_base,
-        &upload,
-        &crop_mode,
-    )
-    .await?;
+    let processed =
+        process_and_store_media(assets_dir, media_type, &unique_base, &upload, &crop_mode).await?;
 
     sqlx::query(
         r#"
@@ -328,7 +328,12 @@ pub async fn update_media_asset(
         .fields
         .get("crop_mode")
         .map(|s| s.trim().to_lowercase())
-        .unwrap_or_else(|| existing.crop_mode.clone().unwrap_or_else(|| "crop".to_string()));
+        .unwrap_or_else(|| {
+            existing
+                .crop_mode
+                .clone()
+                .unwrap_or_else(|| "crop".to_string())
+        });
     let crop_mode = if crop_mode_raw == "resize" {
         "resize".to_string()
     } else {
@@ -344,14 +349,9 @@ pub async fn update_media_asset(
         .to_string();
 
     if let Some(upload) = form.file {
-        let processed = process_and_store_media(
-            assets_dir,
-            existing.media_type,
-            &base,
-            &upload,
-            &crop_mode,
-        )
-        .await?;
+        let processed =
+            process_and_store_media(assets_dir, existing.media_type, &base, &upload, &crop_mode)
+                .await?;
 
         let mut cleanup = Vec::new();
         if existing.original_file.rel_path != processed.rel_path {
@@ -1012,13 +1012,11 @@ async fn make_unique_media_base(
         let slug = format!("{}/{candidate}", media_type.as_str());
         let exists: i64 = match exclude_id {
             Some(eid) => {
-                sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM media_assets WHERE slug = $1 AND id <> $2",
-                )
-                .bind(&slug)
-                .bind(eid)
-                .fetch_one(db)
-                .await?
+                sqlx::query_scalar("SELECT COUNT(*) FROM media_assets WHERE slug = $1 AND id <> $2")
+                    .bind(&slug)
+                    .bind(eid)
+                    .fetch_one(db)
+                    .await?
             }
             None => {
                 sqlx::query_scalar("SELECT COUNT(*) FROM media_assets WHERE slug = $1")

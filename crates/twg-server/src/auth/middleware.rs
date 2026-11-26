@@ -37,7 +37,9 @@ impl AuthUser {
         if self.role.is_global_admin() {
             Ok(())
         } else {
-            Err(AppError::Forbidden("super admin permission required".into()))
+            Err(AppError::Forbidden(
+                "super admin permission required".into(),
+            ))
         }
     }
 
