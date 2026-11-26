@@ -23,8 +23,10 @@ use twg_shared::{
         spawn_hide_action,
     },
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{
-        is_traffic_gridlock_anim, is_traffic_queue_anim, parse_traffic_queue_config,
+        is_traffic_gridlock_anim, is_traffic_manual_anim, is_traffic_queue_anim,
+        parse_traffic_queue_config,
     },
 };
 use uuid::Uuid;
@@ -4014,7 +4016,10 @@ fn draw_particle_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: 
 fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
     let is_drawing_route = state.tool_mode == ToolMode::DrawRoute;
     let is_drawing_traffic = state.tool_mode == ToolMode::DrawTrafficLane;
-    let is_drawing_traffic_queue = state.tool_mode == ToolMode::DrawTrafficQueueLane;
+    let is_drawing_traffic_queue = matches!(
+        state.tool_mode,
+        ToolMode::DrawTrafficQueueLane | ToolMode::DrawTrafficDiversionLane
+    );
     let is_picking_unit = state.tool_mode == ToolMode::PickRouteMarker;
     let picking_is_multi = is_picking_unit
         && state
@@ -4316,6 +4321,7 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                     state.tool_mode = ToolMode::DrawTrafficQueueLane;
                     state.drawing_traffic_queue_target = None;
                     state.drawing_traffic_queue_is_gridlock = false;
+                    state.drawing_traffic_queue_is_manual = false;
                     state.draft_points_lnglat.clear();
                     state.route_target_marker_id = None;
                     state.picking_marker_for_anim_id = None;
@@ -4351,12 +4357,83 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                     state.tool_mode = ToolMode::DrawTrafficQueueLane;
                     state.drawing_traffic_queue_target = None;
                     state.drawing_traffic_queue_is_gridlock = true;
+                    state.drawing_traffic_queue_is_manual = false;
                     state.draft_points_lnglat.clear();
                     state.route_target_marker_id = None;
                     state.picking_marker_for_anim_id = None;
                     state.new_traffic_gridlock_name = format!("Macet Total {g_idx}");
                     state.status_banner = Some(
                         "Macet Total & Urai: Klik titik Jalur Antre A di peta (min 2 titik), tekan Enter / Finish. Lalu gambar Jalur Lancar wajibnya di Inspector."
+                            .into(),
+                    );
+                }
+
+                ui.add_space(4.0);
+                let manual_btn = egui::Button::new(
+                    egui::RichText::new("+ Kontrol Simpang Manual")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(79, 70, 229))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, manual_btn)
+                    .on_hover_text(
+                        "Buka-tutup simpang manual secara live oleh operator saat Play (tombol Buka Jalur A/B/C, Tahan Semua, dan Lancar — sinkron ke Layar Besar)",
+                    )
+                    .clicked()
+                {
+                    let m_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_traffic_manual_anim(a))
+                        .count()
+                        + 1;
+                    state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                    state.drawing_traffic_queue_target = None;
+                    state.drawing_traffic_queue_is_gridlock = false;
+                    state.drawing_traffic_queue_is_manual = true;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_manual_name = format!("Simpang Manual {m_idx}");
+                    state.status_banner = Some(
+                        "Kontrol Simpang Manual: Klik titik Jalur Antre A di peta (min 2 titik), tekan Enter / Finish. Lalu gambar Jalur Lancar wajibnya di Inspector."
+                            .into(),
+                    );
+                }
+
+                ui.add_space(4.0);
+                let diversion_btn = egui::Button::new(
+                    egui::RichText::new("+ Pengalihan Arus (Diversion)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(2, 132, 199))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, diversion_btn)
+                    .on_hover_text(
+                        "Rekayasa pengalihan arus (Jalur Pendekat -> Jalur Utama / Jalur Alternatif): klik 'Alihkan Arus' saat Play untuk membelokkan kendaraan ke jalur alternatif",
+                    )
+                    .clicked()
+                {
+                    let d_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_traffic_diversion_anim(a))
+                        .count()
+                        + 1;
+                    state.tool_mode = ToolMode::DrawTrafficDiversionLane;
+                    state.drawing_diversion_target = None;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_diversion_name = format!("Pengalihan Arus {d_idx}");
+                    state.status_banner = Some(
+                        "Pengalihan Arus: Klik titik Jalur Pendekat sampai ke titik simpang pengalihan (min 2 titik), tekan Enter / Finish."
                             .into(),
                     );
                 }
@@ -4493,8 +4570,14 @@ fn draw_ordered_animation_list(
                     AnimCategory::Route if is_traffic_gridlock_anim(a) => {
                         ("MACET TOTAL", egui::Color32::from_rgb(190, 18, 60))
                     }
+                    AnimCategory::Route if is_traffic_manual_anim(a) => {
+                        ("SIMPANG MANUAL", egui::Color32::from_rgb(79, 70, 229))
+                    }
                     AnimCategory::Route if is_traffic_queue_anim(a) => {
                         ("URAI SIMPANG", egui::Color32::from_rgb(13, 148, 136))
+                    }
+                    AnimCategory::Route if is_traffic_diversion_anim(a) => {
+                        ("ALIH ARUS", egui::Color32::from_rgb(2, 132, 199))
                     }
                     AnimCategory::Route if is_multi => {
                         if parse_multi_route_config(a).formation == RouteFormationKind::Patwal {
@@ -4767,6 +4850,11 @@ fn draw_ordered_animation_list(
                                         "Mengalir Macet"
                                     }
                                 )
+                            } else if is_traffic_manual_anim(a) {
+                                format!(
+                                    "{complete}/{total} Jalur  •  {} Model  •  Kontrol Manual Live",
+                                    cfg.vehicle_pool.len()
+                                )
                             } else {
                                 format!(
                                     "{complete}/{total} Jalur Lengkap  •  {} Model  •  {:.0}s giliran",
@@ -4774,6 +4862,19 @@ fn draw_ordered_animation_list(
                                     cfg.turn_duration_sec
                                 )
                             }
+                        } else if is_traffic_diversion_anim(a) {
+                            let cfg = parse_traffic_diversion_config(a);
+                            let complete = cfg.corridors.iter().filter(|c| c.enabled && c.is_complete()).count();
+                            let total = cfg.corridors.iter().filter(|c| c.enabled).count();
+                            format!(
+                                "{complete}/{total} Koridor Y  •  {} Model  •  {}",
+                                cfg.vehicle_pool.len(),
+                                if cfg.start_diverted {
+                                    "Awal Dialihkan"
+                                } else {
+                                    "Awal Normal"
+                                }
+                            )
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a

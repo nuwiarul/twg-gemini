@@ -11,5 +11,6 @@ pub mod rts_nav;
 pub mod shoot_anim;
 pub mod spawn_hide_anim;
 pub mod traffic_anim;
+pub mod traffic_diversion;
 pub mod traffic_queue;
 pub mod ws;

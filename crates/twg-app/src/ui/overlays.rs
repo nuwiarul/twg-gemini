@@ -255,7 +255,18 @@ pub fn draw_projected_labels(
                     Some((_, Some(_))) => "Jalur Lancar (Wajib)",
                     Some((_, None)) => "Jalur Antre Baru",
                     None if state.drawing_traffic_queue_is_gridlock => "Jalur Antre A (Macet Total)",
+                    None if state.drawing_traffic_queue_is_manual => "Jalur Antre A (Simpang Manual)",
                     None => "Jalur Antre A (Urai Simpang)",
+                },
+                state.draft_points_lnglat.len()
+            ),
+            ToolMode::DrawTrafficDiversionLane => format!(
+                "Gambar {} ({} titik) — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
+                match state.drawing_diversion_target {
+                    Some((_, Some((_, 1)))) => "Jalur Utama / Normal (Pengalihan Arus)",
+                    Some((_, Some((_, 2)))) => "Jalur Alternatif / Pengalihan",
+                    Some((_, None)) => "Jalur Pendekat Baru (Pengalihan Arus)",
+                    _ => "Jalur Pendekat (Pengalihan Arus)",
                 },
                 state.draft_points_lnglat.len()
             ),

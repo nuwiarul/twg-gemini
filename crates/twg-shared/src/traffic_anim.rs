@@ -335,7 +335,11 @@ impl TrafficAnimConfig {
             max_speed_mps: max_speed,
             spawn_interval_min_sec: spawn_min,
             spawn_interval_max_sec: spawn_max,
-            lane_width_m: self.lane_width_m.clamp(2.0, 12.0),
+            lane_width_m: if self.lane_width_m.is_finite() {
+                self.lane_width_m.max(0.5)
+            } else {
+                default_lane_width_m()
+            },
             min_safe_gap_m: self.min_safe_gap_m.clamp(1.5, 25.0),
             allow_overtaking: self.allow_overtaking,
             overtake_side: self.overtake_side,
@@ -480,7 +484,7 @@ pub fn build_reverse_lane(
         }
     }
 
-    let offset_signed = lane_width_m.clamp(0.5, 80.0) * overtake_side.lateral_sign();
+    let offset_signed = lane_width_m.max(0.5) * overtake_side.lateral_sign();
     let mut offset_geo: Vec<[f64; 3]> = Vec::with_capacity(n);
     for i in 0..n {
         let (rx, rz) = if i == 0 {
@@ -1317,7 +1321,7 @@ impl TrafficSimEngine {
 
             // 6. Integrate lateral lane-change offset smoothly
             let lat_err = desired_lat - cur.lateral_offset;
-            let max_lat_speed = (lane_width * 0.85).clamp(2.2, 4.5);
+            let max_lat_speed = (lane_width * 0.85).max(2.2);
             let desired_lat_vel = (lat_err * 2.8).clamp(-max_lat_speed, max_lat_speed);
             let new_lat_vel = cur.lateral_vel + (desired_lat_vel - cur.lateral_vel) * (dt * 6.5).min(1.0);
             let mut new_lat = cur.lateral_offset + new_lat_vel * dt;

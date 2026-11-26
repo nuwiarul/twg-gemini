@@ -36,10 +36,15 @@ use twg_shared::{
         ANIM_TYPE_TRAFFIC_FLOW, TrafficAnimConfig, TrafficLane, TrafficVehicleEntry,
         is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config,
     },
+    traffic_diversion::{
+        TRAFFIC_DIVERSION_ANIM_TYPE, TrafficDiversionConfig, TrafficDiversionCorridor,
+        is_traffic_diversion_anim, parse_traffic_diversion_config, write_traffic_diversion_config,
+    },
     traffic_queue::{
-        TRAFFIC_GRIDLOCK_ANIM_TYPE, TRAFFIC_QUEUE_ANIM_TYPE, TrafficQueueConfig,
-        TrafficQueueCorridor, is_traffic_gridlock_anim, is_traffic_queue_anim,
-        parse_traffic_queue_config, write_traffic_queue_config,
+        TRAFFIC_GRIDLOCK_ANIM_TYPE, TRAFFIC_MANUAL_ANIM_TYPE, TRAFFIC_QUEUE_ANIM_TYPE,
+        TrafficQueueConfig, TrafficQueueCorridor, is_traffic_gridlock_anim,
+        is_traffic_manual_anim, is_traffic_queue_anim, parse_traffic_queue_config,
+        write_traffic_queue_config,
     },
 };
 use uuid::Uuid;
@@ -2104,7 +2109,12 @@ pub fn map_interaction_system(
             .anims
             .iter()
             .find(|a| a.id == sel_id)
-            .is_some_and(|a| !is_traffic_anim(a) && !is_traffic_queue_anim(a) && a.geom.len() >= 2)
+            .is_some_and(|a| {
+                !is_traffic_anim(a)
+                    && !is_traffic_queue_anim(a)
+                    && !is_traffic_diversion_anim(a)
+                    && a.geom.len() >= 2
+            })
         && route_edit.editing_anim_id != Some(sel_id)
     {
         route_edit.editing_anim_id = Some(sel_id);
@@ -2246,6 +2256,7 @@ pub fn map_interaction_system(
                     | ToolMode::DrawRoute
                     | ToolMode::DrawTrafficLane
                     | ToolMode::DrawTrafficQueueLane
+                    | ToolMode::DrawTrafficDiversionLane
             )
             && !state.draft_points_lnglat.is_empty()
         {
@@ -2264,9 +2275,17 @@ pub fn map_interaction_system(
                 state.draft_points_lnglat.clear();
                 state.drawing_traffic_queue_target = None;
                 state.drawing_traffic_queue_is_gridlock = false;
+                state.drawing_traffic_queue_is_manual = false;
                 state.tool_mode = ToolMode::Select;
                 state.status_banner =
-                    Some("Penggambaran Jalur Antrean / Macet Total dibatalkan.".into());
+                    Some("Penggambaran Jalur Antrean / Simpang dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::DrawTrafficDiversionLane {
+                state.draft_points_lnglat.clear();
+                state.drawing_diversion_target = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Penggambaran Jalur Pengalihan Arus dibatalkan.".into());
                 return;
             }
             if state.tool_mode == ToolMode::PickShootMarker {
@@ -3273,9 +3292,17 @@ pub fn map_interaction_system(
                     let clicked_anim = state.anims.iter().find(|a| a.id == id).cloned();
                     let is_route_poly = clicked_anim
                         .as_ref()
-                        .is_some_and(|a| !is_traffic_anim(a) && !is_traffic_queue_anim(a) && a.geom.len() >= 2);
+                        .is_some_and(|a| {
+                !is_traffic_anim(a)
+                    && !is_traffic_queue_anim(a)
+                    && !is_traffic_diversion_anim(a)
+                    && a.geom.len() >= 2
+            });
                     let clicked_traffic_lane = clicked_anim.as_ref().and_then(|a| {
-                        if is_traffic_anim(a) || is_traffic_queue_anim(a) {
+                        if is_traffic_anim(a)
+                            || is_traffic_queue_anim(a)
+                            || is_traffic_diversion_anim(a)
+                        {
                             hit_test_traffic_lane_index(cursor_px, &state, a, camera, cam_gtf)
                                 .or(Some(0))
                         } else {
@@ -3328,7 +3355,8 @@ pub fn map_interaction_system(
         | ToolMode::DrawBasicPolygon
         | ToolMode::DrawRoute
         | ToolMode::DrawTrafficLane
-        | ToolMode::DrawTrafficQueueLane => {
+        | ToolMode::DrawTrafficQueueLane
+        | ToolMode::DrawTrafficDiversionLane => {
             if playback.play_test_mode {
                 return;
             }
@@ -4485,14 +4513,19 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
 
             let is_gridlock = state.drawing_traffic_queue_is_gridlock;
+            let is_manual = !is_gridlock && state.drawing_traffic_queue_is_manual;
             let same_cnt = state
                 .anims
                 .iter()
                 .filter(|a| {
                     if is_gridlock {
                         is_traffic_gridlock_anim(a)
+                    } else if is_manual {
+                        is_traffic_manual_anim(a)
                     } else {
-                        is_traffic_queue_anim(a) && !is_traffic_gridlock_anim(a)
+                        is_traffic_queue_anim(a)
+                            && !is_traffic_gridlock_anim(a)
+                            && !is_traffic_manual_anim(a)
                     }
                 })
                 .count()
@@ -4502,6 +4535,12 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     format!("Macet Total {same_cnt}")
                 } else {
                     state.new_traffic_gridlock_name.trim().to_string()
+                }
+            } else if is_manual {
+                if state.new_traffic_manual_name.trim().is_empty() {
+                    format!("Simpang Manual {same_cnt}")
+                } else {
+                    state.new_traffic_manual_name.trim().to_string()
                 }
             } else if state.new_traffic_queue_name.trim().is_empty() {
                 format!("Urai Simpang {same_cnt}")
@@ -4546,8 +4585,9 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             let cfg = TrafficQueueConfig {
                 corridors: vec![TrafficQueueCorridor::new("Jalur A", geom.clone())],
                 vehicle_pool: auto_pool,
-                prefill_initial_queue: is_gridlock,
+                prefill_initial_queue: is_gridlock || is_manual,
                 gridlock_mode: is_gridlock,
+                manual_control_mode: is_manual,
                 seed: 20_261_127_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
                 ..Default::default()
             };
@@ -4555,6 +4595,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             let sort_order = (state.anims.len() + 1) as i32;
             let anim_type_str = if is_gridlock {
                 TRAFFIC_GRIDLOCK_ANIM_TYPE.to_string()
+            } else if is_manual {
+                TRAFFIC_MANUAL_ANIM_TYPE.to_string()
             } else {
                 TRAFFIC_QUEUE_ANIM_TYPE.to_string()
             };
@@ -4588,6 +4630,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 state.anims.push(a);
                 let title_lbl = if is_gridlock {
                     "Macet Total & Urai"
+                } else if is_manual {
+                    "Kontrol Simpang Manual"
                 } else {
                     "Antrean & Urai Simpang"
                 };
@@ -4615,11 +4659,205 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
             state.tool_mode = ToolMode::Select;
             state.drawing_traffic_queue_is_gridlock = false;
+            state.drawing_traffic_queue_is_manual = false;
             if is_gridlock {
                 state.new_traffic_gridlock_name = format!("Macet Total {}", same_cnt + 1);
+            } else if is_manual {
+                state.new_traffic_manual_name = format!("Simpang Manual {}", same_cnt + 1);
             } else {
                 state.new_traffic_queue_name = format!("Urai Simpang {}", same_cnt + 1);
             }
+        }
+        ToolMode::DrawTrafficDiversionLane => {
+            if pts.len() < 2 {
+                state.status_banner =
+                    Some("Jalur Pengalihan Arus butuh minimal 2 titik waypoint.".into());
+                return;
+            }
+            let geom: Vec<[f64; 3]> = pts.into_iter().map(|[lng, lat]| [lng, lat, 0.0]).collect();
+
+            if let Some((target_aid, sub_target)) = state.drawing_diversion_target.take() {
+                if let Some(existing) = state
+                    .anims
+                    .iter_mut()
+                    .find(|a| a.id == target_aid && is_traffic_diversion_anim(a))
+                {
+                    let mut cfg = parse_traffic_diversion_config(existing);
+                    match sub_target {
+                        Some((c_idx, 1)) => {
+                            if let Some(cor) = cfg.corridors.get_mut(c_idx) {
+                                let cname = cor.name.clone();
+                                let split_pt = cor.approach_geom.last().copied();
+                                let needs_divert = cor.divert_geom.len() < 2;
+                                cor.main_geom = geom;
+                                write_traffic_diversion_config(existing, &cfg);
+                                let updated = existing.clone();
+                                state.selected = SelectedEntity::Anim(target_aid);
+                                state.anim_edit = Some(updated);
+                                state.dirty_anim_ids.insert(target_aid);
+                                if needs_divert && let Some(sp) = split_pt {
+                                    state.draft_points_lnglat = vec![[sp[0], sp[1]]];
+                                    state.drawing_diversion_target =
+                                        Some((target_aid, Some((c_idx, 2))));
+                                    state.tool_mode = ToolMode::DrawTrafficDiversionLane;
+                                    state.status_banner = Some(format!(
+                                        "Jalur Utama '{cname}' selesai! Sekarang gambar Jalur Alternatif/Pengalihan dari titik simpang (Enter selesai)."
+                                    ));
+                                    return;
+                                }
+                                state.status_banner = Some(format!(
+                                    "Jalur Utama untuk '{cname}' selesai disimpan!"
+                                ));
+                            }
+                        }
+                        Some((c_idx, 2)) => {
+                            if let Some(cor) = cfg.corridors.get_mut(c_idx) {
+                                let cname = cor.name.clone();
+                                cor.divert_geom = geom;
+                                write_traffic_diversion_config(existing, &cfg);
+                                let updated = existing.clone();
+                                state.selected = SelectedEntity::Anim(target_aid);
+                                state.anim_edit = Some(updated);
+                                state.dirty_anim_ids.insert(target_aid);
+                                state.status_banner = Some(format!(
+                                    "Jalur Alternatif '{cname}' selesai! Pengalihan Arus siap dijalankan di Preview / Play Skenario."
+                                ));
+                            }
+                        }
+                        _ => {
+                            let new_idx = cfg.corridors.len();
+                            let cname = format!("Koridor {}", new_idx + 1);
+                            let split_pt = geom.last().copied();
+                            cfg.corridors
+                                .push(TrafficDiversionCorridor::new(cname.clone(), geom));
+                            write_traffic_diversion_config(existing, &cfg);
+                            let updated = existing.clone();
+                            state.selected = SelectedEntity::Anim(target_aid);
+                            state.anim_edit = Some(updated);
+                            state.dirty_anim_ids.insert(target_aid);
+                            if let Some(sp) = split_pt {
+                                state.draft_points_lnglat = vec![[sp[0], sp[1]]];
+                                state.drawing_diversion_target =
+                                    Some((target_aid, Some((new_idx, 1))));
+                                state.tool_mode = ToolMode::DrawTrafficDiversionLane;
+                                state.status_banner = Some(format!(
+                                    "{cname} ditambahkan! Sekarang gambar Jalur Utama/Normal dari titik simpang (Enter selesai)."
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+                state.tool_mode = ToolMode::Select;
+                return;
+            }
+
+            let div_cnt = state
+                .anims
+                .iter()
+                .filter(|a| is_traffic_diversion_anim(a))
+                .count()
+                + 1;
+            let name = if state.new_traffic_diversion_name.trim().is_empty() {
+                format!("Pengalihan Arus {div_cnt}")
+            } else {
+                state.new_traffic_diversion_name.trim().to_string()
+            };
+
+            let mut auto_pool: Vec<TrafficVehicleEntry> = state
+                .catalog
+                .iter()
+                .filter(|m| {
+                    let cat = m.category.to_lowercase();
+                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                })
+                .take(4)
+                .map(|m| TrafficVehicleEntry {
+                    model_path: m.model_path.clone(),
+                    name: m.name.clone(),
+                    scale: 1.0,
+                    length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                    weight: 1.0,
+                    rot_y_offset_deg: m.default_rotation_deg[1],
+                })
+                .collect();
+            if auto_pool.is_empty() {
+                auto_pool = state
+                    .catalog
+                    .iter()
+                    .filter(|m| m.ready)
+                    .take(2)
+                    .map(|m| TrafficVehicleEntry {
+                        model_path: m.model_path.clone(),
+                        name: m.name.clone(),
+                        scale: 1.0,
+                        length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                        weight: 1.0,
+                        rot_y_offset_deg: m.default_rotation_deg[1],
+                    })
+                    .collect();
+            }
+
+            let cfg = TrafficDiversionConfig {
+                corridors: vec![TrafficDiversionCorridor::new("Koridor 1", geom.clone())],
+                vehicle_pool: auto_pool,
+                seed: 20_261_129_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
+                ..Default::default()
+            };
+            let data = serde_json::json!({ "traffic_diversion": cfg });
+            let sort_order = (state.anims.len() + 1) as i32;
+
+            if state.offline_preview {
+                let now = chrono::Utc::now();
+                let a = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: TRAFFIC_DIVERSION_ANIM_TYPE.to_string(),
+                    sort_order,
+                    speed: 10.0,
+                    duration_sec: 0.0,
+                    replay: false,
+                    autoplay: false,
+                    geom,
+                    data,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let aid = a.id;
+                state.selected = SelectedEntity::Anim(aid);
+                state.anim_edit = Some(a.clone());
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.anims.push(a);
+                state.status_banner = Some(format!(
+                    "Pengalihan Arus '{name}' dibuat! Sekarang klik '+ Gambar Jalur Utama' lalu '+ Gambar Jalur Alternatif' di Inspector."
+                ));
+            } else if let Some(auth) = current_auth(state) {
+                api.send(ApiCommand::CreateAnim {
+                    auth,
+                    req: CreateAnimRequest {
+                        operasi_id: sk.operasi_id,
+                        skenario_id: sk.id,
+                        marker_id: None,
+                        name,
+                        anim_type: TRAFFIC_DIVERSION_ANIM_TYPE.to_string(),
+                        sort_order,
+                        speed: 10.0,
+                        duration_sec: 0.0,
+                        replay: false,
+                        autoplay: false,
+                        geom,
+                        data,
+                    },
+                });
+            }
+            state.tool_mode = ToolMode::Select;
+            state.new_traffic_diversion_name = format!("Pengalihan Arus {}", div_cnt + 1);
         }
         _ => {}
     }

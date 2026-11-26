@@ -988,6 +988,7 @@ pub enum ToolMode {
     DrawRoute,
     DrawTrafficLane,
     DrawTrafficQueueLane,
+    DrawTrafficDiversionLane,
     PickRouteMarker,
     PickShootMarker,
     PickPointerMarker,
@@ -1010,6 +1011,7 @@ impl ToolMode {
             Self::DrawRoute => "Draw Route",
             Self::DrawTrafficLane => "Draw Traffic",
             Self::DrawTrafficQueueLane => "Draw Urai Simpang",
+            Self::DrawTrafficDiversionLane => "Draw Alih Arus",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
             Self::PickPointerMarker => "Pilih Target Panah",
@@ -1171,6 +1173,24 @@ pub struct AnimRuntimeTrack {
     pub group_owned_children: Vec<Uuid>,
     /// Exact elapsed seconds when live **"Lancar"** clearance mode was triggered on a `traffic_queue` animation.
     pub queue_clearance_at_sec: Option<f64>,
+    /// Deterministic live operator commands `(elapsed_sec, QueueManualAction)` for `Kontrol Simpang Manual`.
+    pub queue_manual_events: Vec<(f64, twg_shared::traffic_queue::QueueManualAction)>,
+    /// Deterministic live diversion toggles `(elapsed_sec, is_diverted)` for `Pengalihan Arus`.
+    pub diversion_events: Vec<(f64, bool)>,
+}
+
+impl AnimRuntimeTrack {
+    /// Returns `true` when live **"Lancar"** clearance mode has been triggered (either via
+    /// automatic `queue_clearance_at_sec` or manual per-corridor `QueueManualAction::DrainCorridor`).
+    pub fn is_queue_clearing(&self) -> bool {
+        self.queue_clearance_at_sec.is_some()
+            || self.queue_manual_events.iter().any(|(_, act)| {
+                matches!(
+                    act,
+                    twg_shared::traffic_queue::QueueManualAction::DrainCorridor { .. }
+                )
+            })
+    }
 }
 
 #[derive(Resource)]
@@ -1282,6 +1302,8 @@ impl PlaybackState {
         entry.group_prev_done_at_sec = None;
         entry.group_owned_children.clear();
         entry.queue_clearance_at_sec = None;
+        entry.queue_manual_events.clear();
+        entry.diversion_events.clear();
         self.active_anim_id = Some(anim_id);
         self.playing = true;
     }
@@ -1340,6 +1362,8 @@ impl PlaybackState {
         entry.group_prev_done_at_sec = None;
         entry.group_owned_children.clear();
         entry.queue_clearance_at_sec = None;
+        entry.queue_manual_events.clear();
+        entry.diversion_events.clear();
         self.playing = self
             .tracks
             .values()
@@ -1387,6 +1411,52 @@ impl PlaybackState {
         entry.queue_clearance_at_sec
     }
 
+    /// Records a live manual intersection officer command (`OpenCorridor` / `HoldAll`) at a deterministic timestamp.
+    pub fn push_queue_manual_action(
+        &mut self,
+        anim_id: Uuid,
+        action: twg_shared::traffic_queue::QueueManualAction,
+        explicit_elapsed_sec: Option<f64>,
+    ) -> Option<f64> {
+        let entry = self.tracks.get_mut(&anim_id)?;
+        if !matches!(entry.status, AnimRunStatus::Playing | AnimRunStatus::Paused) {
+            return None;
+        }
+        let trig = explicit_elapsed_sec.unwrap_or(entry.distance_m).max(0.0);
+        entry.queue_manual_events.push((trig, action));
+        entry.queue_manual_events.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if entry.status == AnimRunStatus::Paused {
+            entry.status = AnimRunStatus::Playing;
+            self.playing = true;
+        }
+        Some(trig)
+    }
+
+    /// Records a live traffic diversion toggle (`Alihkan Arus` / `Normalkan Arus`) at a deterministic timestamp.
+    pub fn push_diversion_toggle(
+        &mut self,
+        anim_id: Uuid,
+        is_diverted: bool,
+        explicit_elapsed_sec: Option<f64>,
+    ) -> Option<f64> {
+        let entry = self.tracks.get_mut(&anim_id)?;
+        if !matches!(entry.status, AnimRunStatus::Playing | AnimRunStatus::Paused) {
+            return None;
+        }
+        let trig = explicit_elapsed_sec.unwrap_or(entry.distance_m).max(0.0);
+        entry.diversion_events.push((trig, is_diverted));
+        entry.diversion_events.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if entry.status == AnimRunStatus::Paused {
+            entry.status = AnimRunStatus::Playing;
+            self.playing = true;
+        }
+        Some(trig)
+    }
+
     pub fn play_all_routes(&mut self, anims: &[Anim]) {
         self.play_test_mode = true;
         for a in anims {
@@ -1398,6 +1468,8 @@ impl PlaybackState {
                 twg_shared::traffic_anim::parse_traffic_anim_config(a).has_playable_setup()
             } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
                 twg_shared::traffic_queue::parse_traffic_queue_config(a).has_playable_setup()
+            } else if twg_shared::traffic_diversion::is_traffic_diversion_anim(a) {
+                twg_shared::traffic_diversion::parse_traffic_diversion_config(a).has_playable_setup()
             } else if twg_shared::shoot_anim::is_shoot_anim(a)
                 || twg_shared::pointer_anim::is_pointer_arrow_anim(a)
             {
@@ -1618,10 +1690,22 @@ pub struct AppState {
     /// When `true` and `drawing_traffic_queue_target` is `None`, finishing the draft creates a
     /// `Macet Total & Urai` (`traffic_gridlock`) animation (all corridors stuck until Lancar, Pre-fill default ON).
     pub drawing_traffic_queue_is_gridlock: bool,
+    pub drawing_traffic_queue_is_manual: bool,
     pub new_traffic_queue_name: String,
     pub new_traffic_gridlock_name: String,
-    /// Live runtime status snapshots for active `traffic_queue` animations (for Play Panel & Preview UI).
+    pub new_traffic_manual_name: String,
+    /// Target for `ToolMode::DrawTrafficDiversionLane`:
+    /// - `None`: create a new `Pengalihan Arus` animation (drawing first corridor `approach_geom`)
+    /// - `Some((anim_id, None))`: add a new corridor `approach_geom` to `anim_id`
+    /// - `Some((anim_id, Some((cor_idx, 1))))`: draw/replace `main_geom` of `corridors[cor_idx]`
+    /// - `Some((anim_id, Some((cor_idx, 2))))`: draw/replace `divert_geom` of `corridors[cor_idx]`
+    pub drawing_diversion_target: Option<(Uuid, Option<(usize, u8)>)>,
+    pub new_traffic_diversion_name: String,
+    /// Live runtime status snapshots for active `traffic_queue` / `traffic_gridlock` / `traffic_manual` animations.
     pub traffic_queue_live_status: HashMap<Uuid, twg_shared::traffic_queue::TrafficQueueLiveStatus>,
+    /// Live runtime status snapshots for active `traffic_diversion` animations.
+    pub traffic_diversion_live_status:
+        HashMap<Uuid, twg_shared::traffic_diversion::TrafficDiversionLiveStatus>,
     pub traffic_pool_search: String,
     pub traffic_pool_category_filter: Option<String>,
     pub traffic_reverse_offset_m: f64,
@@ -1862,9 +1946,14 @@ impl AppState {
             traffic_model_unit_dims: HashMap::new(),
             drawing_traffic_queue_target: None,
             drawing_traffic_queue_is_gridlock: false,
+            drawing_traffic_queue_is_manual: false,
             new_traffic_queue_name: "Urai Simpang 1".to_string(),
             new_traffic_gridlock_name: "Macet Total 1".to_string(),
+            new_traffic_manual_name: "Simpang Manual 1".to_string(),
+            drawing_diversion_target: None,
+            new_traffic_diversion_name: "Pengalihan Arus 1".to_string(),
             traffic_queue_live_status: HashMap::new(),
+            traffic_diversion_live_status: HashMap::new(),
             audio_asset_search: String::new(),
             audio_status: HashMap::new(),
             scenario_audio_enabled: crate::settings::load_audio_output(),
@@ -2114,8 +2203,12 @@ impl AppState {
                         "Simulasi Traffic"
                     } else if twg_shared::traffic_queue::is_traffic_gridlock_anim(a) {
                         "Macet Total & Urai"
+                    } else if twg_shared::traffic_queue::is_traffic_manual_anim(a) {
+                        "Kontrol Simpang Manual"
                     } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
                         "Antrean & Urai Simpang"
+                    } else if twg_shared::traffic_diversion::is_traffic_diversion_anim(a) {
+                        "Pengalihan Arus"
                     } else if twg_shared::particle_anim::is_particle_anim(a) {
                         "Particle Animation"
                     } else if twg_shared::pointer_anim::is_pointer_arrow_anim(a) {

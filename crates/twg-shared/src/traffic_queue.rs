@@ -20,6 +20,21 @@ use crate::{
 
 pub const TRAFFIC_QUEUE_ANIM_TYPE: &str = "traffic_queue";
 pub const TRAFFIC_GRIDLOCK_ANIM_TYPE: &str = "traffic_gridlock";
+pub const TRAFFIC_MANUAL_ANIM_TYPE: &str = "traffic_manual";
+
+/// Live operator command for `Kontrol Simpang Manual` (`traffic_manual`), synced deterministically
+/// via WebSocket to Layar Besar with its exact `elapsed_sec` timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum QueueManualAction {
+    /// Open ONLY the corridor with original index `corridor_idx` (all others hold RED).
+    OpenCorridor { corridor_idx: usize },
+    /// Hold ALL corridors RED (vehicles already in `clear_geom` finish exiting cleanly).
+    HoldAll,
+    /// Activate live **"Lancar"** clearance (stop spawning globally, boost to `clear_speed_mps`)
+    /// and drain ONLY `corridor_idx` without auto-switching to other corridors.
+    DrainCorridor { corridor_idx: usize },
+}
 
 /// Strategy used when the operator clicks the live **"Lancar"** button to drain remaining vehicles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -143,6 +158,10 @@ pub struct TrafficQueueConfig {
     /// during the initial phase until the operator clicks **"Lancar"**.
     #[serde(default)]
     pub gridlock_mode: bool,
+    /// When `true` (`Kontrol Simpang Manual` / `traffic_manual`), turns do NOT rotate automatically
+    /// on a timer — the operator explicitly opens/holds corridors via live buttons until **"Lancar"**.
+    #[serde(default)]
+    pub manual_control_mode: bool,
     /// Deterministic PRNG seed so Operator & Layar Besar always match identically.
     #[serde(default = "default_seed")]
     pub seed: u64,
@@ -188,6 +207,7 @@ impl Default for TrafficQueueConfig {
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::default(),
             gridlock_mode: false,
+            manual_control_mode: false,
             seed: default_seed(),
         }
     }
@@ -210,6 +230,7 @@ impl TrafficQueueConfig {
             prefill_initial_queue: self.prefill_initial_queue,
             clearance_mode: self.clearance_mode,
             gridlock_mode: self.gridlock_mode,
+            manual_control_mode: self.manual_control_mode,
             seed: if self.seed == 0 { default_seed() } else { self.seed },
         }
     }
@@ -250,6 +271,7 @@ impl TrafficQueueConfig {
         self.prefill_initial_queue.hash(&mut h);
         (self.clearance_mode as u8).hash(&mut h);
         self.gridlock_mode.hash(&mut h);
+        self.manual_control_mode.hash(&mut h);
         self.seed.hash(&mut h);
         self.corridors.len().hash(&mut h);
         for c in &self.corridors {
@@ -286,12 +308,17 @@ pub fn is_traffic_gridlock_anim(anim: &Anim) -> bool {
     anim.anim_type.eq_ignore_ascii_case(TRAFFIC_GRIDLOCK_ANIM_TYPE)
 }
 
-/// Returns `true` for both `Antrean & Urai Simpang` (`traffic_queue`) and
-/// `Macet Total & Urai` (`traffic_gridlock`), which share paired queue+clearance corridors and
-/// the deterministic queue/clearance engine.
+pub fn is_traffic_manual_anim(anim: &Anim) -> bool {
+    anim.anim_type.eq_ignore_ascii_case(TRAFFIC_MANUAL_ANIM_TYPE)
+}
+
+/// Returns `true` for `Antrean & Urai Simpang` (`traffic_queue`),
+/// `Macet Total & Urai` (`traffic_gridlock`), and `Kontrol Simpang Manual` (`traffic_manual`),
+/// which share paired queue+clearance corridors and the deterministic queue/clearance engine.
 pub fn is_traffic_queue_anim(anim: &Anim) -> bool {
     anim.anim_type.eq_ignore_ascii_case(TRAFFIC_QUEUE_ANIM_TYPE)
         || is_traffic_gridlock_anim(anim)
+        || is_traffic_manual_anim(anim)
 }
 
 pub fn parse_traffic_queue_config(anim: &Anim) -> TrafficQueueConfig {
@@ -302,6 +329,10 @@ pub fn parse_traffic_queue_config(anim: &Anim) -> TrafficQueueConfig {
         .unwrap_or_default();
     if is_traffic_gridlock_anim(anim) {
         cfg.gridlock_mode = true;
+        cfg.manual_control_mode = false;
+    } else if is_traffic_manual_anim(anim) {
+        cfg.manual_control_mode = true;
+        cfg.gridlock_mode = false;
     }
     if cfg.corridors.is_empty() && anim.geom.len() >= 2 {
         cfg.corridors
@@ -314,9 +345,15 @@ pub fn write_traffic_queue_config(anim: &mut Anim, cfg: &TrafficQueueConfig) {
     let mut clean = cfg.sanitized();
     if is_traffic_gridlock_anim(anim) {
         clean.gridlock_mode = true;
+        clean.manual_control_mode = false;
+    } else if is_traffic_manual_anim(anim) {
+        clean.manual_control_mode = true;
+        clean.gridlock_mode = false;
     }
     anim.anim_type = if clean.gridlock_mode {
         TRAFFIC_GRIDLOCK_ANIM_TYPE.to_string()
+    } else if clean.manual_control_mode {
+        TRAFFIC_MANUAL_ANIM_TYPE.to_string()
     } else {
         TRAFFIC_QUEUE_ANIM_TYPE.to_string()
     };
@@ -342,6 +379,8 @@ pub fn write_traffic_queue_config(anim: &mut Anim, cfg: &TrafficQueueConfig) {
 #[derive(Debug, Clone, Default)]
 pub struct TrafficQueueLiveStatus {
     pub active_corridor_name: Option<String>,
+    /// Original corridor index in `cfg.corridors` that is currently OPEN (green), if any.
+    pub active_corridor_source_idx: Option<usize>,
     pub remaining_turn_sec: f64,
     pub is_switch_pause: bool,
     pub is_all_stopped: bool,
@@ -350,6 +389,19 @@ pub struct TrafficQueueLiveStatus {
     pub total_vehicles: usize,
     pub queued_vehicles: usize,
     pub clearing_vehicles: usize,
+    /// Per-corridor remaining vehicle counts as `(source_idx, queued_count, total_count)`.
+    pub per_corridor_counts: Vec<(usize, usize, usize)>,
+}
+
+impl TrafficQueueLiveStatus {
+    /// Returns `(queued_count, total_count)` for the corridor with original index `source_idx`.
+    pub fn corridor_counts(&self, source_idx: usize) -> (usize, usize) {
+        self.per_corridor_counts
+            .iter()
+            .find(|(idx, _, _)| *idx == source_idx)
+            .map(|&(_, q, tot)| (q, tot))
+            .unwrap_or((0, 0))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +594,8 @@ pub struct TrafficQueueSimEngine {
     phase: QueuePhase,
     clearance_active: bool,
     applied_clearance_trigger: Option<f64>,
+    applied_manual_events: Vec<(f64, QueueManualAction)>,
+    next_manual_cursor: usize,
 }
 
 const FIXED_DT: f64 = 1.0 / 30.0;
@@ -603,7 +657,7 @@ impl TrafficQueueSimEngine {
         let rng = SplitMix64::new(clean.seed);
         let initial_phase = if corridors.is_empty() {
             QueuePhase::Completed
-        } else if clean.gridlock_mode {
+        } else if clean.gridlock_mode || clean.manual_control_mode {
             QueuePhase::AllStopped
         } else {
             QueuePhase::NormalGreen {
@@ -624,6 +678,8 @@ impl TrafficQueueSimEngine {
             phase: initial_phase,
             clearance_active: false,
             applied_clearance_trigger: None,
+            applied_manual_events: Vec::new(),
+            next_manual_cursor: 0,
         };
         if engine.cfg.prefill_initial_queue {
             engine.seed_prefill_queues();
@@ -639,12 +695,14 @@ impl TrafficQueueSimEngine {
         self.render_alpha_sec = 0.0;
         self.clearance_active = false;
         self.applied_clearance_trigger = None;
+        self.applied_manual_events.clear();
+        self.next_manual_cursor = 0;
         for (i, c) in self.corridors.iter_mut().enumerate() {
             c.spawn_cooldown = 0.12 * (i as f64);
         }
         self.phase = if self.corridors.is_empty() {
             QueuePhase::Completed
-        } else if self.cfg.gridlock_mode {
+        } else if self.cfg.gridlock_mode || self.cfg.manual_control_mode {
             QueuePhase::AllStopped
         } else {
             QueuePhase::NormalGreen {
@@ -679,7 +737,7 @@ impl TrafficQueueSimEngine {
                 }
                 let id = self.next_vehicle_id;
                 self.next_vehicle_id += 1;
-                let init_speed = if self.cfg.gridlock_mode {
+                let init_speed = if self.cfg.gridlock_mode || self.cfg.manual_control_mode {
                     0.0
                 } else if c_idx == 0 {
                     self.cfg.convoy_speed_mps * 0.65
@@ -705,9 +763,41 @@ impl TrafficQueueSimEngine {
         }
     }
 
+    fn manual_events_compatible(
+        prev: &[(f64, QueueManualAction)],
+        next: &[(f64, QueueManualAction)],
+        sim_time: f64,
+    ) -> bool {
+        if next.len() < prev.len() {
+            return false;
+        }
+        for (a, b) in prev.iter().zip(next.iter()) {
+            if (a.0 - b.0).abs() > 1e-4 || a.1 != b.1 {
+                return false;
+            }
+        }
+        for &(ev_t, _) in &next[prev.len()..] {
+            if ev_t + 1e-4 < sim_time {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Deterministically advances simulation to `target_elapsed_sec` with optional live
     /// `clearance_triggered_at_sec` (exact elapsed second when **"Lancar"** was clicked).
     pub fn advance_to(&mut self, target_elapsed_sec: f64, clearance_triggered_at_sec: Option<f64>) {
+        self.advance_to_with_manual(target_elapsed_sec, clearance_triggered_at_sec, &[]);
+    }
+
+    /// Deterministically advances simulation with both live **"Lancar"** trigger and live
+    /// `Kontrol Simpang Manual` events (`(elapsed_sec, QueueManualAction)`).
+    pub fn advance_to_with_manual(
+        &mut self,
+        target_elapsed_sec: f64,
+        clearance_triggered_at_sec: Option<f64>,
+        manual_events: &[(f64, QueueManualAction)],
+    ) {
         if self.corridors.is_empty() || self.cfg.vehicle_pool.is_empty() {
             return;
         }
@@ -718,10 +808,14 @@ impl TrafficQueueSimEngine {
             (None, Some(t)) => t + 1e-4 < self.sim_time,
             (Some(_), None) => true,
         };
-        if target + 1e-4 < self.sim_time || trigger_changed {
+        let manual_changed =
+            !Self::manual_events_compatible(&self.applied_manual_events, manual_events, self.sim_time);
+        if target + 1e-4 < self.sim_time || trigger_changed || manual_changed {
             self.reset();
         }
         self.applied_clearance_trigger = clearance_triggered_at_sec;
+        self.applied_manual_events.clear();
+        self.applied_manual_events.extend_from_slice(manual_events);
 
         // Strictly never overshoot `target` (`sim_time + FIXED_DT <= target + 1e-9`) so
         // forward playback at ANY framerate (30–240 FPS) NEVER triggers false resets or flicker!
@@ -742,58 +836,80 @@ impl TrafficQueueSimEngine {
     pub fn live_status(&self) -> TrafficQueueLiveStatus {
         let mut queued = 0usize;
         let mut clearing = 0usize;
+        let mut per_corridor_counts: Vec<(usize, usize, usize)> = self
+            .corridors
+            .iter()
+            .map(|c| (c.source_idx, 0usize, 0usize))
+            .collect();
         for v in &self.vehicles {
             if v.committed_to_clear {
                 clearing += 1;
             } else {
                 queued += 1;
             }
+            if let Some(slot) = per_corridor_counts.get_mut(v.corridor_idx) {
+                if !v.committed_to_clear {
+                    slot.1 += 1;
+                }
+                slot.2 += 1;
+            }
         }
         let is_all_stopped = self.phase == QueuePhase::AllStopped;
-        let (active_corridor_name, remaining_turn_sec, is_switch_pause) = match self.phase {
-            QueuePhase::AllStopped => (None, 0.0, false),
-            QueuePhase::NormalGreen {
-                corridor_idx,
-                timer,
-                ..
-            } => {
-                let c = self.corridors.get(corridor_idx);
-                let name = c.map(|x| x.name.clone());
-                let rem = c
-                    .map(|x| (x.turn_duration_sec - timer).max(0.0))
-                    .unwrap_or(0.0);
-                (name, rem, false)
-            }
-            QueuePhase::SwitchPause {
-                next_corridor_idx,
-                timer,
-                is_clearance,
-            } => {
-                let name = self.corridors.get(next_corridor_idx).map(|x| x.name.clone());
-                let pause_total = if is_clearance {
-                    self.cfg.switch_pause_sec.min(1.0)
-                } else {
-                    self.cfg.switch_pause_sec
-                };
-                (name, (pause_total - timer).max(0.0), true)
-            }
-            QueuePhase::ClearanceDrain {
-                corridor_idx,
-                timer,
-            } => {
-                let c = self.corridors.get(corridor_idx);
-                let rem = if self.cfg.clearance_mode == QueueClearanceMode::AlternatingTimed {
-                    c.map(|x| (x.turn_duration_sec - timer).max(0.0))
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                (c.map(|x| x.name.clone()), rem, false)
-            }
-            QueuePhase::Completed => (None, 0.0, false),
-        };
+        let (active_corridor_name, active_corridor_source_idx, remaining_turn_sec, is_switch_pause) =
+            match self.phase {
+                QueuePhase::AllStopped => (None, None, 0.0, false),
+                QueuePhase::NormalGreen {
+                    corridor_idx,
+                    timer,
+                    ..
+                } => {
+                    let c = self.corridors.get(corridor_idx);
+                    let name = c.map(|x| x.name.clone());
+                    let src_idx = c.map(|x| x.source_idx);
+                    let rem = if self.cfg.manual_control_mode {
+                        0.0
+                    } else {
+                        c.map(|x| (x.turn_duration_sec - timer).max(0.0))
+                            .unwrap_or(0.0)
+                    };
+                    (name, src_idx, rem, false)
+                }
+                QueuePhase::SwitchPause {
+                    next_corridor_idx,
+                    timer,
+                    is_clearance,
+                } => {
+                    let name = self
+                        .corridors
+                        .get(next_corridor_idx)
+                        .map(|x| x.name.clone());
+                    let pause_total = if is_clearance {
+                        self.cfg.switch_pause_sec.min(1.0)
+                    } else {
+                        self.cfg.switch_pause_sec
+                    };
+                    (name, None, (pause_total - timer).max(0.0), true)
+                }
+                QueuePhase::ClearanceDrain {
+                    corridor_idx,
+                    timer,
+                } => {
+                    let c = self.corridors.get(corridor_idx);
+                    let rem = if !self.cfg.manual_control_mode
+                        && self.cfg.clearance_mode == QueueClearanceMode::AlternatingTimed
+                    {
+                        c.map(|x| (x.turn_duration_sec - timer).max(0.0))
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    (c.map(|x| x.name.clone()), c.map(|x| x.source_idx), rem, false)
+                }
+                QueuePhase::Completed => (None, None, 0.0, false),
+            };
         TrafficQueueLiveStatus {
             active_corridor_name,
+            active_corridor_source_idx,
             remaining_turn_sec,
             is_switch_pause,
             is_all_stopped,
@@ -802,6 +918,7 @@ impl TrafficQueueSimEngine {
             total_vehicles: self.vehicles.len(),
             queued_vehicles: queued,
             clearing_vehicles: clearing,
+            per_corridor_counts,
         }
     }
 
@@ -1014,7 +1131,53 @@ impl TrafficQueueSimEngine {
     }
 
     fn step(&mut self, dt: f64, clearance_triggered_at_sec: Option<f64>) {
-        // 1. Activate live "Lancar" clearance mode at exact deterministic trigger timestamp
+        // 1a. Apply deterministic live manual officer commands (`Kontrol Simpang Manual`)
+        if self.cfg.manual_control_mode {
+            while self.next_manual_cursor < self.applied_manual_events.len()
+                && self.sim_time + 1e-6 >= self.applied_manual_events[self.next_manual_cursor].0
+            {
+                let act = self.applied_manual_events[self.next_manual_cursor].1;
+                self.next_manual_cursor += 1;
+                match act {
+                    QueueManualAction::HoldAll => {
+                        if !self.clearance_active {
+                            self.phase = QueuePhase::AllStopped;
+                        }
+                    }
+                    QueueManualAction::OpenCorridor { corridor_idx } => {
+                        if !self.clearance_active
+                            && let Some(compiled_idx) = self
+                                .corridors
+                                .iter()
+                                .position(|c| c.source_idx == corridor_idx)
+                        {
+                            self.phase = QueuePhase::NormalGreen {
+                                corridor_idx: compiled_idx,
+                                timer: 0.0,
+                                engaged: true,
+                            };
+                        }
+                    }
+                    QueueManualAction::DrainCorridor { corridor_idx } => {
+                        self.clearance_active = true;
+                        if let Some(compiled_idx) = self
+                            .corridors
+                            .iter()
+                            .position(|c| c.source_idx == corridor_idx)
+                        {
+                            self.phase = QueuePhase::ClearanceDrain {
+                                corridor_idx: compiled_idx,
+                                timer: 0.0,
+                            };
+                        } else if self.vehicles.is_empty() {
+                            self.phase = QueuePhase::Completed;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1b. Activate live "Lancar" clearance mode at exact deterministic trigger timestamp
         if !self.clearance_active
             && let Some(trig) = clearance_triggered_at_sec
             && self.sim_time + 1e-6 >= trig
@@ -1046,7 +1209,9 @@ impl TrafficQueueSimEngine {
                 mut timer,
                 mut engaged,
             } => {
-                if n_corridors >= 2 {
+                // In `Kontrol Simpang Manual`, never auto-rotate on timer — stay open until
+                // the operator explicitly picks another corridor, HoldAll, or Lancar!
+                if !self.cfg.manual_control_mode && n_corridors >= 2 {
                     let cur_active = self.corridor_has_approaching_or_queued(corridor_idx)
                         || self
                             .vehicles
@@ -1159,45 +1324,10 @@ impl TrafficQueueSimEngine {
                 mut timer,
             } => {
                 timer += dt;
-                let cur_has_queue = self.corridor_has_queued_vehicles(corridor_idx);
-                let turn_dur = self
-                    .corridors
-                    .get(corridor_idx)
-                    .map(|c| c.turn_duration_sec)
-                    .unwrap_or(self.cfg.turn_duration_sec);
-                let timed_switch_due = self.cfg.clearance_mode
-                    == QueueClearanceMode::AlternatingTimed
-                    && timer >= turn_dur;
-
-                if !cur_has_queue || timed_switch_due {
-                    let next_search = if n_corridors > 0 {
-                        (corridor_idx + 1) % n_corridors
-                    } else {
-                        0
-                    };
-                    if let Some(next_idx) = self.find_next_queued_corridor(next_search) {
-                        if next_idx != corridor_idx {
-                            let pause_dur = self.cfg.switch_pause_sec.min(1.0);
-                            if pause_dur > 0.01 {
-                                self.phase = QueuePhase::SwitchPause {
-                                    next_corridor_idx: next_idx,
-                                    timer: 0.0,
-                                    is_clearance: true,
-                                };
-                            } else {
-                                self.phase = QueuePhase::ClearanceDrain {
-                                    corridor_idx: next_idx,
-                                    timer: 0.0,
-                                };
-                            }
-                        } else {
-                            // Only this corridor still has queued vehicles; keep draining it
-                            self.phase = QueuePhase::ClearanceDrain {
-                                corridor_idx,
-                                timer: 0.0,
-                            };
-                        }
-                    } else if self.vehicles.is_empty() {
+                if self.cfg.manual_control_mode {
+                    // In `Kontrol Simpang Manual`, operator explicitly triggers `Lancar Jalur A/B/C`:
+                    // NEVER auto-switch to another corridor when the current corridor finishes draining.
+                    if self.vehicles.is_empty() {
                         self.phase = QueuePhase::Completed;
                     } else {
                         self.phase = QueuePhase::ClearanceDrain {
@@ -1206,18 +1336,69 @@ impl TrafficQueueSimEngine {
                         };
                     }
                 } else {
-                    self.phase = QueuePhase::ClearanceDrain {
-                        corridor_idx,
-                        timer,
-                    };
+                    let cur_has_queue = self.corridor_has_queued_vehicles(corridor_idx);
+                    let turn_dur = self
+                        .corridors
+                        .get(corridor_idx)
+                        .map(|c| c.turn_duration_sec)
+                        .unwrap_or(self.cfg.turn_duration_sec);
+                    let timed_switch_due = self.cfg.clearance_mode
+                        == QueueClearanceMode::AlternatingTimed
+                        && timer >= turn_dur;
+
+                    if !cur_has_queue || timed_switch_due {
+                        let next_search = if n_corridors > 0 {
+                            (corridor_idx + 1) % n_corridors
+                        } else {
+                            0
+                        };
+                        if let Some(next_idx) = self.find_next_queued_corridor(next_search) {
+                            if next_idx != corridor_idx {
+                                let pause_dur = self.cfg.switch_pause_sec.min(1.0);
+                                if pause_dur > 0.01 {
+                                    self.phase = QueuePhase::SwitchPause {
+                                        next_corridor_idx: next_idx,
+                                        timer: 0.0,
+                                        is_clearance: true,
+                                    };
+                                } else {
+                                    self.phase = QueuePhase::ClearanceDrain {
+                                        corridor_idx: next_idx,
+                                        timer: 0.0,
+                                    };
+                                }
+                            } else {
+                                // Only this corridor still has queued vehicles; keep draining it
+                                self.phase = QueuePhase::ClearanceDrain {
+                                    corridor_idx,
+                                    timer: 0.0,
+                                };
+                            }
+                        } else if self.vehicles.is_empty() {
+                            self.phase = QueuePhase::Completed;
+                        } else {
+                            self.phase = QueuePhase::ClearanceDrain {
+                                corridor_idx,
+                                timer,
+                            };
+                        }
+                    } else {
+                        self.phase = QueuePhase::ClearanceDrain {
+                            corridor_idx,
+                            timer,
+                        };
+                    }
                 }
             }
             QueuePhase::Completed => {}
         }
 
         // 4. Update all vehicle motions front-to-back per corridor (pure constant-speed convoy, no overtaking)
-        // In Gridlock + Pre-fill mode before "Lancar" is clicked, keep every vehicle 100% frozen in place.
-        if self.phase == QueuePhase::AllStopped && self.cfg.prefill_initial_queue {
+        // In Gridlock/Manual + Pre-fill mode while AllStopped and no vehicles are mid-exit, keep vehicles frozen.
+        if self.phase == QueuePhase::AllStopped
+            && self.cfg.prefill_initial_queue
+            && self.vehicles.iter().all(|v| !v.committed_to_clear)
+        {
             return;
         }
         let cruise_speed = if self.clearance_active {
@@ -1460,6 +1641,7 @@ mod tests {
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::DrainCorridor,
             gridlock_mode: false,
+            manual_control_mode: false,
             seed: 42,
         };
         let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
@@ -1545,6 +1727,7 @@ mod tests {
             prefill_initial_queue: false,
             clearance_mode: QueueClearanceMode::DrainCorridor,
             gridlock_mode: false,
+            manual_control_mode: false,
             seed: 99,
         };
         let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
@@ -1975,6 +2158,90 @@ mod tests {
 
         // Trigger Lancar -> drains all to 0!
         engine.advance_to(50.0, Some(20.0));
+        assert!(engine.is_completely_cleared());
+    }
+
+    #[test]
+    fn manual_control_mode_opens_and_holds_corridors_explicitly_until_lancar() {
+        let anchor = test_anchor();
+        let cor_a = corridor_local(
+            anchor,
+            "Jalur A",
+            [-70.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [65.0, 0.0, 0.0],
+        );
+        let cor_b = corridor_local(
+            anchor,
+            "Jalur B",
+            [0.0, 0.0, -70.0],
+            [0.0, 0.0, -5.0],
+            [0.0, 0.0, 65.0],
+        );
+        let cfg = TrafficQueueConfig {
+            corridors: vec![cor_a, cor_b],
+            vehicle_pool: sample_pool(),
+            convoy_speed_mps: 9.0,
+            clear_speed_mps: 18.0,
+            turn_duration_sec: 4.0,
+            prefill_initial_queue: true,
+            manual_control_mode: true,
+            seed: 606,
+            ..Default::default()
+        };
+        let mut engine = TrafficQueueSimEngine::new(&cfg, anchor);
+        // Starts AllStopped until operator opens a corridor
+        engine.advance_to_with_manual(3.0, None, &[]);
+        assert!(engine.live_status().is_all_stopped);
+        assert!(engine.vehicles.iter().all(|v| !v.committed_to_clear));
+
+        // Operator opens ONLY Jalur B (source_idx = 1) at t = 3.0s -> stays open past turn_duration_sec (4.0s)!
+        let ev1 = vec![(3.0, QueueManualAction::OpenCorridor { corridor_idx: 1 })];
+        engine.advance_to_with_manual(12.0, None, &ev1);
+        assert_eq!(engine.live_status().active_corridor_source_idx, Some(1));
+        assert!(engine.vehicles.iter().any(|v| v.corridor_idx == 1 && v.committed_to_clear));
+        assert!(engine.vehicles.iter().all(|v| v.corridor_idx != 0 || !v.committed_to_clear));
+
+        // Operator clicks HoldAll at t = 12.0s, then opens Jalur A at t = 14.0s
+        let ev2 = vec![
+            (3.0, QueueManualAction::OpenCorridor { corridor_idx: 1 }),
+            (12.0, QueueManualAction::HoldAll),
+            (14.0, QueueManualAction::OpenCorridor { corridor_idx: 0 }),
+        ];
+        engine.advance_to_with_manual(18.0, None, &ev2);
+        assert_eq!(engine.live_status().active_corridor_source_idx, Some(0));
+        assert!(engine.vehicles.iter().any(|v| v.corridor_idx == 0 && v.committed_to_clear));
+
+        // Operator clicks Lancar Jalur A (DrainCorridor 0) at t = 18.0s:
+        // - Stops spawning globally & drains Jalur A to 0
+        // - Does NOT auto-switch to Jalur B (Jalur B stays queued waiting for operator!)
+        // - Any subsequent OpenCorridor/HoldAll after DrainCorridor is ignored
+        let ev3 = vec![
+            (3.0, QueueManualAction::OpenCorridor { corridor_idx: 1 }),
+            (12.0, QueueManualAction::HoldAll),
+            (14.0, QueueManualAction::OpenCorridor { corridor_idx: 0 }),
+            (18.0, QueueManualAction::DrainCorridor { corridor_idx: 0 }),
+            (20.0, QueueManualAction::HoldAll),
+        ];
+        engine.advance_to_with_manual(35.0, None, &ev3);
+        let st_after_a = engine.live_status();
+        assert!(st_after_a.clearance_active);
+        assert_eq!(st_after_a.active_corridor_source_idx, Some(0));
+        assert_eq!(
+            st_after_a.corridor_counts(0),
+            (0, 0),
+            "Jalur A should have completely drained to 0"
+        );
+        assert!(
+            st_after_a.corridor_counts(1).0 > 0,
+            "Jalur B must stay queued until operator clicks Lancar Jalur B"
+        );
+        assert!(!engine.is_completely_cleared());
+
+        // Operator clicks Lancar Jalur B (DrainCorridor 1) at t = 35.0s -> drains remaining Jalur B to 0!
+        let mut ev4 = ev3;
+        ev4.push((35.0, QueueManualAction::DrainCorridor { corridor_idx: 1 }));
+        engine.advance_to_with_manual(65.0, None, &ev4);
         assert!(engine.is_completely_cleared());
     }
 }

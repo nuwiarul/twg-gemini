@@ -6,6 +6,7 @@ use twg_shared::{
     particle_anim::{is_particle_anim, particle_anim_position},
     spawn_hide_anim::SpawnHideAction,
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
 use uuid::Uuid;
@@ -390,6 +391,141 @@ pub fn draw_lines_and_routes_system(
                 }
                 continue;
             }
+            if is_traffic_diversion_anim(anim) {
+                let cfg = parse_traffic_diversion_config(anim);
+                let is_selected =
+                    matches!(state.selected, SelectedEntity::Anim(id) if id == anim.id);
+                let editing_encoded = if route_edit.is_editing(anim.id) {
+                    route_edit.traffic_lane_idx
+                } else {
+                    None
+                };
+                let is_hovered = matches!(
+                    gizmo_state.hovered_entity,
+                    Some(SelectedEntity::Anim(id)) if id == anim.id
+                );
+                let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+
+                for (c_idx, cor) in cfg.corridors.iter().enumerate() {
+                    let parts = [
+                        (0usize, &cor.approach_geom, Color::srgb(0.22, 0.74, 0.98)),
+                        (1usize, &cor.main_geom, Color::srgb(0.08, 0.88, 0.56)),
+                        (2usize, &cor.divert_geom, Color::srgb(0.98, 0.62, 0.12)),
+                    ];
+                    for (part, geom, default_col) in parts {
+                        if geom.len() < 2 {
+                            continue;
+                        }
+                        let encoded = c_idx * 3 + part;
+                        let is_editing_part = editing_encoded == Some(encoded);
+                        let col = if !cor.enabled {
+                            Color::srgba(0.45, 0.50, 0.58, 0.45)
+                        } else if is_editing_part {
+                            Color::srgb(0.20, 0.98, 0.68)
+                        } else if is_hovered {
+                            Color::srgb(1.0, 0.86, 0.28)
+                        } else {
+                            default_col
+                        };
+                        let pts: Vec<Vec3> = geom
+                            .iter()
+                            .map(|p| {
+                                Vec3::from_array(
+                                    state
+                                        .geo_anchor
+                                        .lng_lat_alt_to_local(p[0], p[1], p[2].max(0.45)),
+                                )
+                            })
+                            .collect();
+                        for w in pts.windows(2) {
+                            gizmos.line(w[0], w[1], col);
+                            if is_selected || is_hovered || is_editing_part {
+                                gizmos.line(w[0] + Vec3::Y * 0.12, w[1] + Vec3::Y * 0.12, col);
+                            }
+                            let seg = w[1] - w[0];
+                            let seg_len = Vec2::new(seg.x, seg.z).length();
+                            if seg_len >= 4.0 {
+                                let fwd = Vec3::new(seg.x, 0.0, seg.z).normalize_or_zero();
+                                let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+                                let arrow_count = ((seg_len / 24.0).floor() as usize).clamp(1, 10);
+                                for k in 0..arrow_count {
+                                    let t = (k as f32 + 0.5) / arrow_count as f32;
+                                    let tip = w[0].lerp(w[1], t) + fwd * 0.9;
+                                    let wing_back = tip - fwd * 1.9;
+                                    gizmos.line(tip, wing_back + right * 0.95, col);
+                                    gizmos.line(tip, wing_back - right * 0.95, col);
+                                }
+                            }
+                        }
+                        if !is_editing_part {
+                            if part == 0 {
+                                if let Some(&start_p) = pts.first() {
+                                    gizmos.circle(
+                                        Isometry3d::new(start_p, flat_rot),
+                                        if is_selected { 1.3 } else { 0.9 },
+                                        Color::srgb(0.22, 0.74, 0.98),
+                                    );
+                                }
+                                // Bold split-point junction ring at the end of `approach_geom`
+                                if let Some(&split_p) = pts.last() {
+                                    let split_col = if cor.is_complete() {
+                                        Color::srgb(0.98, 0.84, 0.18)
+                                    } else {
+                                        Color::srgb(0.98, 0.30, 0.35)
+                                    };
+                                    gizmos.circle(
+                                        Isometry3d::new(split_p, flat_rot),
+                                        if is_selected { 1.85 } else { 1.4 },
+                                        split_col,
+                                    );
+                                }
+                            } else if let Some(&end_p) = pts.last() {
+                                gizmos.circle(
+                                    Isometry3d::new(end_p, flat_rot),
+                                    if is_selected { 1.1 } else { 0.8 },
+                                    col,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Draw on-map vehicle footprint guides for up to 2 preview models
+                for sp in resolve_traffic_scale_preview_poses(&state) {
+                    if sp.anim_id != anim.id {
+                        continue;
+                    }
+                    let yaw = sp.road_yaw_deg.to_radians();
+                    let fwd = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                    let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+                    let half_l = (sp.visual_length_m * 0.5).max(0.75);
+                    let half_w = (sp.visual_width_m * 0.5).max(0.6);
+                    let base = Vec3::new(sp.world_pos.x, sp.world_pos.y + 0.14, sp.world_pos.z);
+                    let fl = base + fwd * half_l - right * half_w;
+                    let fr = base + fwd * half_l + right * half_w;
+                    let br = base - fwd * half_l + right * half_w;
+                    let bl = base - fwd * half_l - right * half_w;
+                    let box_col = if sp.is_active_gizmo {
+                        Color::srgb(0.22, 0.92, 0.98)
+                    } else {
+                        Color::srgb(0.98, 0.68, 0.16)
+                    };
+                    let arrow_col = if sp.is_active_gizmo {
+                        Color::srgb(0.98, 0.85, 0.2)
+                    } else {
+                        Color::srgb(0.98, 0.68, 0.16)
+                    };
+                    gizmos.line(fl, fr, box_col);
+                    gizmos.line(fr, br, box_col);
+                    gizmos.line(br, bl, box_col);
+                    gizmos.line(bl, fl, box_col);
+                    let tip = base + fwd * (half_l + 1.6);
+                    gizmos.line(base + fwd * half_l, tip, arrow_col);
+                    gizmos.line(tip, tip - fwd * 0.6 + right * 0.45, arrow_col);
+                    gizmos.line(tip, tip - fwd * 0.6 - right * 0.45, arrow_col);
+                }
+                continue;
+            }
             if anim.geom.len() < 2 {
                 continue;
             }
@@ -539,13 +675,22 @@ pub fn draw_lines_and_routes_system(
         }
     }
 
-    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane draft
+    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane / DrawTrafficDiversionLane draft
     if matches!(
         state.tool_mode,
-        ToolMode::DrawRoute | ToolMode::DrawTrafficLane | ToolMode::DrawTrafficQueueLane
+        ToolMode::DrawRoute
+            | ToolMode::DrawTrafficLane
+            | ToolMode::DrawTrafficQueueLane
+            | ToolMode::DrawTrafficDiversionLane
     ) && !state.draft_points_lnglat.is_empty()
     {
-        let color = if state.tool_mode == ToolMode::DrawTrafficQueueLane {
+        let color = if state.tool_mode == ToolMode::DrawTrafficDiversionLane {
+            match state.drawing_diversion_target {
+                Some((_, Some((_, 1)))) => Color::srgb(0.08, 0.92, 0.58),
+                Some((_, Some((_, 2)))) => Color::srgb(0.98, 0.62, 0.12),
+                _ => Color::srgb(0.22, 0.74, 0.98),
+            }
+        } else if state.tool_mode == ToolMode::DrawTrafficQueueLane {
             if matches!(state.drawing_traffic_queue_target, Some((_, Some(_)))) {
                 Color::srgb(0.08, 0.92, 0.64)
             } else {

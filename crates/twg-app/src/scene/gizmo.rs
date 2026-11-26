@@ -6,6 +6,9 @@ use twg_shared::{
     models::{Anim, Marker},
     particle_anim::{is_particle_anim, particle_anim_position, set_particle_anim_position},
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
+    traffic_diversion::{
+        is_traffic_diversion_anim, parse_traffic_diversion_config, write_traffic_diversion_config,
+    },
     traffic_queue::{
         is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
     },
@@ -657,9 +660,16 @@ pub fn update_gizmo_drag(
         let synced_len = state
             .anims
             .iter()
-            .find(|a| a.id == anim_id && (is_traffic_anim(a) || is_traffic_queue_anim(a)))
+            .find(|a| {
+                a.id == anim_id
+                    && (is_traffic_anim(a)
+                        || is_traffic_queue_anim(a)
+                        || is_traffic_diversion_anim(a))
+            })
             .and_then(|a| {
-                let pool = if is_traffic_queue_anim(a) {
+                let pool = if is_traffic_diversion_anim(a) {
+                    parse_traffic_diversion_config(a).vehicle_pool
+                } else if is_traffic_queue_anim(a) {
                     parse_traffic_queue_config(a).vehicle_pool
                 } else {
                     parse_traffic_anim_config(a).vehicle_pool
@@ -668,12 +678,25 @@ pub fn update_gizmo_drag(
                 measured_vehicle_scaled_dims(state, &e.model_path, new_scale as f32, e.rot_y_offset_deg)
                     .map(|[_, _, ml]| round_clean((ml as f64).clamp(1.2, 24.0), 1))
             });
-        if let Some(anim) = state
-            .anims
-            .iter_mut()
-            .find(|a| a.id == anim_id && (is_traffic_anim(a) || is_traffic_queue_anim(a)))
-        {
-            let updated_entry = if is_traffic_queue_anim(anim) {
+        if let Some(anim) = state.anims.iter_mut().find(|a| {
+            a.id == anim_id
+                && (is_traffic_anim(a)
+                    || is_traffic_queue_anim(a)
+                    || is_traffic_diversion_anim(a))
+        }) {
+            let updated_entry = if is_traffic_diversion_anim(anim) {
+                let mut cfg = parse_traffic_diversion_config(anim);
+                if let Some(entry) = cfg.vehicle_pool.get_mut(pool_idx) {
+                    entry.scale = new_scale;
+                    if let Some(ml) = synced_len {
+                        entry.length_m = ml;
+                    }
+                    write_traffic_diversion_config(anim, &cfg);
+                    true
+                } else {
+                    false
+                }
+            } else if is_traffic_queue_anim(anim) {
                 let mut cfg = parse_traffic_queue_config(anim);
                 if let Some(entry) = cfg.vehicle_pool.get_mut(pool_idx) {
                     entry.scale = new_scale;

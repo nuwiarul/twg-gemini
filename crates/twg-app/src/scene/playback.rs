@@ -18,6 +18,7 @@ use twg_shared::{
     shoot_anim::{is_shoot_anim, shoot_anim_effective_duration_sec, shoot_anim_is_continuous},
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
 use uuid::Uuid;
@@ -123,6 +124,7 @@ pub fn playback_system(
             ToolMode::DrawRoute
                 | ToolMode::DrawTrafficLane
                 | ToolMode::DrawTrafficQueueLane
+                | ToolMode::DrawTrafficDiversionLane
                 | ToolMode::PickRouteMarker
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
@@ -255,6 +257,22 @@ pub fn playback_system(
         // live "Lancar" drains all remaining vehicles to zero (marked Finished by `traffic_visual_system`).
         if is_traffic_queue_anim(anim) {
             let cfg = parse_traffic_queue_config(anim);
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = 0.0;
+
+            if track.status == AnimRunStatus::Playing {
+                if !cfg.has_playable_setup() {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += step_dt;
+                }
+            }
+            continue;
+        }
+
+        // Pengalihan Arus (`traffic_diversion`) tracks elapsed seconds continuously
+        if is_traffic_diversion_anim(anim) {
+            let cfg = parse_traffic_diversion_config(anim);
             let track = playback.tracks.entry(anim.id).or_default();
             track.total_length_m = 0.0;
 

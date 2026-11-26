@@ -416,6 +416,7 @@ pub fn draw_top_bar(
                         | ToolMode::DrawRoute
                         | ToolMode::DrawTrafficLane
                         | ToolMode::DrawTrafficQueueLane
+                        | ToolMode::DrawTrafficDiversionLane
                 ) && !state.draft_points_lnglat.is_empty()
                 {
                     let finish_btn = egui::Button::new(
@@ -432,6 +433,8 @@ pub fn draw_top_bar(
                         state.drawing_traffic_lane_for_anim_id = None;
                         state.drawing_traffic_queue_target = None;
                         state.drawing_traffic_queue_is_gridlock = false;
+                        state.drawing_traffic_queue_is_manual = false;
+                        state.drawing_diversion_target = None;
                         state.tool_mode = ToolMode::Select;
                     }
                 }
@@ -616,6 +619,60 @@ pub fn broadcast_tactical_queue_clear_cmd(
         command: "traffic_queue_clear".into(),
         payload: serde_json::json!({
             "anim_id": anim_id,
+            "trigger_elapsed_sec": trigger_elapsed_sec,
+        }),
+        save_history: false,
+    }));
+}
+
+pub fn broadcast_tactical_queue_manual_cmd(
+    state: &AppState,
+    ws: &WsClientBridge,
+    anim_id: uuid::Uuid,
+    action: twg_shared::traffic_queue::QueueManualAction,
+    trigger_elapsed_sec: f64,
+) {
+    if state.offline_preview || !state.is_tactical_live() {
+        return;
+    }
+    let Some(sk) = &state.active_skenario else {
+        return;
+    };
+    ws.send(WsOutCommand::SendCommand(TacticalCommand {
+        operasi_id: sk.operasi_id,
+        skenario_id: sk.id,
+        marker_id: None,
+        command: "traffic_queue_manual".into(),
+        payload: serde_json::json!({
+            "anim_id": anim_id,
+            "manual_action": action,
+            "trigger_elapsed_sec": trigger_elapsed_sec,
+        }),
+        save_history: false,
+    }));
+}
+
+pub fn broadcast_tactical_diversion_toggle_cmd(
+    state: &AppState,
+    ws: &WsClientBridge,
+    anim_id: uuid::Uuid,
+    is_diverted: bool,
+    trigger_elapsed_sec: f64,
+) {
+    if state.offline_preview || !state.is_tactical_live() {
+        return;
+    }
+    let Some(sk) = &state.active_skenario else {
+        return;
+    };
+    ws.send(WsOutCommand::SendCommand(TacticalCommand {
+        operasi_id: sk.operasi_id,
+        skenario_id: sk.id,
+        marker_id: None,
+        command: "traffic_diversion_toggle".into(),
+        payload: serde_json::json!({
+            "anim_id": anim_id,
+            "is_diverted": is_diverted,
             "trigger_elapsed_sec": trigger_elapsed_sec,
         }),
         save_history: false,

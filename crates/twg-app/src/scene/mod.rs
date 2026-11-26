@@ -161,6 +161,17 @@ pub fn anim_primary_focus_lnglat(
             return Some((p[0], p[1]));
         }
     }
+    if twg_shared::traffic_diversion::is_traffic_diversion_anim(anim) {
+        let cfg = twg_shared::traffic_diversion::parse_traffic_diversion_config(anim);
+        if let Some(p) = cfg.corridors.iter().find_map(|c| {
+            c.approach_geom
+                .first()
+                .or_else(|| c.main_geom.first())
+                .or_else(|| c.divert_geom.first())
+        }) {
+            return Some((p[0], p[1]));
+        }
+    }
     if let Some(p) = anim.geom.first() {
         return Some((p[0], p[1]));
     }

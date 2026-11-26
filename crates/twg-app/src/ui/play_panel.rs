@@ -16,8 +16,10 @@ use twg_shared::{
     },
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{
-        is_traffic_gridlock_anim, is_traffic_queue_anim, parse_traffic_queue_config,
+        QueueManualAction, is_traffic_gridlock_anim, is_traffic_manual_anim,
+        is_traffic_queue_anim, parse_traffic_queue_config,
     },
 };
 use uuid::Uuid;
@@ -36,7 +38,10 @@ use crate::{
     ui::{
         nav_bar::{open_tactical_skenario, trigger_load_tactical_operasis},
         spinner::{SpinnerConfig, numeric_spinner_f32_w},
-        topbar::{broadcast_tactical_anim_cmd, broadcast_tactical_queue_clear_cmd},
+        topbar::{
+            broadcast_tactical_anim_cmd, broadcast_tactical_diversion_toggle_cmd,
+            broadcast_tactical_queue_clear_cmd, broadcast_tactical_queue_manual_cmd,
+        },
     },
 };
 use twg_shared::ws::{TacticalCommand, WsClientMode};
@@ -464,6 +469,8 @@ pub fn draw_play_animation_panel(
             let mut action_resume: Option<Uuid> = None;
             let mut action_stop: Option<Uuid> = None;
             let mut action_queue_clear: Option<Uuid> = None;
+            let mut action_queue_manual: Option<(Uuid, QueueManualAction)> = None;
+            let mut action_diversion_toggle: Option<(Uuid, bool)> = None;
 
             let selected_cat = playback.play_panel_category;
             let search_query = playback.play_panel_search.trim().to_lowercase();
@@ -645,7 +652,9 @@ pub fn draw_play_animation_panel(
                         let is_particle = is_particle_anim(anim);
                         let is_traffic = is_traffic_anim(anim);
                         let is_traffic_gridlock = is_traffic_gridlock_anim(anim);
+                        let is_traffic_manual = is_traffic_manual_anim(anim);
                         let is_traffic_queue = is_traffic_queue_anim(anim);
+                        let is_traffic_diversion = is_traffic_diversion_anim(anim);
                         let is_pointer = is_pointer_arrow_anim(anim);
                         let is_spawn_hide = is_spawn_hide_anim(anim);
                         let is_group = is_group_anim(anim);
@@ -667,6 +676,16 @@ pub fn draw_play_animation_panel(
                         };
                         let tq_live = if is_traffic_queue {
                             state.traffic_queue_live_status.get(&anim.id).cloned()
+                        } else {
+                            None
+                        };
+                        let td_cfg = if is_traffic_diversion {
+                            Some(parse_traffic_diversion_config(anim))
+                        } else {
+                            None
+                        };
+                        let td_live = if is_traffic_diversion {
+                            state.traffic_diversion_live_status.get(&anim.id).cloned()
                         } else {
                             None
                         };
@@ -710,7 +729,7 @@ pub fn draw_play_animation_panel(
                                 let dur = anim.duration_sec.max(10.0);
                                 (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
                             }
-                        } else if tq_cfg.is_some() {
+                        } else if tq_cfg.is_some() || td_cfg.is_some() {
                             let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
                             let p = if status == AnimRunStatus::Finished {
                                 1.0
@@ -889,9 +908,8 @@ pub fn draw_play_animation_panel(
                                         egui::Color32::from_rgb(245, 158, 11),
                                     )
                                 } else if is_traffic_queue {
-                                    let is_clearing = track
-                                        .and_then(|t| t.queue_clearance_at_sec)
-                                        .is_some();
+                                    let is_clearing =
+                                        track.is_some_and(|t| t.is_queue_clearing());
                                     if is_clearing {
                                         (
                                             "MODE LANCAR",
@@ -906,12 +924,50 @@ pub fn draw_play_animation_panel(
                                             egui::Color32::from_rgb(253, 164, 175),
                                             egui::Color32::from_rgb(225, 29, 72),
                                         )
+                                    } else if is_traffic_manual {
+                                        if tq_live.as_ref().is_some_and(|s| s.is_all_stopped) {
+                                            (
+                                                "TAHAN SEMUA",
+                                                egui::Color32::from_rgb(136, 19, 55),
+                                                egui::Color32::from_rgb(253, 164, 175),
+                                                egui::Color32::from_rgb(225, 29, 72),
+                                            )
+                                        } else {
+                                            (
+                                                "MANUAL AKTIF",
+                                                egui::Color32::from_rgb(49, 46, 129),
+                                                egui::Color32::from_rgb(199, 210, 254),
+                                                egui::Color32::from_rgb(99, 102, 241),
+                                            )
+                                        }
                                     } else {
                                         (
                                             "URAI SIMPANG",
                                             egui::Color32::from_rgb(17, 94, 89),
                                             egui::Color32::from_rgb(153, 246, 228),
                                             egui::Color32::from_rgb(20, 184, 166),
+                                        )
+                                    }
+                                } else if is_traffic_diversion {
+                                    let is_div = td_live
+                                        .as_ref()
+                                        .map(|s| s.is_diverted)
+                                        .unwrap_or_else(|| {
+                                            td_cfg.as_ref().is_some_and(|c| c.start_diverted)
+                                        });
+                                    if is_div {
+                                        (
+                                            "DIALIHKAN",
+                                            egui::Color32::from_rgb(120, 53, 15),
+                                            egui::Color32::from_rgb(253, 230, 138),
+                                            egui::Color32::from_rgb(245, 158, 11),
+                                        )
+                                    } else {
+                                        (
+                                            "ARUS NORMAL",
+                                            egui::Color32::from_rgb(12, 74, 110),
+                                            egui::Color32::from_rgb(125, 211, 252),
+                                            egui::Color32::from_rgb(14, 165, 233),
                                         )
                                     }
                                 } else if is_pointer {
@@ -1092,8 +1148,12 @@ pub fn draw_play_animation_panel(
                                         ("[TRAFFIC]", egui::Color32::from_rgb(251, 191, 36))
                                     } else if is_traffic_gridlock {
                                         ("[MACET TOTAL]", egui::Color32::from_rgb(251, 113, 133))
+                                    } else if is_traffic_manual {
+                                        ("[SIMPANG MANUAL]", egui::Color32::from_rgb(165, 180, 252))
                                     } else if is_traffic_queue {
                                         ("[URAI SIMPANG]", egui::Color32::from_rgb(45, 212, 191))
+                                    } else if is_traffic_diversion {
+                                        ("[ALIH ARUS]", egui::Color32::from_rgb(56, 189, 248))
                                     } else if is_multi {
                                         if parse_multi_route_config(anim).formation
                                             == RouteFormationKind::Patwal
@@ -1256,23 +1316,48 @@ pub fn draw_play_animation_panel(
                                         && matches!(status, AnimRunStatus::Playing | AnimRunStatus::Paused)
                                     {
                                         if live.clearance_active {
-                                            (
-                                                format!(
-                                                    "MODE LANCAR  •  Sisa {} kendaraan ({} antre, {} keluar)",
-                                                    live.total_vehicles,
-                                                    live.queued_vehicles,
-                                                    live.clearing_vehicles
-                                                ),
-                                                egui::Color32::from_rgb(110, 231, 183),
-                                            )
+                                            if is_traffic_manual {
+                                                (
+                                                    format!(
+                                                        "LANCAR MANUAL: {}  •  Sisa {} ({} antre, {} keluar)",
+                                                        live.active_corridor_name
+                                                            .as_deref()
+                                                            .unwrap_or("-"),
+                                                        live.total_vehicles,
+                                                        live.queued_vehicles,
+                                                        live.clearing_vehicles
+                                                    ),
+                                                    egui::Color32::from_rgb(110, 231, 183),
+                                                )
+                                            } else {
+                                                (
+                                                    format!(
+                                                        "MODE LANCAR  •  Sisa {} kendaraan ({} antre, {} keluar)",
+                                                        live.total_vehicles,
+                                                        live.queued_vehicles,
+                                                        live.clearing_vehicles
+                                                    ),
+                                                    egui::Color32::from_rgb(110, 231, 183),
+                                                )
+                                            }
                                         } else if live.is_all_stopped {
-                                            (
-                                                format!(
-                                                    "MACET TOTAL  •  {} kendaraan tertahan diam — klik LANCAR untuk urai",
-                                                    live.total_vehicles
-                                                ),
-                                                egui::Color32::from_rgb(253, 164, 175),
-                                            )
+                                            if is_traffic_manual {
+                                                (
+                                                    format!(
+                                                        "TAHAN SEMUA  •  {} kendaraan antre — pilih tombol jalur untuk membuka",
+                                                        live.total_vehicles
+                                                    ),
+                                                    egui::Color32::from_rgb(253, 164, 175),
+                                                )
+                                            } else {
+                                                (
+                                                    format!(
+                                                        "MACET TOTAL  •  {} kendaraan tertahan diam — klik LANCAR untuk urai",
+                                                        live.total_vehicles
+                                                    ),
+                                                    egui::Color32::from_rgb(253, 164, 175),
+                                                )
+                                            }
                                         } else if live.is_switch_pause {
                                             (
                                                 format!(
@@ -1282,6 +1367,16 @@ pub fn draw_play_animation_panel(
                                                     live.total_vehicles
                                                 ),
                                                 egui::Color32::from_rgb(253, 230, 138),
+                                            )
+                                        } else if is_traffic_manual {
+                                            (
+                                                format!(
+                                                    "Dibuka Manual: {}  •  {} antre / {} lancar",
+                                                    live.active_corridor_name.as_deref().unwrap_or("-"),
+                                                    live.queued_vehicles,
+                                                    live.clearing_vehicles
+                                                ),
+                                                egui::Color32::from_rgb(199, 210, 254),
                                             )
                                         } else {
                                             (
@@ -1310,12 +1405,73 @@ pub fn draw_play_animation_panel(
                                             .filter(|c| c.enabled && c.is_complete())
                                             .count();
                                         (
-                                            format!(
-                                                "{active_cor} Jalur Berpasangan  •  {} Model  •  {:.0}s/giliran",
-                                                tqc.vehicle_pool.len(),
-                                                tqc.turn_duration_sec
-                                            ),
+                                            if is_traffic_manual {
+                                                format!(
+                                                    "{active_cor} Jalur Berpasangan  •  {} Model  •  Kontrol Manual",
+                                                    tqc.vehicle_pool.len(),
+                                                )
+                                            } else {
+                                                format!(
+                                                    "{active_cor} Jalur Berpasangan  •  {} Model  •  {:.0}s/giliran",
+                                                    tqc.vehicle_pool.len(),
+                                                    tqc.turn_duration_sec
+                                                )
+                                            },
                                             egui::Color32::from_rgb(153, 246, 228),
+                                        )
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(info_line)
+                                                .size(11.0)
+                                                .color(info_col),
+                                        )
+                                        .truncate(),
+                                    );
+                                } else if let Some(ref tdc) = td_cfg {
+                                    let incomplete = tdc.incomplete_corridor_labels();
+                                    let (info_line, info_col) = if let Some(ref live) = td_live
+                                        && matches!(status, AnimRunStatus::Playing | AnimRunStatus::Paused)
+                                    {
+                                        if live.is_diverted {
+                                            (
+                                                format!(
+                                                    "DIALIHKAN -> Alternatif  •  {} pendekat / {} utama / {} alih",
+                                                    live.on_approach, live.on_main, live.on_divert
+                                                ),
+                                                egui::Color32::from_rgb(253, 230, 138),
+                                            )
+                                        } else {
+                                            (
+                                                format!(
+                                                    "NORMAL -> Jalur Utama  •  {} pendekat / {} utama / {} alih",
+                                                    live.on_approach, live.on_main, live.on_divert
+                                                ),
+                                                egui::Color32::from_rgb(125, 211, 252),
+                                            )
+                                        }
+                                    } else if !incomplete.is_empty() {
+                                        (
+                                            format!("Belum lengkap: {}", incomplete.join(", ")),
+                                            egui::Color32::from_rgb(248, 113, 113),
+                                        )
+                                    } else {
+                                        let active_cor = tdc
+                                            .corridors
+                                            .iter()
+                                            .filter(|c| c.enabled && c.is_complete())
+                                            .count();
+                                        (
+                                            format!(
+                                                "{active_cor} Koridor Y  •  {} Model  •  {}",
+                                                tdc.vehicle_pool.len(),
+                                                if tdc.start_diverted {
+                                                    "Mulai Dialihkan"
+                                                } else {
+                                                    "Mulai Normal"
+                                                }
+                                            ),
+                                            egui::Color32::from_rgb(125, 211, 252),
                                         )
                                     };
                                     ui.add(
@@ -1558,6 +1714,24 @@ pub fn draw_play_animation_panel(
                                         "Konvoi: {:.1} m/s  •  Lancar: {:.1} m/s  •  t = {:.1} dtk",
                                         tqc.convoy_speed_mps, tqc.clear_speed_mps, dist_m
                                     )
+                                } else if let Some(ref tdc) = td_cfg {
+                                    match tdc.flow_mode {
+                                        twg_shared::traffic_diversion::DiversionFlowMode::Convoy => {
+                                            format!(
+                                                "Konvoi: {:.1} / Alih {:.1} m/s  •  t = {:.1} dtk",
+                                                tdc.normal_speed_mps, tdc.divert_speed_mps, dist_m
+                                            )
+                                        }
+                                        twg_shared::traffic_diversion::DiversionFlowMode::FreeFlow => {
+                                            format!(
+                                                "Arus Normal: {:.0}–{:.0} m/s{}  •  t = {:.1} dtk",
+                                                tdc.min_speed_mps,
+                                                tdc.max_speed_mps,
+                                                if tdc.allow_overtaking { " • Salip" } else { "" },
+                                                dist_m
+                                            )
+                                        }
+                                    }
                                 } else {
                                     format!(
                                         "Speed: {:.1} m/s  •  Jarak: {:.1} / {:.1} m  •  Repeat: {}",
@@ -1635,39 +1809,206 @@ pub fn draw_play_animation_panel(
                                     }
                                     AnimRunStatus::Playing => {
                                         if is_traffic_queue {
-                                            let is_clearing = track
-                                                .and_then(|t| t.queue_clearance_at_sec)
-                                                .is_some();
-                                            let rem = tq_live
-                                                .as_ref()
-                                                .map(|s| s.total_vehicles)
-                                                .unwrap_or(0);
-                                            let clear_btn = egui::Button::new(
-                                                egui::RichText::new(if is_clearing {
-                                                    format!(
-                                                        "Mode Lancar Aktif (Sisa {rem} kendaraan...)"
-                                                    )
+                                            let is_clearing =
+                                                track.is_some_and(|t| t.is_queue_clearing());
+                                            if is_traffic_manual
+                                                && let Some(ref tqc) = tq_cfg
+                                            {
+                                                let open_src = tq_live
+                                                    .as_ref()
+                                                    .and_then(|s| s.active_corridor_source_idx);
+                                                let all_stopped = tq_live
+                                                    .as_ref()
+                                                    .is_none_or(|s| s.is_all_stopped);
+                                                if !is_clearing {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing =
+                                                            egui::vec2(4.0, 4.0);
+                                                        for (c_idx, cor) in
+                                                            tqc.corridors.iter().enumerate()
+                                                        {
+                                                            if !cor.enabled || !cor.is_complete() {
+                                                                continue;
+                                                            }
+                                                            let is_open = open_src == Some(c_idx);
+                                                            let btn = egui::Button::new(
+                                                                egui::RichText::new(if is_open {
+                                                                    format!("{} [BUKA]", cor.name)
+                                                                } else {
+                                                                    format!("Buka {}", cor.name)
+                                                                })
+                                                                .size(10.5)
+                                                                .strong()
+                                                                .color(egui::Color32::WHITE),
+                                                            )
+                                                            .fill(if is_open {
+                                                                egui::Color32::from_rgb(37, 99, 235)
+                                                            } else {
+                                                                egui::Color32::from_rgb(51, 65, 85)
+                                                            });
+                                                            if ui.add(btn).clicked() {
+                                                                action_queue_manual = Some((
+                                                                    anim.id,
+                                                                    QueueManualAction::OpenCorridor {
+                                                                        corridor_idx: c_idx,
+                                                                    },
+                                                                ));
+                                                            }
+                                                        }
+                                                        let hold_btn = egui::Button::new(
+                                                            egui::RichText::new("Tahan Semua")
+                                                                .size(10.5)
+                                                                .strong()
+                                                                .color(egui::Color32::WHITE),
+                                                        )
+                                                        .fill(if all_stopped {
+                                                            egui::Color32::from_rgb(190, 18, 60)
+                                                        } else {
+                                                            egui::Color32::from_rgb(71, 85, 105)
+                                                        });
+                                                        if ui.add(hold_btn).clicked() {
+                                                            action_queue_manual = Some((
+                                                                anim.id,
+                                                                QueueManualAction::HoldAll,
+                                                            ));
+                                                        }
+                                                    });
+                                                    ui.add_space(4.0);
+                                                }
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing =
+                                                        egui::vec2(4.0, 4.0);
+                                                    for (c_idx, cor) in
+                                                        tqc.corridors.iter().enumerate()
+                                                    {
+                                                        if !cor.enabled || !cor.is_complete() {
+                                                            continue;
+                                                        }
+                                                        let (q_cnt, tot_cnt) = tq_live
+                                                            .as_ref()
+                                                            .map(|s| s.corridor_counts(c_idx))
+                                                            .unwrap_or((0, 0));
+                                                        let is_draining =
+                                                            is_clearing && open_src == Some(c_idx);
+                                                        let can_click = !is_clearing || q_cnt > 0;
+                                                        let label = if is_clearing && tot_cnt == 0 {
+                                                            format!("{} [Habis]", cor.name)
+                                                        } else if is_clearing && q_cnt == 0 {
+                                                            format!(
+                                                                "{} [Keluar {}]",
+                                                                cor.name, tot_cnt
+                                                            )
+                                                        } else if is_draining {
+                                                            format!(
+                                                                "{} [LANCAR · {}]",
+                                                                cor.name, q_cnt
+                                                            )
+                                                        } else if q_cnt > 0 {
+                                                            format!(
+                                                                "Lancar {} ({})",
+                                                                cor.name, q_cnt
+                                                            )
+                                                        } else {
+                                                            format!("Lancar {}", cor.name)
+                                                        };
+                                                        let fill = if !can_click {
+                                                            egui::Color32::from_rgb(30, 41, 59)
+                                                        } else if is_draining {
+                                                            egui::Color32::from_rgb(5, 150, 105)
+                                                        } else {
+                                                            egui::Color32::from_rgb(6, 95, 70)
+                                                        };
+                                                        let btn = egui::Button::new(
+                                                            egui::RichText::new(label)
+                                                                .size(10.5)
+                                                                .strong()
+                                                                .color(if can_click {
+                                                                    egui::Color32::WHITE
+                                                                } else {
+                                                                    egui::Color32::from_rgb(
+                                                                        148, 163, 184,
+                                                                    )
+                                                                }),
+                                                        )
+                                                        .fill(fill);
+                                                        if ui
+                                                            .add_enabled(can_click, btn)
+                                                            .on_hover_text(
+                                                                "Aktifkan Mode Lancar (stop spawn) & urai khusus jalur ini secara manual",
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            action_queue_manual = Some((
+                                                                anim.id,
+                                                                QueueManualAction::DrainCorridor {
+                                                                    corridor_idx: c_idx,
+                                                                },
+                                                            ));
+                                                        }
+                                                    }
+                                                });
+                                                ui.add_space(4.0);
+                                            } else {
+                                                let rem = tq_live
+                                                    .as_ref()
+                                                    .map(|s| s.total_vehicles)
+                                                    .unwrap_or(0);
+                                                let clear_btn = egui::Button::new(
+                                                    egui::RichText::new(if is_clearing {
+                                                        format!(
+                                                            "Mode Lancar Aktif (Sisa {rem} kendaraan...)"
+                                                        )
+                                                    } else {
+                                                        "LANCAR (Urai Sampai Habis)".to_string()
+                                                    })
+                                                    .size(11.5)
+                                                    .strong()
+                                                    .color(egui::Color32::WHITE),
+                                                )
+                                                .fill(if is_clearing {
+                                                    egui::Color32::from_rgb(6, 78, 59)
                                                 } else {
-                                                    "LANCAR (Urai Sampai Habis)".to_string()
+                                                    egui::Color32::from_rgb(5, 150, 105)
+                                                })
+                                                .min_size(egui::vec2(ui.available_width(), 28.0));
+                                                if ui
+                                                    .add_enabled(!is_clearing, clear_btn)
+                                                    .on_hover_text(
+                                                        "Stop spawn mobil baru & percepat seluruh kendaraan yang tersisa bergantian sampai habis (0 kendaraan)",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    action_queue_clear = Some(anim.id);
+                                                }
+                                                ui.add_space(4.0);
+                                            }
+                                        } else if is_traffic_diversion {
+                                            let is_div = td_live
+                                                .as_ref()
+                                                .map(|s| s.is_diverted)
+                                                .unwrap_or_else(|| {
+                                                    td_cfg
+                                                        .as_ref()
+                                                        .is_some_and(|c| c.start_diverted)
+                                                });
+                                            let toggle_btn = egui::Button::new(
+                                                egui::RichText::new(if is_div {
+                                                    "NORMALKAN ARUS (Kembali ke Jalur Utama)"
+                                                } else {
+                                                    "ALIHKAN ARUS (Belok ke Jalur Alternatif)"
                                                 })
                                                 .size(11.5)
                                                 .strong()
                                                 .color(egui::Color32::WHITE),
                                             )
-                                            .fill(if is_clearing {
-                                                egui::Color32::from_rgb(6, 78, 59)
+                                            .fill(if is_div {
+                                                egui::Color32::from_rgb(2, 132, 199)
                                             } else {
-                                                egui::Color32::from_rgb(5, 150, 105)
+                                                egui::Color32::from_rgb(217, 119, 6)
                                             })
                                             .min_size(egui::vec2(ui.available_width(), 28.0));
-                                            if ui
-                                                .add_enabled(!is_clearing, clear_btn)
-                                                .on_hover_text(
-                                                    "Stop spawn mobil baru & percepat seluruh kendaraan yang tersisa bergantian sampai habis (0 kendaraan)",
-                                                )
-                                                .clicked()
-                                            {
-                                                action_queue_clear = Some(anim.id);
+                                            if ui.add(toggle_btn).clicked() {
+                                                action_diversion_toggle = Some((anim.id, !is_div));
                                             }
                                             ui.add_space(4.0);
                                         }
@@ -1835,6 +2176,14 @@ pub fn draw_play_animation_panel(
             } else if let Some(aid) = action_queue_clear {
                 if let Some(trig_sec) = playback.trigger_queue_clearance(aid, None) {
                     broadcast_tactical_queue_clear_cmd(state, ws, aid, trig_sec);
+                }
+            } else if let Some((aid, act)) = action_queue_manual {
+                if let Some(trig_sec) = playback.push_queue_manual_action(aid, act, None) {
+                    broadcast_tactical_queue_manual_cmd(state, ws, aid, act, trig_sec);
+                }
+            } else if let Some((aid, is_div)) = action_diversion_toggle {
+                if let Some(trig_sec) = playback.push_diversion_toggle(aid, is_div, None) {
+                    broadcast_tactical_diversion_toggle_cmd(state, ws, aid, is_div, trig_sec);
                 }
             }
 
@@ -2170,7 +2519,20 @@ fn anim_matches_play_search(
         }
     } else if is_traffic_queue_anim(anim) {
         let cfg = parse_traffic_queue_config(anim);
-        haystack.push_str(" urai simpang antrean lancar buka tutup konvoi macet total stuck blokade traffic ");
+        haystack.push_str(
+            " urai simpang antrean lancar buka tutup konvoi macet total stuck blokade manual petugas traffic ",
+        );
+        for c in &cfg.corridors {
+            haystack.push(' ');
+            haystack.push_str(&c.name);
+        }
+        for v in &cfg.vehicle_pool {
+            haystack.push(' ');
+            haystack.push_str(&v.name);
+        }
+    } else if is_traffic_diversion_anim(anim) {
+        let cfg = parse_traffic_diversion_config(anim);
+        haystack.push_str(" pengalihan arus alih diversion rekayasa alternatif belok traffic ");
         for c in &cfg.corridors {
             haystack.push(' ');
             haystack.push_str(&c.name);

@@ -1115,6 +1115,9 @@ fn process_net_events_system(
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
                 let is_traffic_queue = twg_shared::traffic_queue::is_traffic_queue_anim(&a);
                 let is_traffic_gridlock = twg_shared::traffic_queue::is_traffic_gridlock_anim(&a);
+                let is_traffic_manual = twg_shared::traffic_queue::is_traffic_manual_anim(&a);
+                let is_traffic_diversion =
+                    twg_shared::traffic_diversion::is_traffic_diversion_anim(&a);
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
@@ -1127,6 +1130,7 @@ fn process_net_events_system(
                     && !twg_shared::audio_anim::is_audio_anim(&a)
                     && !is_traffic
                     && !is_traffic_queue
+                    && !is_traffic_diversion
                     && !is_shoot
                     && !is_pointer
                     && !is_spawn_hide
@@ -1158,11 +1162,19 @@ fn process_net_events_system(
                         format!(
                             "Macet Total & Urai '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
                         )
+                    } else if is_traffic_manual {
+                        format!(
+                            "Kontrol Simpang Manual '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
+                        )
                     } else {
                         format!(
                             "Antrean & Urai Simpang '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
                         )
                     });
+                } else if is_traffic_diversion {
+                    state.status_banner = Some(format!(
+                        "Pengalihan Arus '{anim_name}' dibuat — sekarang gambar Jalur Utama & Jalur Alternatif di Inspector!"
+                    ));
                 } else if is_shoot {
                     let kind_label = twg_shared::shoot_anim::shoot_anim_kind(
                         state.anims.iter().find(|x| x.id == anim_id).unwrap(),
@@ -1705,6 +1717,40 @@ fn process_net_events_system(
                                 .get("trigger_elapsed_sec")
                                 .and_then(|v| v.as_f64());
                             playback.trigger_queue_clearance(aid, trig);
+                        }
+                    }
+                    "traffic_queue_manual" => {
+                        if let Some(aid) = msg
+                            .payload
+                            .get("anim_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                            && let Some(act_val) = msg.payload.get("manual_action")
+                            && let Ok(act) = serde_json::from_value::<
+                                twg_shared::traffic_queue::QueueManualAction,
+                            >(act_val.clone())
+                        {
+                            let trig = msg
+                                .payload
+                                .get("trigger_elapsed_sec")
+                                .and_then(|v| v.as_f64());
+                            playback.push_queue_manual_action(aid, act, trig);
+                        }
+                    }
+                    "traffic_diversion_toggle" => {
+                        if let Some(aid) = msg
+                            .payload
+                            .get("anim_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                            && let Some(is_div) =
+                                msg.payload.get("is_diverted").and_then(|v| v.as_bool())
+                        {
+                            let trig = msg
+                                .payload
+                                .get("trigger_elapsed_sec")
+                                .and_then(|v| v.as_f64());
+                            playback.push_diversion_toggle(aid, is_div, trig);
                         }
                     }
                     "set_speed" => {

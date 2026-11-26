@@ -10,6 +10,9 @@ use twg_shared::{
         parse_multi_route_config, sample_multi_route_poses,
     },
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
+    traffic_diversion::{
+        is_traffic_diversion_anim, parse_traffic_diversion_config, write_traffic_diversion_config,
+    },
     traffic_queue::{
         is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
     },
@@ -123,6 +126,19 @@ pub fn editable_anim_geom(anim: &Anim, traffic_lane_idx: Option<usize>) -> Vec<[
                 }
             })
             .unwrap_or_default()
+    } else if is_traffic_diversion_anim(anim) {
+        let cfg = parse_traffic_diversion_config(anim);
+        let encoded = traffic_lane_idx.unwrap_or(0);
+        let cor_idx = encoded / 3;
+        let part = encoded % 3;
+        cfg.corridors
+            .get(cor_idx)
+            .map(|c| match part {
+                0 => c.approach_geom.clone(),
+                1 => c.main_geom.clone(),
+                _ => c.divert_geom.clone(),
+            })
+            .unwrap_or_default()
     } else {
         anim.geom.clone()
     }
@@ -153,6 +169,19 @@ pub fn write_editable_anim_geom(
                 cor.queue_geom = geom;
             }
             write_traffic_queue_config(anim, &cfg);
+        }
+    } else if is_traffic_diversion_anim(anim) {
+        let mut cfg = parse_traffic_diversion_config(anim);
+        let encoded = traffic_lane_idx.unwrap_or(0);
+        let cor_idx = encoded / 3;
+        let part = encoded % 3;
+        if let Some(cor) = cfg.corridors.get_mut(cor_idx) {
+            match part {
+                0 => cor.approach_geom = geom,
+                1 => cor.main_geom = geom,
+                _ => cor.divert_geom = geom,
+            }
+            write_traffic_diversion_config(anim, &cfg);
         }
     } else {
         anim.geom = geom;
@@ -203,6 +232,38 @@ pub fn hit_test_traffic_lane_index(
                     continue;
                 }
                 let encoded = c_idx * 2 + usize::from(is_clear);
+                let projected: Vec<Option<Vec2>> = geom
+                    .iter()
+                    .map(|&pt| {
+                        let w = waypoint_world_pos(state, pt);
+                        camera.world_to_viewport(cam_gtf, w).ok()
+                    })
+                    .collect();
+                for pair in projected.windows(2) {
+                    if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                        let d = point_to_segment_dist(cursor_px, a, b);
+                        if d <= 14.0 && best.is_none_or(|cur| d < cur.1) {
+                            best = Some((encoded, d));
+                        }
+                    }
+                }
+            }
+        }
+        return best.map(|(idx, _)| idx);
+    }
+    if is_traffic_diversion_anim(anim) {
+        let cfg = parse_traffic_diversion_config(anim);
+        let mut best: Option<(usize, f32)> = None;
+        for (c_idx, cor) in cfg.corridors.iter().enumerate() {
+            for (part, geom) in [
+                (0usize, &cor.approach_geom),
+                (1usize, &cor.main_geom),
+                (2usize, &cor.divert_geom),
+            ] {
+                if geom.len() < 2 {
+                    continue;
+                }
+                let encoded = c_idx * 3 + part;
                 let projected: Vec<Option<Vec2>> = geom
                     .iter()
                     .map(|&pt| {
@@ -307,6 +368,32 @@ pub fn hit_test_any_route_line(
             let cfg = parse_traffic_queue_config(anim);
             for cor in &cfg.corridors {
                 for geom in [&cor.queue_geom, &cor.clear_geom] {
+                    if geom.len() < 2 {
+                        continue;
+                    }
+                    let projected: Vec<Option<Vec2>> = geom
+                        .iter()
+                        .map(|&pt| {
+                            let w = waypoint_world_pos(state, pt);
+                            camera.world_to_viewport(cam_gtf, w).ok()
+                        })
+                        .collect();
+                    for pair in projected.windows(2) {
+                        if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                            let d = point_to_segment_dist(cursor_px, a, b);
+                            if d <= 10.5 && best.is_none_or(|cur| d < cur.1) {
+                                best = Some((anim.id, d));
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if is_traffic_diversion_anim(anim) {
+            let cfg = parse_traffic_diversion_config(anim);
+            for cor in &cfg.corridors {
+                for geom in [&cor.approach_geom, &cor.main_geom, &cor.divert_geom] {
                     if geom.len() < 2 {
                         continue;
                     }
@@ -700,7 +787,10 @@ pub fn draw_route_editor_overlay(
     // 1. Live numbered waypoints & rubber-band while drawing a new route or traffic lane
     if matches!(
         state.tool_mode,
-        ToolMode::DrawRoute | ToolMode::DrawTrafficLane | ToolMode::DrawTrafficQueueLane
+        ToolMode::DrawRoute
+            | ToolMode::DrawTrafficLane
+            | ToolMode::DrawTrafficQueueLane
+            | ToolMode::DrawTrafficDiversionLane
     ) {
         draw_route_draft_overlay(&painter, clip_rect, state, camera, cam_gtf);
         return;

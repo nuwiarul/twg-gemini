@@ -6,6 +6,9 @@ use twg_shared::{
     traffic_anim::{
         TrafficSimEngine, TrafficVehiclePose, is_traffic_anim, parse_traffic_anim_config,
     },
+    traffic_diversion::{
+        TrafficDiversionSimEngine, is_traffic_diversion_anim, parse_traffic_diversion_config,
+    },
     traffic_queue::{
         TrafficQueueSimEngine, is_traffic_queue_anim, parse_traffic_queue_config,
     },
@@ -114,11 +117,10 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
     if state.selected != SelectedEntity::Anim(preview.anim_id) || preview.pool_indices.is_empty() {
         return Vec::new();
     }
-    let Some(anim) = state
-        .anims
-        .iter()
-        .find(|a| a.id == preview.anim_id && (is_traffic_anim(a) || is_traffic_queue_anim(a)))
-    else {
+    let Some(anim) = state.anims.iter().find(|a| {
+        a.id == preview.anim_id
+            && (is_traffic_anim(a) || is_traffic_queue_anim(a) || is_traffic_diversion_anim(a))
+    }) else {
         return Vec::new();
     };
     let (lane_geom, vehicle_pool, lane_w, side_sign): (
@@ -126,7 +128,18 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
         Vec<twg_shared::traffic_anim::TrafficVehicleEntry>,
         f32,
         f32,
-    ) = if is_traffic_queue_anim(anim) {
+    ) = if is_traffic_diversion_anim(anim) {
+        let cfg = parse_traffic_diversion_config(anim);
+        let Some(cor) = cfg
+            .corridors
+            .iter()
+            .find(|c| c.enabled && c.approach_geom.len() >= 2)
+            .or_else(|| cfg.corridors.iter().find(|c| c.approach_geom.len() >= 2))
+        else {
+            return Vec::new();
+        };
+        (cor.approach_geom.clone(), cfg.vehicle_pool, 3.6_f32, 1.0_f32)
+    } else if is_traffic_queue_anim(anim) {
         let cfg = parse_traffic_queue_config(anim);
         let Some(cor) = cfg
             .corridors
@@ -275,13 +288,20 @@ struct ActiveTrafficQueueSim {
     engine: TrafficQueueSimEngine,
 }
 
-/// Reusable Bevy entity & scene-handle pool for all active Traffic simulations (`traffic_flow` & `traffic_queue`).
+struct ActiveTrafficDiversionSim {
+    config_sig: u64,
+    engine: TrafficDiversionSimEngine,
+}
+
+/// Reusable Bevy entity & scene-handle pool for all active Traffic simulations
+/// (`traffic_flow`, `traffic_queue`, `traffic_gridlock`, `traffic_manual`, `traffic_diversion`).
 /// Vehicles recycle idle `Entity` slots (`Visibility::Hidden` <-> `Visible`) instead of
 /// spawning/despawning glTF hierarchies every cycle, keeping frame times smooth.
 #[derive(Resource, Default)]
 pub struct TrafficVisualPool {
     sims: HashMap<Uuid, ActiveTrafficSim>,
     queue_sims: HashMap<Uuid, ActiveTrafficQueueSim>,
+    diversion_sims: HashMap<Uuid, ActiveTrafficDiversionSim>,
     scene_handles: HashMap<String, Handle<WorldAsset>>,
     fallback_body_mesh: Option<Handle<Mesh>>,
     fallback_cabin_mesh: Option<Handle<Mesh>>,
@@ -463,7 +483,9 @@ pub fn traffic_visual_system(
     if !state.is_3d_map_screen() {
         pool.sims.clear();
         pool.queue_sims.clear();
+        pool.diversion_sims.clear();
         state.traffic_queue_live_status.clear();
+        state.traffic_diversion_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
@@ -484,7 +506,9 @@ pub fn traffic_visual_system(
     if !playback.play_test_mode && !is_editor_preview && scale_preview_poses.is_empty() {
         pool.sims.clear();
         pool.queue_sims.clear();
+        pool.diversion_sims.clear();
         state.traffic_queue_live_status.clear();
+        state.traffic_diversion_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
@@ -508,9 +532,14 @@ pub fn traffic_visual_system(
 
     let mut active_anim_ids: HashSet<Uuid> = HashSet::new();
     let mut active_queue_anim_ids: HashSet<Uuid> = HashSet::new();
+    let mut active_diversion_anim_ids: HashSet<Uuid> = HashSet::new();
     let mut completed_queue_anim_ids: Vec<Uuid> = Vec::new();
     let mut live_queue_statuses: HashMap<Uuid, twg_shared::traffic_queue::TrafficQueueLiveStatus> =
         HashMap::new();
+    let mut live_diversion_statuses: HashMap<
+        Uuid,
+        twg_shared::traffic_diversion::TrafficDiversionLiveStatus,
+    > = HashMap::new();
     let mut active_poses: Vec<(Uuid, TrafficVehiclePose)> = Vec::new();
 
     for sp in scale_preview_poses {
@@ -535,7 +564,8 @@ pub fn traffic_visual_system(
     for anim in &state.anims {
         let is_flow = is_traffic_anim(anim);
         let is_queue = is_traffic_queue_anim(anim);
-        if (!is_flow && !is_queue) || state.hidden_entity_ids.contains(&anim.id) {
+        let is_diversion = is_traffic_diversion_anim(anim);
+        if (!is_flow && !is_queue && !is_diversion) || state.hidden_entity_ids.contains(&anim.id) {
             continue;
         }
         if let Some(ref scope) = preview_scope
@@ -598,13 +628,42 @@ pub fn traffic_visual_system(
                 sim.engine = TrafficQueueSimEngine::new(&cfg, state.geo_anchor);
             }
 
-            sim.engine
-                .advance_to(track.distance_m, track.queue_clearance_at_sec);
+            sim.engine.advance_to_with_manual(
+                track.distance_m,
+                track.queue_clearance_at_sec,
+                &track.queue_manual_events,
+            );
             let status = sim.engine.live_status();
             if status.is_completed && track.status == AnimRunStatus::Playing {
                 completed_queue_anim_ids.push(anim.id);
             }
             live_queue_statuses.insert(anim.id, status);
+            for pose in sim.engine.active_poses() {
+                active_poses.push((anim.id, pose));
+            }
+        } else if is_diversion {
+            let cfg = parse_traffic_diversion_config(anim);
+            if !cfg.has_playable_setup() {
+                continue;
+            }
+
+            active_diversion_anim_ids.insert(anim.id);
+            let sig = cfg.config_signature(state.geo_anchor);
+            let sim = pool
+                .diversion_sims
+                .entry(anim.id)
+                .or_insert_with(|| ActiveTrafficDiversionSim {
+                    config_sig: sig,
+                    engine: TrafficDiversionSimEngine::new(&cfg, state.geo_anchor),
+                });
+            if sim.config_sig != sig {
+                sim.config_sig = sig;
+                sim.engine = TrafficDiversionSimEngine::new(&cfg, state.geo_anchor);
+            }
+
+            sim.engine
+                .advance_to(track.distance_m, &track.diversion_events);
+            live_diversion_statuses.insert(anim.id, sim.engine.live_status());
             for pose in sim.engine.active_poses() {
                 active_poses.push((anim.id, pose));
             }
@@ -626,11 +685,14 @@ pub fn traffic_visual_system(
     }
 
     state.traffic_queue_live_status = live_queue_statuses;
+    state.traffic_diversion_live_status = live_diversion_statuses;
 
     // Drop simulation state for stopped/removed animations
     pool.sims.retain(|id, _| active_anim_ids.contains(id));
     pool.queue_sims
         .retain(|id, _| active_queue_anim_ids.contains(id));
+    pool.diversion_sims
+        .retain(|id, _| active_diversion_anim_ids.contains(id));
 
     let wanted_keys: HashMap<(Uuid, u64), &str> = active_poses
         .iter()
