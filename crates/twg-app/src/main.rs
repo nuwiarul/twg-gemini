@@ -1486,6 +1486,10 @@ fn process_net_events_system(
                 if !state.is_big_screen() {
                     continue;
                 }
+                if state.big_screen.skip_next_cached_state {
+                    state.big_screen.skip_next_cached_state = false;
+                    continue;
+                }
                 state.big_screen.loaded_by_actor = Some(live.actor_username.clone());
                 let cur_id = state.active_skenario.as_ref().map(|s| s.id);
                 if cur_id != Some(live.skenario_id) {
@@ -1527,6 +1531,7 @@ fn process_net_events_system(
                         if is_big
                             && let Some(auth) = current_auth(&state)
                         {
+                            state.big_screen.skip_next_cached_state = false;
                             state.big_screen.loaded_by_actor = Some(msg.actor_username.clone());
                             state.big_screen.pending_skenario_id = Some(msg.skenario_id);
                             state.big_screen.pending_camera_payload = None;
@@ -1543,6 +1548,7 @@ fn process_net_events_system(
                         {
                             play_rts.reset_all();
                             if is_big {
+                                state.big_screen.skip_next_cached_state = false;
                                 state.big_screen.loaded_by_actor =
                                     Some(msg.actor_username.clone());
                                 state.big_screen.pending_skenario_id = Some(msg.skenario_id);

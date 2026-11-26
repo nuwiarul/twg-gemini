@@ -281,6 +281,9 @@ pub struct BigScreenState {
     pub pending_skenario_id: Option<Uuid>,
     pub pending_camera_payload: Option<serde_json::Value>,
     pub last_event_text: Option<String>,
+    /// Set to `true` when user clicks Refresh on an active Layar Besar scenario so the
+    /// reconnect resets cleanly to a blank standby screen instead of auto-replaying the old cache.
+    pub skip_next_cached_state: bool,
 }
 
 #[derive(Debug, Clone, Default)]

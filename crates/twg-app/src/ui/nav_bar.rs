@@ -228,10 +228,13 @@ pub fn enter_layar_besar(
     state.buildings.clear();
     state.lines.clear();
     state.text_markers.clear();
+    state.particles.clear();
+    state.alurs.clear();
     state.anims.clear();
     state.big_screen.loaded_by_actor = None;
     state.big_screen.pending_skenario_id = None;
     state.big_screen.pending_camera_payload = None;
+    state.big_screen.skip_next_cached_state = false;
     state.big_screen.last_event_text =
         Some("Menunggu skenario di-load dari Play Skenario Tactical (Admin / Admin Satker)...".into());
     state.screen = AppScreen::LayarBesar;

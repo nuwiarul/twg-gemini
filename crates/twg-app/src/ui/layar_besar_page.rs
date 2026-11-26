@@ -1,8 +1,10 @@
 use bevy_egui::egui;
-use twg_shared::ws::WsClientMode;
+use twg_shared::{geo::GeoAnchor, ws::WsClientMode};
 
 use crate::{
+    map::camera::TacticalCamera,
     net::{
+        asset_sync::{AssetSyncBridge, AssetSyncCommand},
         client::ApiClientBridge,
         ws_client::{WsClientBridge, WsOutCommand},
     },
@@ -17,17 +19,21 @@ use crate::{
 /// Clean fullscreen read-only **Layar Besar** UI overlay.
 /// All map camera & entity controls are completely locked here — it only responds to remote
 /// WebSocket commands sent by authorized operators from Tactical -> Play Skenario.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_layar_besar_overlay(
     ctx: &egui::Context,
     clip_rect: egui::Rect,
     state: &mut AppState,
+    tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
     play_rts: &mut PlayRtsState,
     api: &ApiClientBridge,
     ws: &WsClientBridge,
+    sync_bridge: &AssetSyncBridge,
 ) {
     let is_dedicated_role = state.is_big_screen_only_role();
     let mut exit_big_screen = !is_dedicated_role && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let mut do_refresh = ctx.input(|i| i.key_pressed(egui::Key::F5));
     let mut go_profile = false;
     let mut do_logout = false;
 
@@ -98,6 +104,27 @@ pub fn draw_layar_besar_overlay(
                                 .strong()
                                 .color(ws_col),
                         );
+
+                        let refresh_tip = if state.active_skenario.is_some() {
+                            "Refresh Layar Besar ke kondisi skenario kosong & sambung ulang koneksi live (F5)"
+                        } else {
+                            "Refresh Layar Besar, sinkronkan aset 3D & tarik skenario aktif terbaru dari server (F5)"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Refresh")
+                                        .size(10.5)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(egui::Color32::from_rgb(14, 116, 144)),
+                            )
+                            .on_hover_text(refresh_tip)
+                            .clicked()
+                        {
+                            do_refresh = true;
+                        }
 
                         if ui
                             .add(
@@ -211,6 +238,51 @@ pub fn draw_layar_besar_overlay(
         state.current_user = None;
         state.active_skenario = None;
         state.ws_connected = false;
+    } else if do_refresh {
+        let had_active_skenario = state.active_skenario.is_some();
+        playback.stop_play_test();
+        play_rts.reset_all();
+        state.play_session_mode = PlaySessionMode::BigScreen;
+        state.active_skenario = None;
+        state.markers.clear();
+        state.buildings.clear();
+        state.lines.clear();
+        state.text_markers.clear();
+        state.particles.clear();
+        state.alurs.clear();
+        state.anims.clear();
+        state.geo_anchor = GeoAnchor::default();
+        *tcam = TacticalCamera::default();
+        state.big_screen.loaded_by_actor = None;
+        state.big_screen.pending_skenario_id = None;
+        state.big_screen.pending_camera_payload = None;
+        state.big_screen.skip_next_cached_state = had_active_skenario;
+        state.big_screen.last_event_text = Some(if had_active_skenario {
+            "Layar Besar di-refresh ke skenario kosong — siap menerima skenario baru.".into()
+        } else {
+            "Menyegarkan koneksi Layar Besar & sinkronisasi aset 3D...".into()
+        });
+        state.ws_connected = false;
+
+        sync_bridge.send(AssetSyncCommand::SyncWithServer {
+            server_url: state.server_url.clone(),
+            local_root: state.assets_root.clone(),
+        });
+
+        if let Some(token) = state.auth_token.clone() {
+            ws.send(WsOutCommand::Connect {
+                server_url: state.server_url.clone(),
+                token,
+                device_id: state.device_id.clone(),
+                skenario_id: None,
+                client_mode: WsClientMode::BigScreen,
+            });
+        } else {
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::BigScreen,
+            });
+        }
     } else if go_profile {
         play_rts.reset_all();
         open_profile_screen(state, playback, ws);

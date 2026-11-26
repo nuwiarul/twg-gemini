@@ -299,10 +299,12 @@ pub fn egui_root_system(
             ctx,
             center_rect,
             &mut state,
+            &mut tcam,
             &mut playback,
             &mut play_rts,
             &api,
             &ws,
+            &sync_bridge,
         );
 
         ui_state.wants_pointer = true;
