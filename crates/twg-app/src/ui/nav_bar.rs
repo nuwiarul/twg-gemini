@@ -381,7 +381,11 @@ pub fn draw_screen_nav_tabs(
             state.play_session_mode = PlaySessionMode::LocalPreview;
             state.skenario_table.close_modal();
             state.restore_active_skenario_map_state();
-            state.screen = AppScreen::PlotSkenario;
+            if state.reload_plot_on_return && let Some(sk) = state.active_skenario.clone() {
+                open_plot_skenario(state, playback, api, &sk);
+            } else {
+                state.screen = AppScreen::PlotSkenario;
+            }
             ws.send(WsOutCommand::Subscribe {
                 skenario_id: None,
                 client_mode: WsClientMode::Idle,

@@ -42,6 +42,12 @@ pub enum AppScreen {
     Profile,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PlotExit {
+    Page(AppScreen),
+    Close(Entity),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProfileFormState {
     pub name: String,
@@ -1558,6 +1564,9 @@ pub struct AppState {
     pub new_line_color: String,
 
     // Scenario Editor dirty-tracking for toolbar "Simpan" batch save
+    pub reload_plot_on_return: bool,
+    offline_saved_plot: Option<twg_shared::models::SkenarioBundle>,
+    pub pending_plot_exit: Option<PlotExit>,
     pub dirty_marker_ids: HashSet<Uuid>,
     pub dirty_building_ids: HashSet<Uuid>,
     pub dirty_line_ids: HashSet<Uuid>,
@@ -1771,6 +1780,9 @@ impl AppState {
             new_building_color: "#38bdf8".to_string(),
             new_polygon_height: 6.0,
             new_line_color: "#f59e0b".to_string(),
+            reload_plot_on_return: false,
+            offline_saved_plot: None,
+            pending_plot_exit: None,
             dirty_marker_ids: HashSet::new(),
             dirty_building_ids: HashSet::new(),
             dirty_line_ids: HashSet::new(),
@@ -1788,6 +1800,45 @@ impl AppState {
             + self.dirty_text_ids.len()
             + self.dirty_anim_ids.len()
             + usize::from(self.skenario_dirty)
+    }
+
+    pub fn remember_offline_plot(&mut self) {
+        if let Some(sk) = self.active_skenario.clone() {
+            self.offline_saved_plot = Some(twg_shared::models::SkenarioBundle {
+                skenario: sk,
+                markers: self.markers.clone(),
+                buildings: self.buildings.clone(),
+                lines: self.lines.clone(),
+                text_markers: self.text_markers.clone(),
+                anims: self.anims.clone(),
+                alurs: self.alurs.clone(),
+                particles: self.particles.clone(),
+                snapshot: None,
+            });
+        }
+    }
+
+    pub fn discard_plot_changes(&mut self) {
+        if self.offline_preview {
+            if let Some(saved) = &self.offline_saved_plot {
+                self.active_skenario = Some(saved.skenario.clone());
+                self.markers.clone_from(&saved.markers);
+                self.buildings.clone_from(&saved.buildings);
+                self.lines.clone_from(&saved.lines);
+                self.text_markers.clone_from(&saved.text_markers);
+                self.anims.clone_from(&saved.anims);
+                self.restore_active_skenario_map_state();
+            }
+        } else {
+            self.reload_plot_on_return = true;
+        }
+        self.selected = SelectedEntity::None;
+        self.marker_edit = None;
+        self.building_edit = None;
+        self.line_edit = None;
+        self.text_edit = None;
+        self.anim_edit = None;
+        self.clear_all_dirty();
     }
 
     pub fn clear_all_dirty(&mut self) {
@@ -2472,6 +2523,7 @@ impl AppState {
             created_at: now,
             updated_at: now,
         }];
+        self.remember_offline_plot();
     }
 }
 
@@ -2528,6 +2580,21 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn discard_offline_plot_restores_last_saved_marker() {
+        let mut state = AppState::new(PathBuf::from("."));
+        state.enter_offline_demo();
+        state.markers[0].name = "Tersimpan".into();
+        state.remember_offline_plot();
+        state.markers[0].name = "Belum disimpan".into();
+        state.dirty_marker_ids.insert(state.markers[0].id);
+
+        state.discard_plot_changes();
+
+        assert_eq!(state.markers[0].name, "Tersimpan");
+        assert_eq!(state.unsaved_change_count(), 0);
     }
 
     #[test]

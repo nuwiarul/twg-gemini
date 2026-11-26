@@ -12,7 +12,7 @@ use crate::{
         ws_client::{WsClientBridge, WsOutCommand},
     },
     scene::markers::{finish_active_draft, save_all_scenario_changes},
-    state::{AppScreen, AppState, PlaySessionMode, PlaybackState, SkyboxPreset, ToolMode},
+    state::{AppScreen, AppState, PlotExit, PlaySessionMode, PlaybackState, SkyboxPreset, ToolMode},
     ui::{
         app_icon::draw_app_brand_icon,
         nav_bar::{
@@ -75,19 +75,11 @@ pub fn draw_top_bar(
                     )
                     .clicked()
                 {
-                    playback.stop_play_test();
-                    state.draft_points_lnglat.clear();
-                    state.measure_points_lnglat.clear();
-                    state.tool_mode = ToolMode::Select;
-                    state.screen = AppScreen::Skenarios;
-                    trigger_load_skenarios(state, api);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Skenarios));
                 }
 
                 if ui.selectable_label(false, "Operasi").clicked() {
-                    playback.stop_play_test();
-                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                    state.screen = AppScreen::Operasis;
-                    trigger_load_operasis(state, api);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Operasis));
                 }
 
                 if ui
@@ -98,10 +90,7 @@ pub fn draw_top_bar(
                     )
                     .clicked()
                 {
-                    playback.stop_play_test();
-                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                    state.screen = AppScreen::Tactical;
-                    trigger_load_tactical_operasis(state, api);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Tactical));
                 }
 
                 if ui
@@ -112,28 +101,19 @@ pub fn draw_top_bar(
                     )
                     .clicked()
                 {
-                    enter_layar_besar(state, playback, ws);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::LayarBesar));
                 }
 
                 if state.can_manage_satkers() && ui.selectable_label(false, "Satkers").clicked() {
-                    playback.stop_play_test();
-                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                    state.screen = AppScreen::Satkers;
-                    trigger_load_satkers(state, api);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Satkers));
                 }
 
                 if state.can_manage_users() && ui.selectable_label(false, "Users").clicked() {
-                    playback.stop_play_test();
-                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                    state.screen = AppScreen::Users;
-                    trigger_load_users(state, api);
-                    trigger_load_satkers(state, api);
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Users));
                 }
 
                 if state.is_super_admin() && ui.selectable_label(false, "Assets 3D").clicked() {
-                    playback.stop_play_test();
-                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                    state.screen = AppScreen::Assets;
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Assets));
                 }
 
                 ui.separator();
@@ -307,17 +287,7 @@ pub fn draw_top_bar(
                 // Right side: WS status, user, logout
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Logout").clicked() {
-                        playback.stop_play_test();
-                        ws.send(WsOutCommand::Disconnect);
-                        state.screen = AppScreen::Login;
-                        state.offline_preview = false;
-                        state.auth_token = None;
-                        state.refresh_token = None;
-                        state.current_user = None;
-                        state.active_skenario = None;
-                        state.selected_operasi_id = None;
-                        state.skenario_table.operasi = None;
-                        state.ws_connected = false;
+                        state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Login));
                     }
 
                     if state.offline_preview {
@@ -356,7 +326,7 @@ pub fn draw_top_bar(
                             .on_hover_text("Buka halaman Profil & Ganti Password")
                             .clicked()
                     {
-                        open_profile_screen(state, playback, ws);
+                        state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Profile));
                     }
                 });
             });
@@ -824,5 +794,74 @@ fn draw_transform_tool_icon(
             );
         }
         _ => {}
+    }
+}
+
+pub(super) fn leave_plot(
+    page: AppScreen,
+    state: &mut AppState,
+    playback: &mut PlaybackState,
+    api: &ApiClientBridge,
+    ws: &WsClientBridge,
+) {
+    match page {
+        AppScreen::Skenarios => {
+            playback.stop_play_test();
+            state.draft_points_lnglat.clear();
+            state.measure_points_lnglat.clear();
+            state.tool_mode = ToolMode::Select;
+            state.screen = AppScreen::Skenarios;
+            trigger_load_skenarios(state, api);
+        }
+        AppScreen::Operasis => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Operasis;
+            trigger_load_operasis(state, api);
+        }
+        AppScreen::Tactical => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Tactical;
+            trigger_load_tactical_operasis(state, api);
+        }
+        AppScreen::LayarBesar => {
+            enter_layar_besar(state, playback, ws);
+        }
+        AppScreen::Satkers => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Satkers;
+            trigger_load_satkers(state, api);
+        }
+        AppScreen::Users => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Users;
+            trigger_load_users(state, api);
+            trigger_load_satkers(state, api);
+        }
+        AppScreen::Assets => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Assets;
+        }
+        AppScreen::Login => {
+            playback.stop_play_test();
+            ws.send(WsOutCommand::Disconnect);
+            state.screen = AppScreen::Login;
+            state.offline_preview = false;
+            state.auth_token = None;
+            state.refresh_token = None;
+            state.current_user = None;
+            state.active_skenario = None;
+            state.selected_operasi_id = None;
+            state.skenario_table.operasi = None;
+            state.ws_connected = false;
+        }
+        AppScreen::Profile => {
+            open_profile_screen(state, playback, ws);
+        }
+        AppScreen::PlotSkenario => {}
     }
 }

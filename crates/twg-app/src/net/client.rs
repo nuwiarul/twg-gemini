@@ -389,14 +389,14 @@ pub enum ApiEvent {
 
 #[derive(Resource)]
 pub struct ApiClientBridge {
-    cmd_tx: Sender<ApiCommand>,
-    evt_rx: Receiver<ApiEvent>,
+    cmd_tx: Sender<(bool, ApiCommand)>,
+    evt_rx: Receiver<(bool, ApiEvent)>,
 }
 
 impl ApiClientBridge {
     pub fn start() -> Self {
-        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<ApiCommand>();
-        let (evt_tx, evt_rx) = crossbeam_channel::unbounded::<ApiEvent>();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<(bool, ApiCommand)>();
+        let (evt_tx, evt_rx) = crossbeam_channel::unbounded::<(bool, ApiEvent)>();
 
         std::thread::Builder::new()
             .name("twg-http-worker".into())
@@ -413,12 +413,12 @@ impl ApiClientBridge {
                     .expect("failed to build reqwest client");
 
                 rt.block_on(async move {
-                    while let Ok(cmd) = cmd_rx.recv() {
+                    while let Ok((plot_save, cmd)) = cmd_rx.recv() {
                         let c = client.clone();
                         let tx = evt_tx.clone();
                         tokio::spawn(async move {
                             let evt = handle_command(&c, cmd).await;
-                            let _ = tx.send(evt);
+                            let _ = tx.send((plot_save, evt));
                         });
                     }
                 });
@@ -429,10 +429,14 @@ impl ApiClientBridge {
     }
 
     pub fn send(&self, cmd: ApiCommand) {
-        let _ = self.cmd_tx.send(cmd);
+        let _ = self.cmd_tx.send((false, cmd));
     }
 
-    pub fn drain_events(&self) -> Vec<ApiEvent> {
+    pub fn send_plot_save(&self, cmd: ApiCommand) {
+        let _ = self.cmd_tx.send((true, cmd));
+    }
+
+    pub fn drain_events(&self) -> Vec<(bool, ApiEvent)> {
         self.evt_rx.try_iter().collect()
     }
 }

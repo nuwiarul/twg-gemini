@@ -598,8 +598,12 @@ pub fn save_all_scenario_changes(
     api: &ApiClientBridge,
     ws: &WsClientBridge,
 ) {
+    if state.saving_pending_count > 0 {
+        return;
+    }
     if state.offline_preview {
         let count = state.unsaved_change_count();
+        state.remember_offline_plot();
         state.clear_all_dirty();
         state.status_banner = Some(if count > 0 {
             format!("{count} perubahan tersimpan di mode Offline Preview.")
@@ -614,19 +618,18 @@ pub fn save_all_scenario_changes(
         return;
     };
 
-    let marker_ids: Vec<Uuid> = state.dirty_marker_ids.drain().collect();
-    let building_ids: Vec<Uuid> = state.dirty_building_ids.drain().collect();
-    let line_ids: Vec<Uuid> = state.dirty_line_ids.drain().collect();
-    let text_ids: Vec<Uuid> = state.dirty_text_ids.drain().collect();
-    let anim_ids: Vec<Uuid> = state.dirty_anim_ids.drain().collect();
+    let marker_ids: Vec<Uuid> = state.dirty_marker_ids.iter().copied().collect();
+    let building_ids: Vec<Uuid> = state.dirty_building_ids.iter().copied().collect();
+    let line_ids: Vec<Uuid> = state.dirty_line_ids.iter().copied().collect();
+    let text_ids: Vec<Uuid> = state.dirty_text_ids.iter().copied().collect();
+    let anim_ids: Vec<Uuid> = state.dirty_anim_ids.iter().copied().collect();
     let save_skenario = state.skenario_dirty;
-    state.skenario_dirty = false;
 
     let mut sent = 0usize;
 
     for id in marker_ids {
         if let Some(m) = state.markers.iter().find(|x| x.id == id).cloned() {
-            api.send(ApiCommand::UpdateMarker {
+            api.send_plot_save(ApiCommand::UpdateMarker {
                 auth: auth.clone(),
                 id: m.id,
                 req: UpdateMarkerRequest {
@@ -652,7 +655,7 @@ pub fn save_all_scenario_changes(
 
     for id in building_ids {
         if let Some(b) = state.buildings.iter().find(|x| x.id == id).cloned() {
-            api.send(ApiCommand::UpdateBuilding {
+            api.send_plot_save(ApiCommand::UpdateBuilding {
                 auth: auth.clone(),
                 id: b.id,
                 req: UpdateBuildingRequest {
@@ -669,7 +672,7 @@ pub fn save_all_scenario_changes(
 
     for id in line_ids {
         if let Some(l) = state.lines.iter().find(|x| x.id == id).cloned() {
-            api.send(ApiCommand::UpdateLine {
+            api.send_plot_save(ApiCommand::UpdateLine {
                 auth: auth.clone(),
                 id: l.id,
                 req: UpdatePlotLineRequest {
@@ -686,7 +689,7 @@ pub fn save_all_scenario_changes(
 
     for id in text_ids {
         if let Some(t) = state.text_markers.iter().find(|x| x.id == id).cloned() {
-            api.send(ApiCommand::UpdateTextMarker {
+            api.send_plot_save(ApiCommand::UpdateTextMarker {
                 auth: auth.clone(),
                 id: t.id,
                 req: UpdateTextMarkerRequest {
@@ -704,7 +707,7 @@ pub fn save_all_scenario_changes(
 
     for id in anim_ids {
         if let Some(a) = state.anims.iter().find(|x| x.id == id).cloned() {
-            api.send(ApiCommand::UpdateAnim {
+            api.send_plot_save(ApiCommand::UpdateAnim {
                 auth: auth.clone(),
                 id: a.id,
                 req: UpdateAnimRequest {
@@ -728,7 +731,7 @@ pub fn save_all_scenario_changes(
         && state.can_write_admin()
         && let Some(sk) = state.active_skenario.clone()
     {
-        api.send(ApiCommand::UpdateSkenario {
+        api.send_plot_save(ApiCommand::UpdateSkenario {
             auth: auth.clone(),
             id: sk.id,
             req: UpdateSkenarioRequest {
@@ -752,6 +755,8 @@ pub fn save_all_scenario_changes(
     if sent > 0 {
         state.saving_pending_count += sent;
         state.status_banner = Some(format!("Menyimpan {sent} perubahan skenario..."));
+    } else if state.unsaved_change_count() > 0 {
+        state.status_banner = Some("Perubahan belum dapat disimpan. Periksa akses edit skenario.".into());
     } else {
         state.status_banner = Some("Semua perubahan skenario sudah tersimpan.".into());
     }
@@ -2026,6 +2031,9 @@ pub fn map_interaction_system(
     cam_q: Query<(&Camera, &GlobalTransform), With<crate::map::camera::TacticalCamera>>,
     pick: ScenePickParams,
 ) {
+    if state.pending_plot_exit.is_some() {
+        return;
+    }
     if state.screen != AppScreen::PlotSkenario {
         gizmo_state.cancel();
         poly_edit.clear();

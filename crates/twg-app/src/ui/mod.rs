@@ -47,11 +47,12 @@ use crate::{
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
         route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
     },
-    state::{AppScreen, AppState, PlaybackState, ToolMode, UiPointerState},
+    state::{AppScreen, AppState, PlotExit, PlaybackState, ToolMode, UiPointerState},
 };
 
 #[allow(clippy::too_many_arguments)]
 pub fn egui_root_system(
+    mut commands: Commands,
     mut contexts: EguiContexts,
     mut state: ResMut<AppState>,
     (mut playback, mut play_rts): (ResMut<PlaybackState>, ResMut<PlayRtsState>),
@@ -81,6 +82,51 @@ pub fn egui_root_system(
             .layer_id(egui::LayerId::background())
             .max_rect(screen_rect),
     );
+
+    if let Some(action) = state.pending_plot_exit {
+        let saving = state.saving_pending_count > 0;
+        let mut proceed = !saving && state.unsaved_change_count() == 0;
+        if !proceed {
+            egui::Modal::new("plot_exit_confirmation".into()).show(ctx, |ui| {
+                ui.heading("Tinggalkan Plot Editor?");
+                if saving {
+                    ui.label("Sedang menyimpan perubahan...");
+                } else {
+                    ui.label("Simpan semua perubahan sebelum keluar?");
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!saving, egui::Button::new("Yes")).clicked() {
+                        crate::scene::markers::save_all_scenario_changes(&mut state, &api, &ws);
+                        if state.saving_pending_count == 0 && state.unsaved_change_count() > 0 {
+                            state.pending_plot_exit = None;
+                        }
+                    }
+                    if ui.add_enabled(!saving, egui::Button::new("No")).clicked() {
+                        state.discard_plot_changes();
+                        proceed = true;
+                    }
+                    if ui.button("Batal").clicked() {
+                        state.pending_plot_exit = None;
+                    }
+                });
+            });
+        }
+        if proceed {
+            state.pending_plot_exit = None;
+            match action {
+                PlotExit::Page(page) => {
+                    topbar::leave_plot(page, &mut state, &mut playback, &api, &ws);
+                }
+                PlotExit::Close(window) => {
+                    commands.entity(window).try_despawn();
+                }
+            }
+        }
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
+    }
 
     if state.screen == AppScreen::Login {
         login::draw_login_screen(&mut viewport_ui, &mut state, &api, &sync_bridge);
@@ -836,4 +882,56 @@ pub fn draw_search_input_with_reset(
 
 fn ui_btn_sized(btn: egui::Button<'_>, w: f32, h: f32) -> egui::Button<'_> {
     btn.min_size(egui::vec2(w, h))
+}
+
+pub fn handle_close_requests(
+    mut requests: MessageReader<bevy::window::WindowCloseRequested>,
+    primary: Query<(), With<PrimaryWindow>>,
+    mut state: ResMut<AppState>,
+    mut commands: Commands,
+) {
+    for request in requests.read() {
+        if primary.contains(request.window)
+            && state.screen == AppScreen::PlotSkenario
+            && (state.unsaved_change_count() > 0 || state.saving_pending_count > 0)
+        {
+            state
+                .pending_plot_exit
+                .get_or_insert(PlotExit::Close(request.window));
+        } else {
+            commands.entity(request.window).try_despawn();
+        }
+    }
+}
+
+#[cfg(test)]
+mod plot_exit_tests {
+    use super::*;
+    use bevy::window::WindowCloseRequested;
+
+    #[test]
+    fn close_waits_for_confirmation_only_when_plot_has_changes() {
+        let mut app = App::new();
+        let mut state = AppState::new(".".into());
+        state.screen = AppScreen::PlotSkenario;
+        state.skenario_dirty = true;
+        app.insert_resource(state)
+            .add_message::<WindowCloseRequested>()
+            .add_systems(Update, handle_close_requests);
+        let window = app.world_mut().spawn(PrimaryWindow).id();
+        app.world_mut().write_message(WindowCloseRequested { window });
+        app.update();
+        assert!(app.world().get_entity(window).is_ok());
+        assert!(matches!(
+            app.world().resource::<AppState>().pending_plot_exit,
+            Some(PlotExit::Close(id)) if id == window
+        ));
+
+        let mut state = app.world_mut().resource_mut::<AppState>();
+        state.pending_plot_exit = None;
+        state.clear_all_dirty();
+        app.world_mut().write_message(WindowCloseRequested { window });
+        app.update();
+        assert!(app.world().get_entity(window).is_err());
+    }
 }

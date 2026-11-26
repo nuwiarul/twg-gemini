@@ -147,6 +147,7 @@ fn main() {
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
+                    close_when_requested: false,
                     primary_window: Some(Window {
                         title: "Tactical Wall Game 3D — Full Rust".into(),
                         name: Some("twg-app".into()),
@@ -210,6 +211,7 @@ fn main() {
             PostUpdate,
             normalize_skinned_mesh_weights_system.before(bevy::asset::AssetEventSystems),
         )
+        .add_systems(Update, ui::handle_close_requests)
         .add_systems(EguiPrimaryContextPass, egui_root_system)
         .run();
 }
@@ -409,7 +411,7 @@ fn process_net_events_system(
     sync_bridge: Res<AssetSyncBridge>,
     mut cam_q: Query<&mut TacticalCamera>,
 ) {
-    for evt in api.drain_events() {
+    for (plot_save, evt) in api.drain_events() {
         match evt {
             ApiEvent::ServerTestResult { ok, message } => {
                 state.testing_server_connection = false;
@@ -785,9 +787,9 @@ fn process_net_events_system(
                 state.skenario_dirty = false;
                 state.skenario_table.close_modal();
                 state.restore_active_skenario_map_state();
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -846,6 +848,10 @@ fn process_net_events_system(
                 trigger_load_operasi_options(&state, &api);
             }
             ApiEvent::SkenarioError(err) => {
+                if plot_save && state.saving_pending_count > 0 {
+                    state.saving_pending_count -= 1;
+                    state.pending_plot_exit = None;
+                }
                 state.skenario_table.loading = false;
                 state.skenario_table.submitting = false;
                 state.skenario_table.pending_open_plot_id = None;
@@ -857,6 +863,7 @@ fn process_net_events_system(
                 state.status_banner = Some(err);
             }
             ApiEvent::BundleLoaded(bundle) => {
+                state.reload_plot_on_return = false;
                 let sk = bundle.skenario;
                 let sk_id = sk.id;
                 let sk_op_id = sk.operasi_id;
@@ -969,9 +976,9 @@ fn process_net_events_system(
                 if state.marker_edit.as_ref().is_some_and(|e| e.id == m.id) {
                     state.marker_edit = Some(m);
                 }
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -1004,9 +1011,9 @@ fn process_net_events_system(
                 if state.building_edit.as_ref().is_some_and(|e| e.id == b.id) {
                     state.building_edit = Some(b);
                 }
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -1039,9 +1046,9 @@ fn process_net_events_system(
                 if state.line_edit.as_ref().is_some_and(|e| e.id == l.id) {
                     state.line_edit = Some(l);
                 }
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -1074,9 +1081,9 @@ fn process_net_events_system(
                 if state.text_edit.as_ref().is_some_and(|e| e.id == t.id) {
                     state.text_edit = Some(t);
                 }
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -1185,9 +1192,9 @@ fn process_net_events_system(
                 if state.anim_edit.as_ref().is_some_and(|e| e.id == a.id) {
                     state.anim_edit = Some(a);
                 }
-                if state.saving_pending_count > 0 {
+                if plot_save && state.saving_pending_count > 0 {
                     state.saving_pending_count -= 1;
-                    if state.saving_pending_count == 0 {
+                    if state.saving_pending_count == 0 && state.unsaved_change_count() == 0 {
                         state.status_banner =
                             Some("Semua perubahan skenario berhasil disimpan!".into());
                     }
@@ -1459,6 +1466,10 @@ fn process_net_events_system(
                 state.status_banner = Some(err);
             }
             ApiEvent::Error(err) => {
+                if plot_save && state.saving_pending_count > 0 {
+                    state.saving_pending_count -= 1;
+                    state.pending_plot_exit = None;
+                }
                 state.skenario_table.pending_open_plot_id = None;
                 state.status_banner = Some(err);
             }
