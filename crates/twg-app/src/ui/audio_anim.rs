@@ -14,6 +14,11 @@ use twg_shared::{
 };
 use uuid::Uuid;
 
+use super::{
+    right_panel::inspector_card,
+    spinner::{SpinnerConfig, numeric_spinner_u32_w, numeric_spinner_w},
+};
+
 fn card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(20, 29, 44))
@@ -113,39 +118,37 @@ pub fn sound_name(state: &AppState, anim: &Anim) -> String {
 pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, editable: bool) {
     let mut cfg = parse_audio_anim_config(anim);
     let original = cfg.clone();
-    card(ui, |ui| {
-        ui.strong("Play Suara · Sound");
+    inspector_card(ui, "Play Suara · Sound", true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
             ui.label("Nama animasi");
             ui.add(egui::TextEdit::singleline(&mut anim.name).desired_width(f32::INFINITY));
             ui.add_space(5.0);
-            ui.label(format!("Sound: {}", sound_name(state, anim)));
-            ui.add(
-                egui::TextEdit::singleline(&mut state.audio_asset_search)
-                    .hint_text("Cari Sound dari Assets...")
-                    .desired_width(f32::INFINITY),
-            );
-            let search = state.audio_asset_search.to_lowercase();
-            egui::ScrollArea::vertical()
-                .id_salt(("audio_assets", anim.id))
-                .max_height(170.0)
-                .show(ui, |ui| {
+            ui.label("Sound dari Assets");
+            let selected = state
+                .media_assets
+                .iter()
+                .find(|m| Some(m.id) == cfg.asset_id && m.media_type == MediaAssetType::Sound);
+            let selected_text = selected
+                .map(|m| m.name.as_str())
+                .unwrap_or("Pilih Sound...");
+            egui::ComboBox::from_id_salt(("audio_asset", anim.id))
+                .width(ui.available_width())
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
                     let mut found = false;
                     for asset in &state.media_assets {
-                        if asset.media_type != MediaAssetType::Sound
-                            || !asset.name.to_lowercase().contains(&search)
-                        {
+                        if asset.media_type != MediaAssetType::Sound {
                             continue;
                         }
                         found = true;
                         let duration = asset
                             .duration_sec
-                            .map(|d| format!("{d:.1} dtk"))
-                            .unwrap_or_else(|| "durasi saat preview".into());
+                            .map(|d| format!(" · {d:.1} dtk"))
+                            .unwrap_or_default();
                         if ui
                             .selectable_label(
                                 cfg.asset_id == Some(asset.id),
-                                format!("{} · {duration}", asset.name),
+                                format!("{}{duration}", asset.name),
                             )
                             .clicked()
                             && cfg.asset_id != Some(asset.id)
@@ -156,9 +159,14 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
                         }
                     }
                     if !found {
-                        ui.label("Tidak ada Sound. Upload terlebih dahulu di halaman Assets.");
+                        ui.label("Belum ada Sound — upload di halaman Assets.");
                     }
                 });
+            if let Some(asset) = selected {
+                if let Some(seconds) = asset.duration_sec {
+                    ui.small(format!("Durasi file: {seconds:.1} dtk"));
+                }
+            }
             ui.checkbox(&mut anim.autoplay, "Autoplay saat skenario dimulai");
         });
     });
@@ -167,12 +175,14 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
         .iter()
         .find(|m| Some(m.id) == cfg.asset_id)
         .and_then(|m| m.duration_sec);
-    card(ui, |ui| {
-        ui.strong("Pemutaran");
+    inspector_card(ui, "Pemutaran", true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
-            let mut volume = cfg.volume * 100.0;
-            if ui.add(egui::Slider::new(&mut volume, 0.0..=100.0).text("Volume %")).changed() { cfg.volume = volume / 100.0; }
+            let mut volume = cfg.volume as f64 * 100.0;
+            seconds_with_range(ui, ("audio_volume", anim.id), "Volume", &mut volume, 0.0, 100.0, 1.0, " %");
+            cfg.volume = (volume / 100.0) as f32;
+            ui.label("Pengulangan");
             egui::ComboBox::from_id_salt(("audio_repeat", anim.id))
+                .width(ui.available_width())
                 .selected_text(match cfg.repeat { AudioRepeat::Once => "Sekali", AudioRepeat::Count => "Jumlah tertentu", AudioRepeat::Forever => "Sampai dihentikan" })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut cfg.repeat, AudioRepeat::Once, "Sekali");
@@ -180,20 +190,24 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
                     ui.selectable_value(&mut cfg.repeat, AudioRepeat::Forever, "Sampai dihentikan");
                 });
             if cfg.repeat == AudioRepeat::Count {
-                ui.horizontal(|ui| { ui.label("Total pemutaran"); ui.add(egui::DragValue::new(&mut cfg.repeat_count).range(1..=10000)); });
+                ui.horizontal(|ui| {
+                    ui.label("Total pemutaran");
+                    let width = ui.available_width().max(78.0);
+                    numeric_spinner_u32_w(ui, ("audio_repeat_count", anim.id), &mut cfg.repeat_count, width, 1, 10000, 1, 0.5);
+                });
             }
             if cfg.repeat == AudioRepeat::Forever {
                 ui.colored_label(egui::Color32::from_rgb(251, 191, 36), "Sequence dengan Tunggu Selesai akan menunggu sampai suara dihentikan. Gunakan pemicu jeda waktu untuk lanjut otomatis.");
             }
-            seconds(ui, "Jeda awal", &mut cfg.delay_sec);
-            seconds(ui, "Mulai dari", &mut cfg.clip_start_sec);
+            seconds(ui, ("audio_delay", anim.id), "Jeda awal", &mut cfg.delay_sec);
+            seconds(ui, ("audio_start", anim.id), "Mulai dari", &mut cfg.clip_start_sec);
             let mut until_end = cfg.clip_end_sec.is_none();
             if ui.checkbox(&mut until_end, "Sampai akhir file").changed() {
                 cfg.clip_end_sec = if until_end { None } else { Some(duration.unwrap_or(cfg.clip_start_sec + 1.0)) };
             }
-            if let Some(end) = &mut cfg.clip_end_sec { seconds(ui, "Berakhir pada", end); }
-            seconds(ui, "Fade in", &mut cfg.fade_in_sec);
-            seconds(ui, "Fade out", &mut cfg.fade_out_sec);
+            if let Some(end) = &mut cfg.clip_end_sec { seconds(ui, ("audio_end", anim.id), "Berakhir pada", end); }
+            seconds(ui, ("audio_fade_in", anim.id), "Fade in", &mut cfg.fade_in_sec);
+            seconds(ui, ("audio_fade_out", anim.id), "Fade out", &mut cfg.fade_out_sec);
         });
         if let Some(duration) = duration {
             match cfg.clip_duration(duration) {
@@ -228,14 +242,37 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
     }
 }
 
-fn seconds(ui: &mut egui::Ui, name: &str, value: &mut f64) {
+fn seconds(ui: &mut egui::Ui, id: impl egui::AsIdSalt, name: &str, value: &mut f64) {
+    seconds_with_range(ui, id, name, value, 0.0, 86400.0, 0.1, " dtk");
+}
+
+fn seconds_with_range(
+    ui: &mut egui::Ui,
+    id: impl egui::AsIdSalt,
+    name: &str,
+    value: &mut f64,
+    min: f64,
+    max: f64,
+    step: f64,
+    suffix: &'static str,
+) {
     ui.horizontal(|ui| {
         ui.label(name);
-        ui.add(
-            egui::DragValue::new(value)
-                .range(0.0..=86400.0)
-                .speed(0.1)
-                .suffix(" dtk"),
+        let width = ui.available_width().max(78.0);
+        numeric_spinner_w(
+            ui,
+            id,
+            value,
+            width,
+            SpinnerConfig {
+                min,
+                max,
+                step,
+                drag_speed: step,
+                decimals: if step < 1.0 { 1 } else { 0 },
+                suffix,
+                wrap_around: false,
+            },
         );
     });
 }
@@ -255,64 +292,130 @@ pub fn draw_play_card(
     index: usize,
 ) -> Option<AudioAction> {
     let mut action = None;
-    card(ui, |ui| {
-        ui.colored_label(
-            egui::Color32::from_rgb(192, 132, 252),
-            format!("{} · AUDIO / PLAY SUARA", index + 1),
-        );
-        ui.strong(&anim.name);
-        ui.label(sound_name(state, anim));
-        let status = playback.track_status(anim.id);
-        let cfg = parse_audio_anim_config(anim);
-        ui.label(
-            state
-                .audio_status
-                .get(&anim.id)
-                .map(String::as_str)
-                .unwrap_or(match status {
-                    AnimRunStatus::Playing => "Menyiapkan...",
-                    AnimRunStatus::Paused => "Dijeda",
-                    AnimRunStatus::Finished => "Selesai",
-                    AnimRunStatus::Stopped => "Siap",
-                }),
-        );
-        if let Some(track) = playback.tracks.get(&anim.id) {
-            let progress = if track.total_length_m > 0.0 {
-                (track.distance_m / track.total_length_m).clamp(0.0, 1.0) as f32
+    let status = playback.track_status(anim.id);
+    let accent = match status {
+        AnimRunStatus::Playing => egui::Color32::from_rgb(16, 185, 129),
+        AnimRunStatus::Paused => egui::Color32::from_rgb(245, 158, 11),
+        _ => egui::Color32::from_rgb(44, 62, 92),
+    };
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(20, 29, 44))
+        .stroke(egui::Stroke::new(1.2, accent))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("#{}", index + 1))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.label(
+                    egui::RichText::new("AUDIO / PLAY SUARA")
+                        .size(9.5)
+                        .strong()
+                        .color(egui::Color32::from_rgb(192, 132, 252)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, color) = match status {
+                        AnimRunStatus::Playing => {
+                            ("BERJALAN", egui::Color32::from_rgb(110, 231, 183))
+                        }
+                        AnimRunStatus::Paused => ("DIJEDA", egui::Color32::from_rgb(253, 230, 138)),
+                        AnimRunStatus::Finished => {
+                            ("SELESAI", egui::Color32::from_rgb(191, 219, 254))
+                        }
+                        AnimRunStatus::Stopped => ("SIAP", egui::Color32::from_rgb(148, 163, 184)),
+                    };
+                    ui.label(egui::RichText::new(label).size(9.0).strong().color(color));
+                });
+            });
+            ui.label(
+                egui::RichText::new(&anim.name)
+                    .size(12.5)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+            ui.label(
+                egui::RichText::new(sound_name(state, anim))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            let cfg = parse_audio_anim_config(anim);
+            if status != AnimRunStatus::Stopped {
+                if let Some(message) = state.audio_status.get(&anim.id) {
+                    ui.label(
+                        egui::RichText::new(message)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(186, 230, 253)),
+                    );
+                }
+            }
+            let progress = playback.tracks.get(&anim.id)
+                .filter(|track| track.total_length_m > 0.0)
+                .map(|track| (track.distance_m / track.total_length_m).clamp(0.0, 1.0) as f32)
+                .unwrap_or(0.0);
+            super::play_panel::draw_card_progress_bar(ui, status, progress);
+            ui.add_space(6.0);
+            if matches!(status, AnimRunStatus::Stopped | AnimRunStatus::Finished) {
+                let button = egui::Button::new(
+                    egui::RichText::new("Play")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(5, 150, 105))
+                .min_size(egui::vec2(ui.available_width(), 28.0));
+                if ui.add_enabled(cfg.asset_id.is_some(), button).clicked() {
+                    action = Some(AudioAction::Play);
+                }
             } else {
-                0.0
-            };
-            ui.add(egui::ProgressBar::new(progress).desired_width(ui.available_width()));
-        }
-        ui.horizontal(|ui| {
-            match status {
-                AnimRunStatus::Stopped | AnimRunStatus::Finished => {
-                    if ui
-                        .add_enabled(
-                            cfg.asset_id.is_some(),
-                            egui::Button::new("Play").fill(egui::Color32::from_rgb(5, 150, 105)),
+                ui.columns(2, |cols| {
+                    match status {
+                        AnimRunStatus::Playing => {
+                            if cols[0]
+                                .add(
+                                    egui::Button::new("Pause")
+                                        .fill(egui::Color32::from_rgb(180, 83, 9))
+                                        .min_size(egui::vec2(cols[0].available_width(), 28.0)),
+                                )
+                                .clicked()
+                            {
+                                action = Some(AudioAction::Pause);
+                            }
+                        }
+                        AnimRunStatus::Paused => {
+                            if cols[0]
+                                .add(
+                                    egui::Button::new("Resume")
+                                        .fill(egui::Color32::from_rgb(5, 150, 105))
+                                        .min_size(egui::vec2(cols[0].available_width(), 28.0)),
+                                )
+                                .clicked()
+                            {
+                                action = Some(AudioAction::Resume);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if cols[1]
+                        .add(
+                            egui::Button::new("Stop")
+                                .fill(egui::Color32::from_rgb(185, 28, 28))
+                                .min_size(egui::vec2(cols[1].available_width(), 28.0)),
                         )
                         .clicked()
                     {
-                        action = Some(AudioAction::Play);
+                        action = Some(AudioAction::Stop);
                     }
-                }
-                AnimRunStatus::Playing => {
-                    if ui.button("Pause").clicked() {
-                        action = Some(AudioAction::Pause);
-                    }
-                }
-                AnimRunStatus::Paused => {
-                    if ui.button("Resume").clicked() {
-                        action = Some(AudioAction::Resume);
-                    }
-                }
+                });
             }
-            if status != AnimRunStatus::Stopped && ui.button("Stop").clicked() {
+            if status == AnimRunStatus::Finished && ui.small_button("Stop / Reset").clicked() {
                 action = Some(AudioAction::Stop);
             }
         });
-    });
+    ui.add_space(6.0);
     action
 }
 

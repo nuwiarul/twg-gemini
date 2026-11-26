@@ -1749,27 +1749,7 @@ pub fn draw_play_animation_panel(
 
                                 ui.add_space(5.0);
 
-                                // Clean progress bar
-                                let bar_h = 5.0;
-                                let (bar_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), bar_h),
-                                    egui::Sense::hover(),
-                                );
-                                let p = ui.painter();
-                                p.rect_filled(bar_rect, 2.5, egui::Color32::from_rgb(12, 18, 30));
-                                if progress > 0.0 {
-                                    let fill_w = (bar_rect.width() * progress).max(4.0);
-                                    let fill_rect = egui::Rect::from_min_size(
-                                        bar_rect.min,
-                                        egui::vec2(fill_w, bar_h),
-                                    );
-                                    let bar_col = match status {
-                                        AnimRunStatus::Playing => egui::Color32::from_rgb(16, 185, 129),
-                                        AnimRunStatus::Paused => egui::Color32::from_rgb(245, 158, 11),
-                                        _ => egui::Color32::from_rgb(56, 189, 248),
-                                    };
-                                    p.rect_filled(fill_rect, 2.5, bar_col);
-                                }
+                                draw_card_progress_bar(ui, status, progress);
 
                                 ui.add_space(7.0);
 
@@ -2195,6 +2175,26 @@ pub fn draw_play_animation_panel(
         .response
         .rect
         .width()
+}
+
+pub(super) fn draw_card_progress_bar(ui: &mut egui::Ui, status: AnimRunStatus, progress: f32) {
+    let bar_h = 5.0;
+    let (bar_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), bar_h),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(bar_rect, 2.5, egui::Color32::from_rgb(12, 18, 30));
+    if progress > 0.0 {
+        let fill_w = (bar_rect.width() * progress.clamp(0.0, 1.0)).max(4.0);
+        let fill_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(fill_w, bar_h));
+        let color = match status {
+            AnimRunStatus::Playing => egui::Color32::from_rgb(16, 185, 129),
+            AnimRunStatus::Paused => egui::Color32::from_rgb(245, 158, 11),
+            _ => egui::Color32::from_rgb(56, 189, 248),
+        };
+        painter.rect_filled(fill_rect, 2.5, color);
+    }
 }
 
 fn draw_tactical_skenario_tab(

@@ -138,7 +138,9 @@ pub fn draw_right_panel(
                         }
                         SelectedEntity::Anim(id) => {
                             let anim_ref = state.anims.iter().find(|a| a.id == id);
-                            if anim_ref.is_some_and(is_traffic_gridlock_anim) {
+                            if anim_ref.is_some_and(twg_shared::audio_anim::is_audio_anim) {
+                                ("PLAY SUARA", egui::Color32::from_rgb(109, 40, 217))
+                            } else if anim_ref.is_some_and(is_traffic_gridlock_anim) {
                                 ("MACET TOTAL", egui::Color32::from_rgb(190, 18, 60))
                             } else if anim_ref.is_some_and(is_traffic_manual_anim) {
                                 ("SIMPANG MANUAL", egui::Color32::from_rgb(79, 70, 229))
@@ -262,7 +264,7 @@ pub fn draw_right_panel(
         .width()
 }
 
-fn inspector_card(
+pub(super) fn inspector_card(
     ui: &mut egui::Ui,
     title: &str,
     default_open: bool,

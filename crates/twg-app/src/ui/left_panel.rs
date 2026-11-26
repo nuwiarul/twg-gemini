@@ -2184,14 +2184,28 @@ fn draw_layers_tab(
             // Audio has no map geometry; select it here or in the Animasi tab.
             let audio_anims: Vec<_> = state.anims.iter()
                 .filter(|a| twg_shared::audio_anim::is_audio_anim(a))
-                .filter(|a| (filter.is_empty() || a.name.to_lowercase().contains(&filter) || "audio play suara".contains(&filter))
-                    && state.matches_layer_filters(!state.hidden_entity_ids.contains(&a.id), state.locked_entity_ids.contains(&a.id)))
+                .filter(|a| filter.is_empty() || a.name.to_lowercase().contains(&filter) || "audio play suara".contains(&filter))
                 .cloned().collect();
-            egui::CollapsingHeader::new(format!("Audio ({})", audio_anims.len()))
+            egui::CollapsingHeader::new(egui::RichText::new(format!("Audio ({})", audio_anims.len()))
+                .size(12.0).strong().color(egui::Color32::from_rgb(192, 132, 252)))
                 .id_salt("audio_layers").default_open(true).show(ui, |ui| {
                     for anim in &audio_anims {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(state.selected == SelectedEntity::Anim(anim.id), &anim.name).clicked() {
+                        let selected = state.selected == SelectedEntity::Anim(anim.id);
+                        egui::Frame::new()
+                            .fill(if selected { egui::Color32::from_rgb(14, 116, 144) } else { egui::Color32::TRANSPARENT })
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::symmetric(4, 3))
+                            .show(ui, |ui| { ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let name_width = (ui.available_width() - 38.0).max(50.0);
+                            let name_clicked = ui.allocate_ui_with_layout(
+                                egui::vec2(name_width, 25.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| ui.add(egui::Label::new(egui::RichText::new(&anim.name)
+                                    .size(11.0).color(egui::Color32::from_rgb(226, 232, 240)))
+                                    .truncate().sense(egui::Sense::click())).clicked(),
+                            ).inner;
+                            if name_clicked {
                                 state.selected = SelectedEntity::Anim(anim.id);
                                 state.anim_edit = Some(anim.clone());
                                 state.marker_edit = None;
@@ -2199,10 +2213,15 @@ fn draw_layers_tab(
                                 state.line_edit = None;
                                 state.text_edit = None;
                             }
-                            if ui.add_enabled(!is_play_mode && !state.locked_entity_ids.contains(&anim.id), egui::Button::new("Hapus").small()).clicked() {
-                                state.request_delete_entity(SelectedEntity::Anim(anim.id));
-                            }
-                        });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(!is_play_mode, egui::Button::new(egui::RichText::new("×")
+                                    .size(16.0).strong().color(egui::Color32::from_rgb(248, 113, 113)))
+                                    .min_size(egui::vec2(28.0, 25.0)).frame(false))
+                                    .on_hover_text("Hapus animasi Audio").clicked() {
+                                    state.request_delete_entity(SelectedEntity::Anim(anim.id));
+                                }
+                            });
+                        }); });
                     }
                 });
             ui.add_space(4.0);
