@@ -12,6 +12,7 @@ pub mod plot_line_edit;
 pub mod pointer_arrow;
 pub mod polygon_edit;
 pub mod route_edit;
+pub mod scenario_audio;
 pub mod shoot_fx;
 pub mod skybox;
 pub mod traffic;

@@ -2179,6 +2179,32 @@ fn draw_layers_tab(
 
             ui.add_space(4.0);
 
+            // Audio has no map geometry; select it here or in the Animasi tab.
+            let audio_anims: Vec<_> = state.anims.iter()
+                .filter(|a| twg_shared::audio_anim::is_audio_anim(a))
+                .filter(|a| (filter.is_empty() || a.name.to_lowercase().contains(&filter) || "audio play suara".contains(&filter))
+                    && state.matches_layer_filters(!state.hidden_entity_ids.contains(&a.id), state.locked_entity_ids.contains(&a.id)))
+                .cloned().collect();
+            egui::CollapsingHeader::new(format!("Audio ({})", audio_anims.len()))
+                .id_salt("audio_layers").default_open(true).show(ui, |ui| {
+                    for anim in &audio_anims {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(state.selected == SelectedEntity::Anim(anim.id), &anim.name).clicked() {
+                                state.selected = SelectedEntity::Anim(anim.id);
+                                state.anim_edit = Some(anim.clone());
+                                state.marker_edit = None;
+                                state.building_edit = None;
+                                state.line_edit = None;
+                                state.text_edit = None;
+                            }
+                            if ui.add_enabled(!is_play_mode && !state.locked_entity_ids.contains(&anim.id), egui::Button::new("Hapus").small()).clicked() {
+                                state.request_delete_entity(SelectedEntity::Anim(anim.id));
+                            }
+                        });
+                    }
+                });
+            ui.add_space(4.0);
+
             // 10. Grup Animasi (Combine & Sequence)
             let grp_anims: Vec<twg_shared::models::Anim> = state
                 .anims
@@ -3017,6 +3043,7 @@ fn draw_animations_tab(
                             AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
                             AnimCategory::Group => egui::Color32::from_rgb(79, 70, 229),
                             AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
+                            AnimCategory::Audio => egui::Color32::from_rgb(109, 40, 217),
                         }
                     } else {
                         egui::Color32::from_rgb(22, 30, 45)
@@ -3038,6 +3065,8 @@ fn draw_animations_tab(
                 draw_cat_btn(&mut cols[1], state, AnimCategory::Group);
                 draw_cat_btn(&mut cols[2], state, AnimCategory::Other);
             });
+            ui.add_space(3.0);
+            draw_cat_btn(ui, state, AnimCategory::Audio);
         });
 
     ui.add_space(6.0);
@@ -3049,6 +3078,7 @@ fn draw_animations_tab(
         AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
         AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
         AnimCategory::Other => draw_other_create_card(ui, state, editable),
+        AnimCategory::Audio => super::audio_anim::draw_create(ui, state, api, editable),
     }
 
     ui.add_space(7.0);
@@ -4437,7 +4467,7 @@ fn draw_ordered_animation_list(
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(if total_count == 0 {
-                        "Belum ada animasi.\nKlik '+ Buat Rute Unit Tunggal' di atas untuk mulai menggambar garis di peta."
+                        "Belum ada animasi.\nPilih kategori dan buat animasi melalui tombol di atas."
                     } else {
                         "Tidak ada animasi di filter kategori ini.\nPilih 'Semua' untuk melihat seluruh urutan skenario."
                     })
@@ -4474,6 +4504,7 @@ fn draw_ordered_animation_list(
                         }
                     }
                     AnimCategory::Route => ("RUTE", egui::Color32::from_rgb(5, 150, 105)),
+                    AnimCategory::Audio => ("PLAY SUARA", egui::Color32::from_rgb(109, 40, 217)),
                     AnimCategory::Shoot => match shoot_anim_kind(a).unwrap_or_default() {
                         ShootAnimKind::WaterCannon => {
                             ("WATER CANNON", egui::Color32::from_rgb(2, 132, 199))
@@ -4615,7 +4646,9 @@ fn draw_ordered_animation_list(
                         } else {
                             has_units
                         };
-                        let meta = if is_particle {
+                        let meta = if twg_shared::audio_anim::is_audio_anim(a) {
+                            super::audio_anim::sound_name(state, a)
+                        } else if is_particle {
                             let cfg = parse_particle_anim_config(a);
                             let alt = particle_anim_position(a)[2];
                             if cfg.continuous {

@@ -1045,6 +1045,7 @@ pub enum AnimCategory {
     SpawnHide,
     Group,
     Other,
+    Audio,
 }
 
 impl AnimCategory {
@@ -1055,6 +1056,7 @@ impl AnimCategory {
         Self::SpawnHide,
         Self::Group,
         Self::Other,
+        Self::Audio,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1065,11 +1067,13 @@ impl AnimCategory {
             Self::SpawnHide => "Spawn & Hide",
             Self::Group => "Grup",
             Self::Other => "Lainnya",
+            Self::Audio => "Audio",
         }
     }
 
     pub fn from_anim_type(anim_type: &str) -> Self {
         match anim_type {
+            "play_sound" => Self::Audio,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1171,6 +1175,7 @@ pub struct AnimRuntimeTrack {
 
 #[derive(Resource)]
 pub struct PlaybackState {
+    pub session_generation: u64,
     pub play_test_mode: bool,
     /// Non-destructive Plot-Editor preview for a selected Route or Group animation (runs without entering Play Skenario).
     pub editor_preview_anim_id: Option<Uuid>,
@@ -1190,6 +1195,7 @@ pub struct PlaybackState {
 impl Default for PlaybackState {
     fn default() -> Self {
         Self {
+            session_generation: 0,
             play_test_mode: false,
             editor_preview_anim_id: None,
             playing: false,
@@ -1220,6 +1226,7 @@ impl PlaybackState {
 
     /// Starts (or restarts) a non-destructive Plot-Editor preview for `anim_id` (Route or Group).
     pub fn start_editor_preview(&mut self, anim_id: Uuid) {
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.play_test_mode = false;
         self.tracks.clear();
         self.next_trigger_seq = 0;
@@ -1239,6 +1246,7 @@ impl PlaybackState {
 
     /// Enters Play Skenario mode with all animations ready (Idle/Stopped) in the Animation Panel.
     pub fn enter_play_mode(&mut self) {
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.editor_preview_anim_id = None;
         self.play_test_mode = true;
         self.playing = false;
@@ -1382,7 +1390,9 @@ impl PlaybackState {
     pub fn play_all_routes(&mut self, anims: &[Anim]) {
         self.play_test_mode = true;
         for a in anims {
-            let playable = if twg_shared::particle_anim::is_particle_anim(a) {
+            let playable = if twg_shared::audio_anim::is_audio_anim(a) {
+                twg_shared::audio_anim::parse_audio_anim_config(a).asset_id.is_some()
+            } else if twg_shared::particle_anim::is_particle_anim(a) {
                 !a.geom.is_empty()
             } else if twg_shared::traffic_anim::is_traffic_anim(a) {
                 twg_shared::traffic_anim::parse_traffic_anim_config(a).has_playable_setup()
@@ -1461,6 +1471,10 @@ pub struct TrafficScalePreviewState {
 
 #[derive(Resource)]
 pub struct AppState {
+    pub audio_asset_search: String,
+    pub audio_status: HashMap<Uuid, String>,
+    /// Local output only; never broadcast as a scenario command.
+    pub scenario_audio_enabled: bool,
     pub screen: AppScreen,
     pub offline_preview: bool,
     pub server_url: String,
@@ -1851,6 +1865,9 @@ impl AppState {
             new_traffic_queue_name: "Urai Simpang 1".to_string(),
             new_traffic_gridlock_name: "Macet Total 1".to_string(),
             traffic_queue_live_status: HashMap::new(),
+            audio_asset_search: String::new(),
+            audio_status: HashMap::new(),
+            scenario_audio_enabled: crate::settings::load_audio_output(),
             new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind::WaterCannon,
             new_shoot_name: "Water Cannon 1".to_string(),
             shoot_preview_reset_nonce: 0,

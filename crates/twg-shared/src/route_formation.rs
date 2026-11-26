@@ -950,6 +950,9 @@ pub fn anim_bound_marker_ids(anim: &Anim) -> Vec<Uuid> {
 /// - Spawn & Hide animations require at least one existing bound marker in `marker_ids`.
 /// - Route animations require `>= 2` waypoints and at least one existing bound marker.
 pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
+    if crate::audio_anim::is_audio_anim(anim) {
+        return crate::audio_anim::parse_audio_anim_config(anim).asset_id.is_some();
+    }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }

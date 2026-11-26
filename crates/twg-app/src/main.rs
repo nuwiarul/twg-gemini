@@ -51,6 +51,7 @@ use crate::{
         polygon_edit::PolygonEditState,
         plot_line_edit::PlotLineEditState,
         route_edit::RouteEditState,
+        scenario_audio::{ScenarioAudio, scenario_audio_system},
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
         traffic::{TrafficVisualPool, traffic_visual_system},
@@ -145,6 +146,7 @@ fn main() {
         .init_resource::<BasicMeshTextureCache>()
         .init_resource::<AssetPreviewStage>()
         .init_resource::<MediaPreviewPlayer>()
+        .init_resource::<ScenarioAudio>()
         .insert_resource(ApiClientBridge::start())
         .insert_resource(WsClientBridge::start())
         .insert_resource(sync_bridge)
@@ -195,6 +197,7 @@ fn main() {
                     .chain(),
                 (
                     playback_system,
+                    scenario_audio_system,
                     play_rts_movement_system,
                     sync_markers_system,
                     animate_markers_system,
@@ -1107,6 +1110,7 @@ fn process_net_events_system(
             ApiEvent::AnimCreated(a) => {
                 let anim_id = a.id;
                 let anim_name = a.name.clone();
+                let is_audio = twg_shared::audio_anim::is_audio_anim(&a);
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
                 let is_traffic_queue = twg_shared::traffic_queue::is_traffic_queue_anim(&a);
@@ -1120,6 +1124,7 @@ fn process_net_events_system(
                 let is_multi = twg_shared::route_formation::is_multi_route_anim(&a);
                 let bound_empty = twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
                 let needs_marker_pick = !is_particle
+                    && !twg_shared::audio_anim::is_audio_anim(&a)
                     && !is_traffic
                     && !is_traffic_queue
                     && !is_shoot
@@ -1136,7 +1141,9 @@ fn process_net_events_system(
                 state.text_edit = None;
                 state.anims.push(a);
                 state.sort_anims_by_order();
-                if is_particle {
+                if is_audio {
+                    state.status_banner = Some(format!("Play Suara '{anim_name}' dibuat — pilih Sound dari Assets di Inspector."));
+                } else if is_particle {
                     state.particle_preview_reset_nonce =
                         state.particle_preview_reset_nonce.wrapping_add(1);
                     state.status_banner = Some(format!(

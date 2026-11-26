@@ -1,4 +1,5 @@
 pub mod api;
+pub mod audio_anim;
 pub mod geo;
 pub mod glb_skin;
 pub mod group_anim;

@@ -75,6 +75,7 @@ pub fn draw_play_animation_panel(
                 .inner_margin(egui::Margin::same(10)),
         )
         .show(viewport_ui, |ui| {
+            super::audio_anim::draw_output_toggle(ui, state);
             // Header
             ui.horizontal(|ui| {
                 ui.label(
@@ -518,6 +519,7 @@ pub fn draw_play_animation_panel(
                                 | AnimCategory::SpawnHide
                                 | AnimCategory::Group
                                 | AnimCategory::Other
+                                | AnimCategory::Audio
                         )
                     {
                         egui::Frame::new()
@@ -627,6 +629,17 @@ pub fn draw_play_animation_panel(
                     }
 
                     for (global_idx, anim) in &filtered_anims {
+                        if twg_shared::audio_anim::is_audio_anim(anim) {
+                            use super::audio_anim::AudioAction;
+                            match super::audio_anim::draw_play_card(ui, state, playback, anim, *global_idx) {
+                                Some(AudioAction::Play) => action_play = Some(anim.id),
+                                Some(AudioAction::Pause) => action_pause = Some(anim.id),
+                                Some(AudioAction::Resume) => action_resume = Some(anim.id),
+                                Some(AudioAction::Stop) => action_stop = Some(anim.id),
+                                None => {}
+                            }
+                            continue;
+                        }
                         let shoot_kind = shoot_anim_kind(anim);
                         let is_shoot = shoot_kind.is_some();
                         let is_particle = is_particle_anim(anim);

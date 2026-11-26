@@ -55,6 +55,7 @@ pub fn draw_layar_besar_overlay(
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
+                    super::audio_anim::draw_output_toggle(ui, state);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
 

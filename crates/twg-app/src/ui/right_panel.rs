@@ -2774,7 +2774,9 @@ fn draw_editor_preview_card(
     } else {
         anim_is_playable(a, &state.markers)
     };
-    let disabled_tip: String = if is_group {
+    let disabled_tip: String = if twg_shared::audio_anim::is_audio_anim(a) {
+        "Pilih Sound dari Assets terlebih dahulu".into()
+    } else if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
     } else if is_traffic_anim(a) {
         "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool".into()
@@ -2885,7 +2887,11 @@ fn draw_editor_preview_card(
                     ui.add_space(3.0);
                     ui.label(
                         egui::RichText::new(
-                            "Lihat animasi langsung di Plot Editor; posisi objek kembali normal saat Stop.",
+                            if twg_shared::audio_anim::is_audio_anim(a) {
+                                "Preview suara hanya diputar di perangkat ini. Stop mengembalikan pemutaran ke awal."
+                            } else {
+                                "Lihat animasi langsung di Plot Editor; posisi objek kembali normal saat Stop."
+                            },
                         )
                         .size(9.5)
                         .color(egui::Color32::from_rgb(148, 163, 184)),
@@ -3000,7 +3006,7 @@ fn draw_editor_preview_card(
                         }
 
                         let stop_btn = egui::Button::new(
-                            egui::RichText::new("Reset Posisi")
+                            egui::RichText::new(if twg_shared::audio_anim::is_audio_anim(a) { "Reset Suara" } else { "Reset Posisi" })
                                 .size(11.0)
                                 .strong()
                                 .color(egui::Color32::WHITE),
@@ -3016,7 +3022,17 @@ fn draw_editor_preview_card(
 
             if is_previewing && let Some(track) = playback.tracks.get(&a.id) {
                 ui.add_space(5.0);
-                if is_group {
+                if twg_shared::audio_anim::is_audio_anim(a) {
+                    let elapsed = track.distance_m;
+                    let total = track.total_length_m;
+                    if total > 0.0 {
+                        ui.add(egui::ProgressBar::new((elapsed / total).clamp(0.0, 1.0) as f32)
+                            .desired_width(ui.available_width())
+                            .text(format!("{elapsed:.1} / {total:.1} dtk")));
+                    } else {
+                        ui.label(format!("{elapsed:.1} dtk"));
+                    }
+                } else if is_group {
                     let gcfg = parse_group_anim_config(a);
                     let total_steps = gcfg.items.len().max(1);
                     let elapsed = track.distance_m;
@@ -3161,7 +3177,10 @@ fn draw_anim_inspector(
         .iter()
         .map(|m| (m.id, m.name.clone()))
         .collect();
-    if is_particle_anim(&a) {
+    if twg_shared::audio_anim::is_audio_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::audio_anim::draw_inspector(ui, state, &mut a, editable);
+    } else if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
     } else if is_traffic_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
@@ -4389,7 +4408,9 @@ fn draw_anim_inspector(
         } else {
             egui::Color32::from_rgb(51, 65, 85)
         });
-        let disabled_hint = if is_particle_anim(&a) {
+        let disabled_hint = if twg_shared::audio_anim::is_audio_anim(&a) {
+            "Pilih Sound dari Assets terlebih dahulu"
+        } else if is_particle_anim(&a) {
             "Tentukan posisi partikel di peta terlebih dahulu"
         } else if is_traffic_anim(&a) {
             "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
@@ -8092,7 +8113,9 @@ fn draw_spawn_hide_inspector_cards(
 }
 
 fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
-    if is_group_anim(a) {
+    if twg_shared::audio_anim::is_audio_anim(a) {
+        "PLAY SUARA"
+    } else if is_group_anim(a) {
         match twg_shared::group_anim::group_anim_mode(a).unwrap_or_default() {
             GroupAnimMode::Combine => "COMBINE",
             GroupAnimMode::Sequence => "SEQUENCE",
@@ -11107,7 +11130,11 @@ fn draw_group_anim_inspector_cards(
                                             .color(egui::Color32::from_rgb(56, 189, 248)),
                                     )
                                     .on_hover_text(
-                                        "Animasi terus-menerus — di Sequence mode Tunggu Selesai akan lanjut setelah 'Batas Tunggu Terus-menerus'",
+                                        if child_ref.is_some_and(twg_shared::audio_anim::is_audio_anim) {
+                                            "Suara tanpa batas: Tunggu Selesai menunggu sampai Stop. Pilih Jeda Waktu untuk lanjut otomatis."
+                                        } else {
+                                            "Animasi terus-menerus — di Sequence mode Tunggu Selesai akan lanjut setelah 'Batas Tunggu Terus-menerus'"
+                                        },
                                     );
                                 }
                                 ui.with_layout(
@@ -11441,7 +11468,7 @@ fn draw_group_anim_inspector_cards(
             });
             ui.label(
                 egui::RichText::new(
-                    "Jika ada anak mode Terus-menerus (mis. Water Cannon / Api / Panah 3D), Sequence otomatis lanjut setelah batas ini agar tidak macet.",
+                    "Untuk Water Cannon / Api / Panah 3D, Sequence lanjut setelah batas ini. Play Suara tanpa batas tetap menunggu Stop; gunakan Jeda Waktu untuk lanjut otomatis.",
                 )
                 .size(9.5)
                 .color(egui::Color32::from_rgb(148, 163, 184)),

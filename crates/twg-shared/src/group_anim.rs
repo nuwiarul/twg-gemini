@@ -359,6 +359,9 @@ pub fn collect_group_descendant_ids(root_id: Uuid, all_anims: &[Anim]) -> Vec<Uu
 /// Returns `true` if `anim` runs unbounded continuously (`continuous = true`) and therefore
 /// never naturally completes a cycle on its own (e.g., continuous Water Cannon, Fire, Pointer Arrow).
 pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
+    if crate::audio_anim::is_audio_anim(anim) {
+        return crate::audio_anim::parse_audio_anim_config(anim).plays().is_none();
+    }
     if crate::shoot_anim::is_shoot_anim(anim) {
         return crate::shoot_anim::shoot_anim_is_continuous(anim);
     }

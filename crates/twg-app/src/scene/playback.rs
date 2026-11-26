@@ -194,6 +194,10 @@ pub fn playback_system(
 
     // Phase B: Tick all leaf animations (Spawn/Hide, Particle, Pointer, Shoot, Route)
     for anim in &state.anims {
+        // Audio uses the device clock at normal pitch, independent of scenario speed.
+        if twg_shared::audio_anim::is_audio_anim(anim) {
+            continue;
+        }
         if is_group_anim(anim) {
             continue;
         }
@@ -450,6 +454,10 @@ fn is_group_child_done_for_handoff(
     let Some(child_anim) = anims.iter().find(|a| a.id == child_id) else {
         return true;
     };
+    if twg_shared::audio_anim::is_audio_anim(child_anim) {
+        return playback.tracks.get(&child_id).is_none_or(|t|
+            matches!(t.status, AnimRunStatus::Finished | AnimRunStatus::Stopped));
+    }
     if anim_is_continuous_unbounded(child_anim) {
         return (group_elapsed_sec - step_start_sec) >= continuous_wait_sec.max(0.0);
     }
@@ -556,7 +564,8 @@ pub fn advance_group_animations(anims: &[Anim], playback: &mut PlaybackState, dt
                                 anims
                                     .iter()
                                     .find(|a| a.id == *cid)
-                                    .is_some_and(|a| !anim_is_continuous_unbounded(a))
+                                    .is_some_and(|a| !anim_is_continuous_unbounded(a)
+                                        || twg_shared::audio_anim::is_audio_anim(a))
                             })
                             .collect();
 
@@ -663,7 +672,8 @@ pub fn advance_group_animations(anims: &[Anim], playback: &mut PlaybackState, dt
                         let last_is_continuous = anims
                             .iter()
                             .find(|a| a.id == last_id)
-                            .is_some_and(anim_is_continuous_unbounded);
+                            .is_some_and(|a| anim_is_continuous_unbounded(a)
+                                && !twg_shared::audio_anim::is_audio_anim(a));
 
                         if last_is_continuous && !anim.replay {
                             if (elapsed - last_start_sec) >= cfg.continuous_wait_sec.max(0.0)
@@ -876,6 +886,42 @@ pub fn sample_route_at_distance(
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn audio_sequence_waits_for_all_repeats_or_explicit_stop() {
+        use twg_shared::{audio_anim::*, group_anim::{GroupAnimConfig, GroupAnimMode, GroupStepItem, SequenceTriggerMode, write_group_anim_config}};
+        for repeat in [AudioRepeat::Count, AudioRepeat::Forever] {
+            let mut sound = sample_anim(vec![], 1.0, false);
+            sound.anim_type = ANIM_TYPE_PLAY_SOUND.into();
+            sound.marker_id = None;
+            write_audio_anim_config(&mut sound, &AudioAnimConfig { asset_id: Some(Uuid::new_v4()), repeat, repeat_count: 3, ..Default::default() });
+            let next = sample_anim(vec![], 1.0, false);
+            let mut group = sample_anim(vec![], 1.0, false);
+            let mut cfg = GroupAnimConfig::default_for(GroupAnimMode::Sequence);
+            cfg.sequence_trigger = SequenceTriggerMode::WaitComplete;
+            cfg.sequence_gap_sec = 0.0;
+            cfg.items = vec![GroupStepItem::new(sound.id), GroupStepItem::new(next.id)];
+            write_group_anim_config(&mut group, &cfg);
+            let anims = vec![sound.clone(), next.clone(), group.clone()];
+            let mut pb = PlaybackState::default();
+            pb.play_anim(group.id);
+            advance_group_animations(&anims, &mut pb, 0.1);
+            assert_eq!(pb.track_status(sound.id), AnimRunStatus::Playing);
+            // A completed individual repetition must not hand off; neither may the
+            // generic continuous-animation timeout skip an endless audio cue.
+            pb.tracks.get_mut(&sound.id).unwrap().completed_cycles = 1;
+            advance_group_animations(&anims, &mut pb, 120.0);
+            assert_eq!(pb.track_status(next.id), AnimRunStatus::Stopped);
+            pb.pause_anim_tree(group.id, &anims);
+            assert_eq!(pb.track_status(sound.id), AnimRunStatus::Paused);
+            pb.resume_anim_tree(group.id, &anims);
+            assert_eq!(pb.track_status(sound.id), AnimRunStatus::Playing);
+            if repeat == AudioRepeat::Forever { pb.stop_anim(sound.id); }
+            else { pb.tracks.get_mut(&sound.id).unwrap().status = AnimRunStatus::Finished; }
+            advance_group_animations(&anims, &mut pb, 0.0);
+            assert_eq!(pb.track_status(next.id), AnimRunStatus::Playing);
+        }
+    }
 
     fn sample_anim(geom: Vec<[f64; 3]>, speed: f64, replay: bool) -> Anim {
         let now = Utc::now();

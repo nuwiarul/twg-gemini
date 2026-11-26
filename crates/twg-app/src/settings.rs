@@ -2,6 +2,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub fn load_audio_output() -> bool {
+    std::fs::read_to_string(resolve_settings_path().with_file_name("audio-output.json"))
+        .ok()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or(true)
+}
+
+pub fn save_audio_output(enabled: bool) -> Result<(), String> {
+    let path = resolve_settings_path().with_file_name("audio-output.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, if enabled { "true" } else { "false" })
+        .map_err(|e| format!("Gagal menyimpan pengaturan suara: {e}"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerProtocol {
