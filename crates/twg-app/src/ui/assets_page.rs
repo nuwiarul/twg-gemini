@@ -23,6 +23,7 @@ use crate::{
     },
     ui::{
         app_icon::draw_app_brand_icon,
+        draw_search_input_with_reset,
         media_assets_ui::{
             draw_media_center_preview, draw_media_left_panel_body, draw_media_right_panel_body,
         },
@@ -330,11 +331,18 @@ fn draw_assets_left_panel(
             });
 
             ui.add_space(6.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut state.asset_search)
-                    .hint_text("Cari nama / slug model 3D...")
-                    .desired_width(f32::INFINITY),
-            );
+            let extra_filter_active =
+                state.asset_category_filter != "all" || state.asset_type_filter != "all";
+            if draw_search_input_with_reset(
+                ui,
+                &mut state.asset_search,
+                "Cari nama / slug model 3D...",
+                extra_filter_active,
+                "Reset pencarian, folder kategori, dan tipe model 3D",
+            ) {
+                state.asset_category_filter = "all".to_string();
+                state.asset_type_filter = "all".to_string();
+            }
             ui.add_space(6.0);
 
             // Dynamic category filter pills (loaded from server DB / offline manifest)

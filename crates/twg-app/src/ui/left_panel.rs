@@ -37,6 +37,7 @@ use crate::{
         AnimCategory, AppState, LayerLockFilter, LayerVisibilityFilter, LeftTab, PlaybackState,
         SelectedEntity, ToolMode,
     },
+    ui::draw_search_input_with_reset,
 };
 
 pub fn draw_left_panel(
@@ -2431,34 +2432,13 @@ fn draw_catalog_tab(
             .color(egui::Color32::from_rgb(125, 211, 252)),
     );
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        let has_query = !state.catalog_search.is_empty();
-        let clear_w = if has_query { 26.0_f32 } else { 0.0 };
-        let input_w = (ui.available_width() - if has_query { clear_w + 4.0 } else { 0.0 }).max(100.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut state.catalog_search)
-                .hint_text("Cari unit, kendaraan, bangunan...")
-                .desired_width(input_w),
-        );
-        if has_query
-            && ui
-                .add_sized(
-                    [clear_w, 21.0],
-                    egui::Button::new(
-                        egui::RichText::new("X")
-                            .size(10.5)
-                            .strong()
-                            .color(egui::Color32::from_rgb(248, 113, 113)),
-                    )
-                    .fill(egui::Color32::from_rgb(30, 41, 59)),
-                )
-                .on_hover_text("Hapus / reset pencarian katalog")
-                .clicked()
-        {
-            state.catalog_search.clear();
-        }
-    });
+    draw_search_input_with_reset(
+        ui,
+        &mut state.catalog_search,
+        "Cari unit, kendaraan, bangunan...",
+        false,
+        "Hapus / reset pencarian katalog",
+    );
     ui.add_space(3.0);
     ui.checkbox(&mut state.catalog_ready_only, "Hanya .glb lokal siap pakai");
 

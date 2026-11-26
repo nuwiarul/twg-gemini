@@ -13,7 +13,7 @@ use crate::{
         media_preview::{AudioControlCmd, MediaPreviewPlayer, open_in_system_player},
     },
     state::{AppState, MediaFormMode},
-    ui::spinner::numeric_spinner_u32_w,
+    ui::{draw_search_input_with_reset, spinner::numeric_spinner_u32_w},
 };
 
 fn format_bytes(bytes: i64) -> String {
@@ -78,10 +78,12 @@ pub fn draw_media_left_panel_body(
     });
 
     ui.add_space(6.0);
-    ui.add(
-        egui::TextEdit::singleline(&mut state.media_search)
-            .hint_text(format!("Cari {}...", media_type.label()))
-            .desired_width(f32::INFINITY),
+    draw_search_input_with_reset(
+        ui,
+        &mut state.media_search,
+        &format!("Cari {}...", media_type.label()),
+        false,
+        &format!("Clear / reset pencarian {}", media_type.label()),
     );
     ui.separator();
 

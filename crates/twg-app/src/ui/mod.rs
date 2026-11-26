@@ -785,3 +785,55 @@ fn apply_camera_viewport(
 
     center_rect
 }
+
+/// Renders a single-line search box paired with a `Reset` button that clears `value`
+/// (and returns `true` when clicked so callers can also clear extra filter pills).
+pub fn draw_search_input_with_reset(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    hint: &str,
+    extra_active: bool,
+    reset_tooltip: &str,
+) -> bool {
+    let mut reset_clicked = false;
+    let has_any_filter = !value.is_empty() || extra_active;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let btn_w = 48.0_f32;
+        let input_w = (ui.available_width() - btn_w - 4.0).max(90.0);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .desired_width(input_w),
+        );
+        let btn = egui::Button::new(
+            egui::RichText::new("Reset")
+                .size(10.5)
+                .strong()
+                .color(if has_any_filter {
+                    egui::Color32::from_rgb(254, 202, 202)
+                } else {
+                    egui::Color32::from_rgb(100, 116, 139)
+                }),
+        )
+        .fill(if has_any_filter {
+            egui::Color32::from_rgb(127, 29, 29)
+        } else {
+            egui::Color32::from_rgb(30, 41, 59)
+        });
+        if ui
+            .add_enabled(has_any_filter, ui_btn_sized(btn, btn_w, 21.0))
+            .on_hover_text(reset_tooltip)
+            .on_disabled_hover_text("Pencarian sudah kosong")
+            .clicked()
+        {
+            value.clear();
+            reset_clicked = true;
+        }
+    });
+    reset_clicked
+}
+
+fn ui_btn_sized(btn: egui::Button<'_>, w: f32, h: f32) -> egui::Button<'_> {
+    btn.min_size(egui::vec2(w, h))
+}
