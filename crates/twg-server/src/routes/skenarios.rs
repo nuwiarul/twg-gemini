@@ -456,7 +456,7 @@ pub async fn copy_skenario(
     .await?;
 
     let text_rows = sqlx::query(
-        "SELECT id, text, color, font_size, lng, lat, altitude FROM text_markers WHERE skenario_id = $1 ORDER BY created_at ASC",
+        "SELECT id, text, color, font_size, show_background, lng, lat, altitude FROM text_markers WHERE skenario_id = $1 ORDER BY created_at ASC",
     )
     .bind(id)
     .fetch_all(&mut *tx)
@@ -638,8 +638,8 @@ pub async fn copy_skenario(
     for (r, new_id) in text_rows.iter().zip(text_ids) {
         sqlx::query(
             r#"
-            INSERT INTO text_markers (id, operasi_id, skenario_id, text, color, font_size, lng, lat, altitude)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO text_markers (id, operasi_id, skenario_id, text, color, font_size, show_background, lng, lat, altitude)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(new_id)
@@ -648,6 +648,7 @@ pub async fn copy_skenario(
         .bind(r.try_get::<String, _>("text")?)
         .bind(r.try_get::<String, _>("color")?)
         .bind(r.try_get::<f64, _>("font_size")?)
+        .bind(r.try_get::<bool, _>("show_background")?)
         .bind(r.try_get::<f64, _>("lng")?)
         .bind(r.try_get::<f64, _>("lat")?)
         .bind(r.try_get::<f64, _>("altitude")?)

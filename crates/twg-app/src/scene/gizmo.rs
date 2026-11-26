@@ -5,11 +5,15 @@ use bevy_egui::egui;
 use twg_shared::{
     models::{Anim, Marker},
     particle_anim::{is_particle_anim, particle_anim_position, set_particle_anim_position},
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
 };
 use uuid::Uuid;
 
 use crate::{
-    scene::{play_rts::PlayRtsState, playback::PlaybackOverrides},
+    scene::{
+        play_rts::PlayRtsState, playback::PlaybackOverrides,
+        traffic::{measured_vehicle_scaled_dims, resolve_active_traffic_scale_gizmo_pose},
+    },
     state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode},
 };
 
@@ -53,6 +57,8 @@ impl GizmoHandle {
 pub struct ActiveGizmoDrag {
     pub marker_id: Uuid,
     pub is_particle_anim: bool,
+    pub is_text_marker: bool,
+    pub traffic_scale_preview: Option<(Uuid, usize)>,
     pub mode: GizmoMode,
     pub handle: GizmoHandle,
     pub start_origin: Vec3,
@@ -355,6 +361,8 @@ pub fn begin_gizmo_drag(
     Some(ActiveGizmoDrag {
         marker_id: marker.id,
         is_particle_anim: false,
+        is_text_marker: false,
+        traffic_scale_preview: None,
         mode,
         handle,
         start_origin,
@@ -409,6 +417,8 @@ pub fn begin_move_gizmo_drag_at_origin(
     Some(ActiveGizmoDrag {
         marker_id,
         is_particle_anim: false,
+        is_text_marker: false,
+        traffic_scale_preview: None,
         mode: GizmoMode::Move,
         handle,
         start_origin,
@@ -427,6 +437,28 @@ pub fn begin_move_gizmo_drag_at_origin(
         visual_scale_factor: 1.0,
         moved: false,
     })
+}
+
+/// Starts the Move-only gizmo for a projected text label. Text markers share
+/// the visual gizmo with 3D markers but never expose rotate or scale handles.
+pub fn begin_text_marker_move_drag(
+    text_id: Uuid,
+    start_origin: Vec3,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let mut drag = begin_move_gizmo_drag_at_origin(
+        text_id,
+        start_origin,
+        handle,
+        cursor_px,
+        camera,
+        cam_gtf,
+    )?;
+    drag.is_text_marker = true;
+    Some(drag)
 }
 
 /// Evaluates the new world position of a `GizmoMode::Move` drag without mutating `AppState`.
@@ -514,6 +546,8 @@ pub fn begin_particle_move_drag(
     Some(ActiveGizmoDrag {
         marker_id: anim.id,
         is_particle_anim: true,
+        is_text_marker: false,
+        traffic_scale_preview: None,
         mode: GizmoMode::Move,
         handle,
         start_origin,
@@ -534,6 +568,52 @@ pub fn begin_particle_move_drag(
     })
 }
 
+/// Starts a uniform 3D Scale Gizmo drag on the currently previewed Traffic pool vehicle on the map.
+pub fn begin_traffic_preview_scale_drag(
+    state: &AppState,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let sp = resolve_active_traffic_scale_gizmo_pose(state)?;
+    let start_origin = sp.world_pos;
+    let start_quat = Quat::from_rotation_y(sp.model_yaw_deg.to_radians());
+    let gizmo_radius_world =
+        compute_gizmo_world_radius(camera, cam_gtf, start_origin, GIZMO_SCREEN_RADIUS_PX);
+    let (ax, ay, az) = gizmo_axes(GizmoMode::Scale, start_quat);
+    let axis_world = match handle {
+        GizmoHandle::AxisX => ax,
+        GizmoHandle::AxisY => ay,
+        GizmoHandle::AxisZ => az,
+        GizmoHandle::Free => Vec3::Y,
+    };
+
+    Some(ActiveGizmoDrag {
+        marker_id: sp.anim_id,
+        is_particle_anim: false,
+        is_text_marker: false,
+        traffic_scale_preview: Some((sp.anim_id, sp.pool_idx)),
+        mode: GizmoMode::Scale,
+        handle,
+        start_origin,
+        start_quat,
+        current_quat: start_quat,
+        start_scale: Vec3::splat(sp.scale),
+        start_cursor_px: cursor_px,
+        prev_cursor_px: cursor_px,
+        start_axis_param: 0.0,
+        free_plane_offset: Vec3::ZERO,
+        axis_world,
+        rot_start_dir: None,
+        prev_rot_vec: None,
+        accumulated_angle_rad: 0.0,
+        gizmo_radius_world,
+        visual_scale_factor: 1.0,
+        moved: false,
+    })
+}
+
 pub fn update_gizmo_drag(
     drag: &mut ActiveGizmoDrag,
     cursor_px: Vec2,
@@ -541,6 +621,104 @@ pub fn update_gizmo_drag(
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> bool {
+    // Dedicated uniform Scale Gizmo branch for an on-map Traffic pool model preview
+    if let Some((anim_id, pool_idx)) = drag.traffic_scale_preview {
+        let total_px = cursor_px - drag.start_cursor_px;
+        if !drag.moved && total_px.length_squared() < 2.25 {
+            drag.prev_cursor_px = cursor_px;
+            return false;
+        }
+        let factor = match drag.handle {
+            GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ => {
+                if let (Ok(o2), Ok(t2)) = (
+                    camera.world_to_viewport(cam_gtf, drag.start_origin),
+                    camera.world_to_viewport(
+                        cam_gtf,
+                        drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                    ),
+                ) {
+                    let screen_dir = (t2 - o2).normalize_or(Vec2::X);
+                    let proj_px = total_px.dot(screen_dir);
+                    smooth_scale_factor(proj_px, 95.0)
+                } else {
+                    1.0
+                }
+            }
+            GizmoHandle::Free => {
+                let drag_delta = total_px.x - total_px.y;
+                smooth_scale_factor(drag_delta, 115.0)
+            }
+        };
+        drag.visual_scale_factor = factor;
+        let new_scale = round_clean((drag.start_scale.x * factor).clamp(0.05, 20.0) as f64, 2);
+        let synced_len = state
+            .anims
+            .iter()
+            .find(|a| a.id == anim_id && is_traffic_anim(a))
+            .and_then(|a| {
+                let cfg = parse_traffic_anim_config(a);
+                let e = cfg.vehicle_pool.get(pool_idx)?;
+                measured_vehicle_scaled_dims(state, &e.model_path, new_scale as f32, e.rot_y_offset_deg)
+                    .map(|[_, _, ml]| round_clean((ml as f64).clamp(1.2, 24.0), 1))
+            });
+        if let Some(anim) = state
+            .anims
+            .iter_mut()
+            .find(|a| a.id == anim_id && is_traffic_anim(a))
+        {
+            let mut cfg = parse_traffic_anim_config(anim);
+            if let Some(entry) = cfg.vehicle_pool.get_mut(pool_idx) {
+                entry.scale = new_scale;
+                if let Some(ml) = synced_len {
+                    entry.length_m = ml;
+                }
+                write_traffic_anim_config(anim, &cfg);
+                let updated = anim.clone();
+                if state.anim_edit.as_ref().is_some_and(|e| e.id == anim_id) {
+                    state.anim_edit = Some(updated);
+                }
+                state.dirty_anim_ids.insert(anim_id);
+                drag.moved = true;
+                drag.prev_cursor_px = cursor_px;
+                return true;
+            }
+        }
+        drag.prev_cursor_px = cursor_px;
+        return false;
+    }
+
+    // Text labels support only X/Y/Z and free translation. Reuse the exact
+    // camera-ray logic of the standard Move gizmo, while enforcing altitude >= 0.
+    if drag.is_text_marker {
+        let Some(new_pos) = compute_move_gizmo_drag_world_pos(drag, cursor_px, camera, cam_gtf)
+        else {
+            return false;
+        };
+        let (lng, lat, altitude) = state
+            .geo_anchor
+            .local_to_lng_lat_alt([new_pos.x, new_pos.y.max(0.0), new_pos.z]);
+        let Some(text) = state
+            .text_markers
+            .iter_mut()
+            .find(|text| text.id == drag.marker_id)
+        else {
+            return false;
+        };
+        text.lng = lng;
+        text.lat = lat;
+        text.altitude = round_clean(altitude.max(0.0), 2);
+        let updated = text.clone();
+        if state
+            .text_edit
+            .as_ref()
+            .is_some_and(|edit| edit.id == drag.marker_id)
+        {
+            state.text_edit = Some(updated);
+        }
+        drag.moved = true;
+        return true;
+    }
+
     let Ok(ray) = camera.viewport_to_world(cam_gtf, cursor_px) else {
         return false;
     };
@@ -883,27 +1061,69 @@ pub fn draw_transform_gizmo(
                     )
                 }
                 SelectedEntity::Anim(anim_id) => {
-                    if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {
-                        return;
-                    }
                     if state.locked_entity_ids.contains(&anim_id) {
                         return;
                     }
-                    let Some(anim) = state
-                        .anims
-                        .iter()
-                        .find(|a| a.id == anim_id && is_particle_anim(a) && !a.geom.is_empty())
+                    if let Some(sp) = resolve_active_traffic_scale_gizmo_pose(state)
+                        && sp.anim_id == anim_id
+                        && state.tool_mode.is_transform_tool()
+                    {
+                        let s = sp.scale as f64;
+                        (
+                            GizmoMode::Scale,
+                            sp.world_pos,
+                            Quat::from_rotation_y(sp.model_yaw_deg.to_radians()),
+                            sp.lng,
+                            sp.lat,
+                            sp.alt,
+                            [0.0, sp.model_yaw_deg as f64, 0.0],
+                            [s, s, s],
+                        )
+                    } else {
+                        if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {
+                            return;
+                        }
+                        let Some(anim) = state
+                            .anims
+                            .iter()
+                            .find(|a| a.id == anim_id && is_particle_anim(a) && !a.geom.is_empty())
+                        else {
+                            return;
+                        };
+                        let pos = particle_anim_position(anim);
+                        (
+                            GizmoMode::Move,
+                            particle_anim_world_origin(state, anim),
+                            Quat::IDENTITY,
+                            pos[0],
+                            pos[1],
+                            pos[2],
+                            [0.0, 0.0, 0.0],
+                            [1.0, 1.0, 1.0],
+                        )
+                    }
+                }
+                SelectedEntity::TextMarker(text_id) => {
+                    if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
+                        || state.locked_entity_ids.contains(&text_id)
+                    {
+                        return;
+                    }
+                    let Some(text) = state.text_markers.iter().find(|text| text.id == text_id)
                     else {
                         return;
                     };
-                    let pos = particle_anim_position(anim);
                     (
                         GizmoMode::Move,
-                        particle_anim_world_origin(state, anim),
+                        Vec3::from_array(
+                            state
+                                .geo_anchor
+                                .lng_lat_alt_to_local(text.lng, text.lat, text.altitude),
+                        ),
                         Quat::IDENTITY,
-                        pos[0],
-                        pos[1],
-                        pos[2],
+                        text.lng,
+                        text.lat,
+                        text.altitude,
                         [0.0, 0.0, 0.0],
                         [1.0, 1.0, 1.0],
                     )

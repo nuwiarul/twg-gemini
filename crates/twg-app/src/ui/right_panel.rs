@@ -31,6 +31,10 @@ use twg_shared::{
         SpawnHideAction, SpawnHideTransition, is_spawn_hide_anim, parse_spawn_hide_config,
         spawn_hide_action, write_spawn_hide_config,
     },
+    traffic_anim::{
+        OvertakeSide, TrafficVehicleEntry, build_reverse_lane, is_traffic_anim,
+        parse_traffic_anim_config, write_traffic_anim_config,
+    },
     ws::TacticalCommand,
 };
 use uuid::Uuid;
@@ -52,11 +56,15 @@ use crate::{
         playback::{route_estimated_duration_sec, route_total_length_m},
         polygon_edit::{PolygonEditState, ensure_editable_polygon_points, insert_midpoint_after},
         route_edit::{RouteEditState, insert_route_midpoint_after},
+        traffic::measured_vehicle_scaled_dims,
     },
-    state::{AnimRunStatus, AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode},
+    state::{
+        AnimRunStatus, AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode,
+        TrafficPreviewLayout, TrafficScalePreviewState,
+    },
     ui::{
         formation_pad::draw_formation_pad,
-        spinner::{SpinnerConfig, numeric_spinner, numeric_spinner_u32_w},
+        spinner::{SpinnerConfig, numeric_spinner, numeric_spinner_u32_w, numeric_spinner_w},
     },
 };
 
@@ -119,8 +127,17 @@ pub fn draw_right_panel(
                         SelectedEntity::TextMarker(_) => {
                             ("TEXT LABEL", egui::Color32::from_rgb(109, 40, 217))
                         }
-                        SelectedEntity::Anim(_) => {
-                            ("ROUTE ANIM", egui::Color32::from_rgb(16, 185, 129))
+                        SelectedEntity::Anim(id) => {
+                            let is_traffic = state
+                                .anims
+                                .iter()
+                                .find(|a| a.id == id)
+                                .is_some_and(is_traffic_anim);
+                            if is_traffic {
+                                ("TRAFFIC ANIM", egui::Color32::from_rgb(217, 119, 6))
+                            } else {
+                                ("ROUTE ANIM", egui::Color32::from_rgb(16, 185, 129))
+                            }
                         }
                         SelectedEntity::None => {
                             ("SKENARIO ROOT", egui::Color32::from_rgb(51, 65, 85))
@@ -477,6 +494,54 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                     .size(11.0)
                     .color(egui::Color32::from_rgb(125, 211, 252)),
                 );
+            });
+        }
+        ToolMode::DrawTrafficLane => {
+            let is_adding = state.drawing_traffic_lane_for_anim_id.is_some();
+            let title = if is_adding {
+                "Tambah Jalur Simulasi Traffic"
+            } else {
+                "Buat Simulasi Traffic (Jalur 1)"
+            };
+            inspector_card(ui, title, true, |ui| {
+                if !is_adding {
+                    ui.label("Nama Simulasi Traffic:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_traffic_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Titik jalur: {} (min 2 titik).\nKlik kiri di peta untuk tambah titik, Backspace undo, Enter / Finish selesai.",
+                        state.draft_points_lnglat.len()
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(253, 230, 138)),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            state.draft_points_lnglat.len() >= 2,
+                            egui::Button::new(
+                                egui::RichText::new("Finish (Enter)")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105)),
+                        )
+                        .clicked()
+                    {
+                        finish_active_draft(state, api);
+                    }
+                    if ui.button("Batal (Esc)").clicked() {
+                        state.draft_points_lnglat.clear();
+                        state.drawing_traffic_lane_for_anim_id = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                });
             });
         }
         ToolMode::DrawRoute => {
@@ -2454,6 +2519,10 @@ fn draw_text_inspector(
     let mut t = orig.clone();
     let is_locked = state.locked_entity_ids.contains(&t.id);
     let editable = !playback.play_test_mode && !is_locked;
+    if editable {
+        // Legacy labels may have been saved below ground before altitude was restricted.
+        t.altitude = t.altitude.max(0.0);
+    }
 
     ui.horizontal(|ui| {
         ui.label(
@@ -2489,8 +2558,8 @@ fn draw_text_inspector(
                     ("tm_font_size", t.id),
                     &mut t.font_size,
                     SpinnerConfig {
-                        min: 10.0,
-                        max: 28.0,
+                        min: 1.0,
+                        max: 512.0,
                         step: 1.0,
                         drag_speed: 0.5,
                         decimals: 1,
@@ -2499,6 +2568,8 @@ fn draw_text_inspector(
                     },
                 );
             });
+            ui.add_space(4.0);
+            ui.checkbox(&mut t.show_background, "Tampilkan latar belakang teks");
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 axis_badge(ui, "Lng", egui::Color32::from_rgb(185, 28, 28));
@@ -2541,7 +2612,7 @@ fn draw_text_inspector(
                     ("tm_alt", t.id),
                     &mut t.altitude,
                     SpinnerConfig {
-                        min: -100.0,
+                        min: 0.0,
                         max: 20_000.0,
                         step: 0.5,
                         drag_speed: 0.5,
@@ -2558,6 +2629,7 @@ fn draw_text_inspector(
         let t_changed = t.text != orig.text
             || t.color != orig.color
             || (t.font_size - orig.font_size).abs() > 1e-6
+            || t.show_background != orig.show_background
             || (t.lng - orig.lng).abs() > 1e-9
             || (t.lat - orig.lat).abs() > 1e-9
             || (t.altitude - orig.altitude).abs() > 1e-6;
@@ -2587,6 +2659,7 @@ fn draw_text_inspector(
                         text: t.text,
                         color: t.color,
                         font_size: t.font_size,
+                        show_background: t.show_background,
                         lng: t.lng,
                         lat: t.lat,
                         altitude: t.altitude,
@@ -2623,6 +2696,8 @@ fn draw_editor_preview_card(
     };
     let disabled_tip = if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview"
+    } else if is_traffic_anim(a) {
+        "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
     } else {
         "Pilih minimal 1 Unit / Model 3D dan 2 titik rute terlebih dahulu"
     };
@@ -2910,6 +2985,9 @@ fn draw_anim_inspector(
         .collect();
     if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
+    } else if is_traffic_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        draw_traffic_inspector_cards(ui, state, tcam, playback, route_edit, &mut a, editable);
     } else if is_group_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         draw_group_anim_inspector_cards(ui, state, tcam, &mut a, editable);
@@ -4132,6 +4210,8 @@ fn draw_anim_inspector(
         });
         let disabled_hint = if is_particle_anim(&a) {
             "Tentukan posisi partikel di peta terlebih dahulu"
+        } else if is_traffic_anim(&a) {
+            "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
         } else if is_group_anim(&a) {
             "Tambahkan minimal 1 animasi anggota ke dalam grup terlebih dahulu"
         } else if is_spawn_hide_anim(&a) {
@@ -7845,6 +7925,8 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         "PANAH 3D"
     } else if let Some(sk) = shoot_anim_kind(a) {
         sk.short_tag()
+    } else if is_traffic_anim(a) {
+        "TRAFFIC"
     } else if is_multi_route_anim(a) {
         if parse_multi_route_config(a).formation == RouteFormationKind::Patwal {
             "PATWAL"
@@ -7853,6 +7935,1341 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         }
     } else {
         "RUTE"
+    }
+}
+
+fn draw_traffic_inspector_cards(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    tcam: &mut TacticalCamera,
+    playback: &mut PlaybackState,
+    route_edit: &mut RouteEditState,
+    a: &mut twg_shared::models::Anim,
+    editable: bool,
+) {
+    let mut cfg = parse_traffic_anim_config(a);
+    let mut cfg_changed = false;
+
+    // 1. General Info & Playback Mode
+    inspector_card(ui, "Simulasi Lalu Lintas (Traffic Pool)", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.label("Nama Animasi:");
+            ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut cfg.continuous, "Terus-menerus (Loop)")
+                    .changed()
+                {
+                    cfg_changed = true;
+                }
+                ui.checkbox(&mut a.autoplay, "Autoplay");
+            });
+            if !cfg.continuous {
+                ui.horizontal(|ui| {
+                    ui.label("Durasi (dtk):");
+                    numeric_spinner(
+                        ui,
+                        ("tr_dur", a.id),
+                        &mut a.duration_sec,
+                        SpinnerConfig {
+                            min: 10.0,
+                            max: 3600.0,
+                            step: 5.0,
+                            drag_speed: 1.0,
+                            decimals: 1,
+                            suffix: " s",
+                            wrap_around: false,
+                        },
+                    );
+                });
+                ui.checkbox(&mut a.replay, "Ulangi (Repeat)");
+            }
+        });
+    });
+
+    // 2. Multi-Lane Manager (Edit waypoints on map, Add Lane, Reverse 2-Way with custom meter offset)
+    inspector_card(
+        ui,
+        &format!("Jalur / Rute Traffic ({})", cfg.lanes.len()),
+        true,
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Klik 'Edit Jalur' (atau klik garis di peta) untuk menggeser titik, tambah titik (+) di tengah, atau hapus titik.",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(4.0);
+
+            if editable {
+                let add_lane_btn = egui::Button::new(
+                    egui::RichText::new("+ Gambar Jalur Baru di Peta")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(217, 119, 6))
+                .min_size(egui::vec2(ui.available_width(), 24.0));
+                if ui.add(add_lane_btn).clicked() {
+                    state.traffic_scale_preview = None;
+                    route_edit.clear();
+                    state.tool_mode = ToolMode::DrawTrafficLane;
+                    state.drawing_traffic_lane_for_anim_id = Some(a.id);
+                    state.draft_points_lnglat.clear();
+                    state.status_banner = Some(
+                        "Klik titik-titik Jalur Traffic baru di peta (min 2 titik), lalu tekan Enter / Finish."
+                            .into(),
+                    );
+                }
+                ui.add_space(5.0);
+
+                // Configurable distance & side for 'Balik 2 Arah' reverse-lane duplication
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(15, 23, 42))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 62, 92)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Balik:")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            let w = (ui.available_width() - 2.0).max(72.0);
+                            numeric_spinner_w(
+                                ui,
+                                ("tr_rev_dist", a.id),
+                                &mut state.traffic_reverse_offset_m,
+                                w,
+                                SpinnerConfig {
+                                    min: 0.5,
+                                    max: 80.0,
+                                    step: 0.5,
+                                    drag_speed: 0.25,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Sisi Duplikat:")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                            if ui
+                                .selectable_label(
+                                    state.traffic_reverse_side == OvertakeSide::Right,
+                                    "Kanan",
+                                )
+                                .clicked()
+                            {
+                                state.traffic_reverse_side = OvertakeSide::Right;
+                            }
+                            if ui
+                                .selectable_label(
+                                    state.traffic_reverse_side == OvertakeSide::Left,
+                                    "Kiri",
+                                )
+                                .clicked()
+                            {
+                                state.traffic_reverse_side = OvertakeSide::Left;
+                            }
+                        });
+                    });
+                ui.add_space(5.0);
+            }
+
+            let mut delete_lane_idx: Option<usize> = None;
+            let mut reverse_dup_idx: Option<usize> = None;
+            let mut flip_dir_idx: Option<usize> = None;
+
+            for idx in 0..cfg.lanes.len() {
+                let lane_len = cfg.lanes[idx].total_length_m();
+                let pts_cnt = cfg.lanes[idx].geom.len();
+                let is_editing_this_lane = route_edit.editing_anim_id == Some(a.id)
+                    && route_edit.traffic_lane_idx == Some(idx);
+
+                egui::Frame::new()
+                    .fill(if is_editing_this_lane {
+                        egui::Color32::from_rgb(10, 42, 38)
+                    } else {
+                        egui::Color32::from_rgb(15, 23, 42)
+                    })
+                    .stroke(egui::Stroke::new(
+                        if is_editing_this_lane { 1.4 } else { 1.0 },
+                        if is_editing_this_lane {
+                            egui::Color32::from_rgb(16, 185, 129)
+                        } else if cfg.lanes[idx].enabled {
+                            egui::Color32::from_rgb(44, 62, 92)
+                        } else {
+                            egui::Color32::from_rgb(51, 51, 60)
+                        },
+                    ))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if editable {
+                                if ui.checkbox(&mut cfg.lanes[idx].enabled, "").changed() {
+                                    cfg_changed = true;
+                                }
+                                let name_w = (ui.available_width() - 88.0).clamp(58.0, 125.0);
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut cfg.lanes[idx].name)
+                                            .desired_width(name_w),
+                                    )
+                                    .changed()
+                                {
+                                    cfg_changed = true;
+                                }
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(&cfg.lanes[idx].name)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{lane_len:.0}m ({pts_cnt} pt)"))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                        });
+                        if editable {
+                            ui.add_space(3.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let edit_btn = egui::Button::new(
+                                    egui::RichText::new(if is_editing_this_lane {
+                                        "Selesai Edit"
+                                    } else {
+                                        "Edit Jalur"
+                                    })
+                                    .size(10.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                                )
+                                .fill(if is_editing_this_lane {
+                                    egui::Color32::from_rgb(5, 150, 105)
+                                } else {
+                                    egui::Color32::from_rgb(30, 64, 175)
+                                })
+                                .small();
+                                if ui
+                                    .add(edit_btn)
+                                    .on_hover_text(
+                                        "Aktifkan edit titik jalur di peta (geser titik, sisipkan + di tengah, atau hapus titik)",
+                                    )
+                                    .clicked()
+                                {
+                                    if is_editing_this_lane {
+                                        route_edit.clear();
+                                    } else {
+                                        state.traffic_scale_preview = None;
+                                        playback.stop_editor_preview();
+                                        state.tool_mode = ToolMode::Select;
+                                        route_edit.editing_anim_id = Some(a.id);
+                                        route_edit.traffic_lane_idx = Some(idx);
+                                        route_edit.selected_waypoint = None;
+                                        route_edit.add_point_on_map_mode = false;
+                                        route_edit.active_drag = None;
+                                        state.status_banner = Some(format!(
+                                            "Edit '{}': tarik titik untuk geser, klik (+) hijau untuk sisipkan titik, atau klik (x) merah untuk hapus.",
+                                            cfg.lanes[idx].name
+                                        ));
+                                    }
+                                }
+                                if ui
+                                    .small_button(format!(
+                                        "Balik ({:.1}m)",
+                                        state.traffic_reverse_offset_m
+                                    ))
+                                    .on_hover_text(
+                                        "Duplikat jalur ini sebagai jalur lawan arah sejajar sejauh Jarak Balik di atas",
+                                    )
+                                    .clicked()
+                                {
+                                    reverse_dup_idx = Some(idx);
+                                }
+                                if ui
+                                    .small_button("Putar")
+                                    .on_hover_text("Balik arah titik awal dan akhir jalur ini")
+                                    .clicked()
+                                {
+                                    flip_dir_idx = Some(idx);
+                                }
+                                if cfg.lanes.len() > 1
+                                    && ui
+                                        .small_button(
+                                            egui::RichText::new("Hapus")
+                                                .color(egui::Color32::from_rgb(248, 113, 113)),
+                                        )
+                                        .clicked()
+                                {
+                                    delete_lane_idx = Some(idx);
+                                }
+                            });
+                            if is_editing_this_lane {
+                                ui.add_space(3.0);
+                                ui.horizontal(|ui| {
+                                    let add_mode = route_edit.add_point_on_map_mode;
+                                    let add_pt_btn = egui::Button::new(
+                                        egui::RichText::new(if add_mode {
+                                            "Klik Peta: Tambah Titik (Aktif)"
+                                        } else {
+                                            "+ Tambah Titik di Ujung"
+                                        })
+                                        .size(10.0)
+                                        .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(if add_mode {
+                                        egui::Color32::from_rgb(180, 83, 9)
+                                    } else {
+                                        egui::Color32::from_rgb(14, 116, 144)
+                                    })
+                                    .small();
+                                    if ui.add(add_pt_btn).clicked() {
+                                        route_edit.add_point_on_map_mode = !add_mode;
+                                    }
+                                });
+                            }
+                        }
+                    });
+                ui.add_space(3.0);
+            }
+
+            if let Some(idx) = reverse_dup_idx {
+                let new_name = format!("{} (Balik)", cfg.lanes[idx].name);
+                let dist_m = state.traffic_reverse_offset_m.clamp(0.5, 80.0);
+                if let Some(rev) =
+                    build_reverse_lane(&cfg.lanes[idx], dist_m, state.traffic_reverse_side, new_name)
+                {
+                    cfg.lanes.push(rev);
+                    cfg_changed = true;
+                    state.status_banner = Some(format!(
+                        "Jalur lawan arah (jarak {dist_m:.1} m) berhasil diduplikasi!"
+                    ));
+                }
+            }
+            if let Some(idx) = flip_dir_idx {
+                cfg.lanes[idx].geom.reverse();
+                cfg_changed = true;
+            }
+            if let Some(idx) = delete_lane_idx {
+                cfg.lanes.remove(idx);
+                if route_edit.editing_anim_id == Some(a.id) {
+                    route_edit.clear();
+                }
+                cfg_changed = true;
+            }
+        },
+    );
+
+    // 3. Shared Vehicle 3D Pool Picker (ALL 3D Catalog + Category Filter + 2-Model Front-to-Back Scale Preview!)
+    inspector_card(
+        ui,
+        &format!("Pool Model 3D Kendaraan ({})", cfg.vehicle_pool.len()),
+        true,
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Bisa preview maks. 2 model sekaligus (berjejer depan-belakang di jalur) untuk membandingkan skala antar kendaraan langsung di peta.",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(4.0);
+
+            // Show active preview counter bar (0..=2 models) with quick Close All button
+            let active_preview_count = state
+                .traffic_scale_preview
+                .as_ref()
+                .filter(|p| p.anim_id == a.id)
+                .map(|p| p.pool_indices.len())
+                .unwrap_or(0);
+            if active_preview_count > 0 {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(12, 46, 62))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Preview aktif: {active_preview_count}/2 model"
+                                ))
+                                .size(10.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(125, 211, 252)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("Tutup Semua")
+                                                .size(9.5)
+                                                .color(egui::Color32::from_rgb(253, 230, 138)),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.traffic_scale_preview = None;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new("Posisi:")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            if ui
+                                .selectable_label(
+                                    state.traffic_preview_layout == TrafficPreviewLayout::FrontBack,
+                                    "Depan-Belakang",
+                                )
+                                .clicked()
+                            {
+                                state.traffic_preview_layout = TrafficPreviewLayout::FrontBack;
+                            }
+                            if ui
+                                .selectable_label(
+                                    state.traffic_preview_layout == TrafficPreviewLayout::SideBySide,
+                                    "Berdampingan",
+                                )
+                                .clicked()
+                            {
+                                state.traffic_preview_layout = TrafficPreviewLayout::SideBySide;
+                            }
+                        });
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Preview:")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            let w = (ui.available_width() - 2.0).max(66.0);
+                            numeric_spinner_w(
+                                ui,
+                                ("tr_prev_gap", a.id),
+                                &mut state.traffic_preview_gap_m,
+                                w,
+                                SpinnerConfig {
+                                    min: 0.0,
+                                    max: 50.0,
+                                    step: 0.5,
+                                    drag_speed: 0.2,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+
+            if cfg.vehicle_pool.is_empty() {
+                ui.label(
+                    egui::RichText::new("Belum ada model kendaraan! Pilih minimal 1 model di bawah.")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(248, 113, 113)),
+                );
+                ui.add_space(4.0);
+            }
+
+            let mut remove_pool_idx: Option<usize> = None;
+            let mut toggle_preview_idx: Option<usize> = None;
+            let mut focus_gizmo_idx: Option<usize> = None;
+            let has_any_lane = cfg.lanes.iter().any(|l| l.geom.len() >= 2);
+
+            for idx in 0..cfg.vehicle_pool.len() {
+                let preview_slot = state
+                    .traffic_scale_preview
+                    .as_ref()
+                    .filter(|p| p.anim_id == a.id)
+                    .and_then(|p| p.pool_indices.iter().position(|&pi| pi == idx));
+                let is_in_preview = preview_slot.is_some();
+                let is_active_gizmo = state
+                    .traffic_scale_preview
+                    .as_ref()
+                    .is_some_and(|p| p.anim_id == a.id && p.active_gizmo_pool_idx == idx && is_in_preview);
+
+                egui::Frame::new()
+                    .fill(if is_active_gizmo {
+                        egui::Color32::from_rgb(12, 46, 62)
+                    } else if is_in_preview {
+                        egui::Color32::from_rgb(42, 34, 16)
+                    } else {
+                        egui::Color32::from_rgb(15, 23, 42)
+                    })
+                    .stroke(egui::Stroke::new(
+                        if is_in_preview { 1.3 } else { 1.0 },
+                        if is_active_gizmo {
+                            egui::Color32::from_rgb(56, 189, 248)
+                        } else if is_in_preview {
+                            egui::Color32::from_rgb(245, 158, 11)
+                        } else {
+                            egui::Color32::from_rgb(44, 62, 92)
+                        },
+                    ))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        // Header line 1: Model name + compact Hapus button (never overflows)
+                        ui.horizontal(|ui| {
+                            if editable {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(
+                                                egui::RichText::new("Hapus")
+                                                    .size(9.5)
+                                                    .color(egui::Color32::from_rgb(248, 113, 113)),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove_pool_idx = Some(idx);
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                let slot_tag = match (preview_slot, state.traffic_preview_layout) {
+                                                    (Some(0), TrafficPreviewLayout::FrontBack) => "[Depan] ",
+                                                    (Some(1), TrafficPreviewLayout::FrontBack) => "[Belakang] ",
+                                                    (Some(0), TrafficPreviewLayout::SideBySide) => "[Sisi 1] ",
+                                                    (Some(1), TrafficPreviewLayout::SideBySide) => "[Sisi 2] ",
+                                                    _ => "",
+                                                };
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format!(
+                                                            "{slot_tag}{}",
+                                                            cfg.vehicle_pool[idx].name
+                                                        ))
+                                                        .size(11.0)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
+                            } else {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&cfg.vehicle_pool[idx].name)
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+
+                        // Header line 2: Preview & Scale Gizmo controls (wrapped cleanly within card width)
+                        if editable {
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                if is_in_preview {
+                                    if is_active_gizmo {
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(8, 145, 178))
+                                            .corner_radius(3.0)
+                                            .inner_margin(egui::Margin::symmetric(6, 2))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Scale Gizmo Aktif")
+                                                        .size(9.5)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            });
+                                    } else {
+                                        let pick_gizmo = egui::Button::new(
+                                            egui::RichText::new("Pindah Scale Gizmo")
+                                                .size(9.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(37, 99, 235))
+                                        .small();
+                                        if ui.add(pick_gizmo).clicked() {
+                                            focus_gizmo_idx = Some(idx);
+                                        }
+                                    }
+                                    let close_btn = egui::Button::new(
+                                        egui::RichText::new("Tutup Preview")
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(180, 83, 9))
+                                    .small();
+                                    if ui.add(close_btn).clicked() {
+                                        toggle_preview_idx = Some(idx);
+                                    }
+                                } else {
+                                    let lbl = if active_preview_count == 1 {
+                                        "Preview Bandingkan (2/2)"
+                                    } else {
+                                        "Preview & Scale di Peta"
+                                    };
+                                    let prev_btn = egui::Button::new(
+                                        egui::RichText::new(lbl)
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(14, 116, 144))
+                                    .small();
+                                    if ui
+                                        .add_enabled(has_any_lane, prev_btn)
+                                        .on_hover_text(
+                                            "Tampilkan model 3D ini di jalur peta (maks. 2 model depan-belakang) untuk scaling langsung",
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle_preview_idx = Some(idx);
+                                    }
+                                }
+                            });
+                        }
+
+                        ui.add_space(3.0);
+                        ui.add_enabled_ui(editable, |ui| {
+                            let lbl_w = 50.0_f32;
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Skala:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let prev_s = cfg.vehicle_pool[idx].scale;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tr_v_scale", a.id, idx),
+                                    &mut cfg.vehicle_pool[idx].scale,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.05,
+                                        max: 20.0,
+                                        step: 0.05,
+                                        drag_speed: 0.02,
+                                        decimals: 2,
+                                        suffix: "x",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (cfg.vehicle_pool[idx].scale - prev_s).abs() > 1e-6 {
+                                    cfg_changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Panjang:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let prev_l = cfg.vehicle_pool[idx].length_m;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tr_v_len", a.id, idx),
+                                    &mut cfg.vehicle_pool[idx].length_m,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 1.5,
+                                        max: 24.0,
+                                        step: 0.5,
+                                        drag_speed: 0.2,
+                                        decimals: 1,
+                                        suffix: " m",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (cfg.vehicle_pool[idx].length_m - prev_l).abs() > 1e-6 {
+                                    cfg_changed = true;
+                                }
+                            });
+                            if let Some([mw, mh, ml]) = measured_vehicle_scaled_dims(
+                                state,
+                                &cfg.vehicle_pool[idx].model_path,
+                                cfg.vehicle_pool[idx].scale as f32,
+                                cfg.vehicle_pool[idx].rot_y_offset_deg,
+                            ) {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "3D asli: P {ml:.1}m x L {mw:.1}m x T {mh:.1}m"
+                                        ))
+                                        .size(9.5)
+                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                    );
+                                    if (ml - cfg.vehicle_pool[idx].length_m as f32).abs() > 0.35
+                                        && ui
+                                            .small_button(format!("Sync P ({ml:.1}m)"))
+                                            .on_hover_text(
+                                                "Samakan Panjang simulasi dengan panjang asli mesh 3D agar anti-tabrak akurat",
+                                            )
+                                            .clicked()
+                                    {
+                                        cfg.vehicle_pool[idx].length_m =
+                                            ((ml as f64).clamp(1.2, 24.0) * 10.0).round() / 10.0;
+                                        cfg_changed = true;
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Rot Y:").size(10.0)),
+                                );
+                                // Reserve 44px for the '+90°' button so this row NEVER overflows panel width!
+                                let spin_w = (ui.available_width() - 44.0).max(66.0);
+                                let prev_r = cfg.vehicle_pool[idx].rot_y_offset_deg;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tr_v_roty", a.id, idx),
+                                    &mut cfg.vehicle_pool[idx].rot_y_offset_deg,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.0,
+                                        max: 360.0,
+                                        step: 90.0,
+                                        drag_speed: 1.0,
+                                        decimals: 0,
+                                        suffix: "°",
+                                        wrap_around: true,
+                                    },
+                                );
+                                if (cfg.vehicle_pool[idx].rot_y_offset_deg - prev_r).abs() > 1e-6 {
+                                    cfg_changed = true;
+                                }
+                                if ui.small_button("+90°").clicked() {
+                                    cfg.vehicle_pool[idx].rot_y_offset_deg =
+                                        (cfg.vehicle_pool[idx].rot_y_offset_deg + 90.0) % 360.0;
+                                    cfg_changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Bobot:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let mut w_f64 = cfg.vehicle_pool[idx].weight as f64;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tr_v_w", a.id, idx),
+                                    &mut w_f64,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.1,
+                                        max: 20.0,
+                                        step: 0.5,
+                                        drag_speed: 0.1,
+                                        decimals: 1,
+                                        suffix: "",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (w_f64 as f32 - cfg.vehicle_pool[idx].weight).abs() > 1e-4 {
+                                    cfg.vehicle_pool[idx].weight = w_f64 as f32;
+                                    cfg_changed = true;
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(3.0);
+            }
+
+            if let Some(idx) = focus_gizmo_idx
+                && let Some(ref mut preview) = state.traffic_scale_preview
+                && preview.anim_id == a.id
+            {
+                preview.active_gizmo_pool_idx = idx;
+                let vname = cfg
+                    .vehicle_pool
+                    .get(idx)
+                    .map(|v| v.name.as_str())
+                    .unwrap_or("Model 3D");
+                state.status_banner = Some(format!(
+                    "Scale Gizmo dipindahkan ke '{vname}' — tarik sumbu/titik tengah di peta untuk mengubah skala."
+                ));
+            }
+
+            if let Some(idx) = toggle_preview_idx {
+                let already_present = state
+                    .traffic_scale_preview
+                    .as_ref()
+                    .filter(|p| p.anim_id == a.id)
+                    .is_some_and(|p| p.pool_indices.contains(&idx));
+                if already_present {
+                    if let Some(ref mut preview) = state.traffic_scale_preview {
+                        preview.pool_indices.retain(|&i| i != idx);
+                        if preview.pool_indices.is_empty() {
+                            state.traffic_scale_preview = None;
+                        } else if preview.active_gizmo_pool_idx == idx {
+                            preview.active_gizmo_pool_idx = preview.pool_indices[0];
+                        }
+                    }
+                } else {
+                    route_edit.clear();
+                    playback.stop_editor_preview();
+                    state.tool_mode = ToolMode::Select;
+                    let mut indices = state
+                        .traffic_scale_preview
+                        .as_ref()
+                        .filter(|p| p.anim_id == a.id)
+                        .map(|p| p.pool_indices.clone())
+                        .unwrap_or_default();
+                    if indices.len() >= 2 {
+                        // Max 2 preview models simultaneously: keep the most recent one and replace the oldest
+                        indices.remove(0);
+                    }
+                    indices.push(idx);
+                    let total_shown = indices.len();
+                    state.traffic_scale_preview = Some(TrafficScalePreviewState {
+                        anim_id: a.id,
+                        pool_indices: indices,
+                        active_gizmo_pool_idx: idx,
+                    });
+                    // Center camera on the preview pair along the lane start
+                    if let Some(lane) = cfg
+                        .lanes
+                        .iter()
+                        .find(|l| l.enabled && l.geom.len() >= 2)
+                        .or_else(|| cfg.lanes.iter().find(|l| l.geom.len() >= 2))
+                    {
+                        let p0 = state.geo_anchor.lng_lat_alt_to_local(
+                            lane.geom[0][0],
+                            lane.geom[0][1],
+                            0.0,
+                        );
+                        let p1 = state.geo_anchor.lng_lat_alt_to_local(
+                            lane.geom[1][0],
+                            lane.geom[1][1],
+                            0.0,
+                        );
+                        let v0 = bevy::math::Vec2::new(p0[0], p0[2]);
+                        let v1 = bevy::math::Vec2::new(p1[0], p1[2]);
+                        let seg = v1 - v0;
+                        let seg_len = seg.length().max(0.01);
+                        let t = (10.0_f32.min(seg_len * 0.45) / seg_len).clamp(0.0, 1.0);
+                        tcam.target_local = v0.lerp(v1, t);
+                    }
+                    let vname = cfg
+                        .vehicle_pool
+                        .get(idx)
+                        .map(|v| v.name.as_str())
+                        .unwrap_or("Model 3D");
+                    state.status_banner = Some(if total_shown == 2 {
+                        format!(
+                            "Preview 2/2 aktif (depan-belakang): Scale Gizmo pada '{vname}' — bandingkan ukurannya langsung di peta!"
+                        )
+                    } else {
+                        format!(
+                            "Preview '{vname}' aktif (1/2) — klik 'Preview Bandingkan' pada model lain untuk melihat 2 mobil berjejer!"
+                        )
+                    });
+                }
+            }
+
+            if let Some(idx) = remove_pool_idx {
+                cfg.vehicle_pool.remove(idx);
+                if let Some(ref mut preview) = state.traffic_scale_preview
+                    && preview.anim_id == a.id
+                {
+                    preview.pool_indices.retain(|&i| i != idx);
+                    for pi in &mut preview.pool_indices {
+                        if *pi > idx {
+                            *pi -= 1;
+                        }
+                    }
+                    if preview.pool_indices.is_empty() {
+                        state.traffic_scale_preview = None;
+                    } else {
+                        if preview.active_gizmo_pool_idx == idx {
+                            preview.active_gizmo_pool_idx = preview.pool_indices[0];
+                        } else if preview.active_gizmo_pool_idx > idx {
+                            preview.active_gizmo_pool_idx -= 1;
+                        }
+                    }
+                }
+                cfg_changed = true;
+            }
+
+            if editable {
+                ui.add_space(5.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tambah dari Semua Katalog 3D ({} total):",
+                        state.catalog.len()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                );
+                ui.add_space(3.0);
+
+                // Collect all distinct categories dynamically from the full 3D catalog
+                let mut cat_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for m in &state.catalog {
+                    *cat_counts.entry(m.category.clone()).or_insert(0) += 1;
+                }
+
+                let selected_cat_label = match &state.traffic_pool_category_filter {
+                    None => format!("Semua Kategori ({})", state.catalog.len()),
+                    Some(c) => {
+                        let cnt = cat_counts.get(c).copied().unwrap_or(0);
+                        format!("{c} ({cnt})")
+                    }
+                };
+                egui::ComboBox::from_id_salt(("tr_cat_filter", a.id))
+                    .width((ui.available_width() - 4.0).max(120.0))
+                    .selected_text(selected_cat_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.traffic_pool_category_filter,
+                            None,
+                            format!("Semua Kategori ({})", state.catalog.len()),
+                        );
+                        for (cat, cnt) in &cat_counts {
+                            ui.selectable_value(
+                                &mut state.traffic_pool_category_filter,
+                                Some(cat.clone()),
+                                format!("{cat} ({cnt})"),
+                            );
+                        }
+                    });
+                ui.add_space(3.0);
+
+                ui.horizontal(|ui| {
+                    let has_q = !state.traffic_pool_search.is_empty();
+                    let search_w =
+                        (ui.available_width() - if has_q { 52.0 } else { 4.0 }).max(80.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.traffic_pool_search)
+                            .hint_text("Cari nama / kategori model 3D...")
+                            .desired_width(search_w),
+                    );
+                    if has_q && ui.small_button("Reset").clicked() {
+                        state.traffic_pool_search.clear();
+                    }
+                });
+                ui.add_space(3.0);
+
+                let q = state.traffic_pool_search.trim().to_lowercase();
+                let cat_filter = state.traffic_pool_category_filter.clone();
+                let candidates: Vec<_> = state
+                    .catalog
+                    .iter()
+                    .filter(|m| {
+                        let already = cfg
+                            .vehicle_pool
+                            .iter()
+                            .any(|v| v.model_path == m.model_path);
+                        if already {
+                            return false;
+                        }
+                        if let Some(ref cf) = cat_filter
+                            && m.category != *cf
+                        {
+                            return false;
+                        }
+                        if q.is_empty() {
+                            true
+                        } else {
+                            m.name.to_lowercase().contains(&q)
+                                || m.category.to_lowercase().contains(&q)
+                                || m.model_path.to_lowercase().contains(&q)
+                        }
+                    })
+                    .cloned()
+                    .collect();
+
+                if cat_filter.is_some() && !candidates.is_empty() && candidates.len() <= 25 {
+                    let add_all_btn = egui::Button::new(
+                        egui::RichText::new(format!(
+                            "+ Tambah Semua ({} model)",
+                            candidates.len()
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105))
+                    .small();
+                    if ui.add(add_all_btn).clicked() {
+                        for m in &candidates {
+                            cfg.vehicle_pool.push(TrafficVehicleEntry {
+                                model_path: m.model_path.clone(),
+                                name: m.name.clone(),
+                                scale: 1.0,
+                                length_m: TrafficVehicleEntry::estimate_length_m(
+                                    &m.name,
+                                    &m.model_path,
+                                ),
+                                weight: 1.0,
+                                rot_y_offset_deg: m.default_rotation_deg[1],
+                            });
+                        }
+                        cfg_changed = true;
+                    }
+                    ui.add_space(3.0);
+                }
+
+                egui::ScrollArea::vertical()
+                    .id_salt(("tr_cat_scroll", a.id))
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        if candidates.is_empty() {
+                            ui.label(
+                                egui::RichText::new("Tidak ada model tambahan yang cocok.")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                        } else {
+                            for m in &candidates {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("+")
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(110, 231, 183)),
+                                        )
+                                        .clicked()
+                                    {
+                                        cfg.vehicle_pool.push(TrafficVehicleEntry {
+                                            model_path: m.model_path.clone(),
+                                            name: m.name.clone(),
+                                            scale: 1.0,
+                                            length_m: TrafficVehicleEntry::estimate_length_m(
+                                                &m.name,
+                                                &m.model_path,
+                                            ),
+                                            weight: 1.0,
+                                            rot_y_offset_deg: m.default_rotation_deg[1],
+                                        });
+                                        cfg_changed = true;
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{} ({})", m.name, m.category))
+                                                .size(10.5)
+                                                .color(egui::Color32::LIGHT_GRAY),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                            }
+                        }
+                    });
+            }
+        },
+    );
+
+    // 4. Speed, Spawn Density, Overtaking & Safety Controls
+    inspector_card(ui, "Kecepatan, Kepadatan & Menyalip", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Max / Jalur:");
+                let mut v = cfg.max_vehicles_per_lane as f64;
+                numeric_spinner(
+                    ui,
+                    ("tr_max_lane", a.id),
+                    &mut v,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 25.0,
+                        step: 1.0,
+                        drag_speed: 0.2,
+                        decimals: 0,
+                        suffix: " unit",
+                        wrap_around: false,
+                    },
+                );
+                if v.round() as u32 != cfg.max_vehicles_per_lane {
+                    cfg.max_vehicles_per_lane = v.round() as u32;
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max Total Pool:");
+                let mut v = cfg.max_total_vehicles as f64;
+                numeric_spinner(
+                    ui,
+                    ("tr_max_tot", a.id),
+                    &mut v,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 100.0,
+                        step: 2.0,
+                        drag_speed: 0.5,
+                        decimals: 0,
+                        suffix: " unit",
+                        wrap_around: false,
+                    },
+                );
+                if v.round() as u32 != cfg.max_total_vehicles {
+                    cfg.max_total_vehicles = v.round() as u32;
+                    cfg_changed = true;
+                }
+            });
+            ui.add_space(3.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Speed Min:");
+                let prev = cfg.min_speed_mps;
+                numeric_spinner(
+                    ui,
+                    ("tr_spd_min", a.id),
+                    &mut cfg.min_speed_mps,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 45.0,
+                        step: 0.5,
+                        drag_speed: 0.2,
+                        decimals: 1,
+                        suffix: " m/s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.min_speed_mps - prev).abs() > 1e-6 {
+                    if cfg.max_speed_mps < cfg.min_speed_mps {
+                        cfg.max_speed_mps = cfg.min_speed_mps;
+                    }
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Speed Max:");
+                let prev = cfg.max_speed_mps;
+                numeric_spinner(
+                    ui,
+                    ("tr_spd_max", a.id),
+                    &mut cfg.max_speed_mps,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 55.0,
+                        step: 0.5,
+                        drag_speed: 0.2,
+                        decimals: 1,
+                        suffix: " m/s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.max_speed_mps - prev).abs() > 1e-6 {
+                    if cfg.min_speed_mps > cfg.max_speed_mps {
+                        cfg.min_speed_mps = cfg.max_speed_mps;
+                    }
+                    cfg_changed = true;
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "Rentang acak: {:.0} – {:.0} km/jam",
+                    cfg.min_speed_mps * 3.6,
+                    cfg.max_speed_mps * 3.6
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(3.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Jeda Spawn Min:");
+                let prev = cfg.spawn_interval_min_sec;
+                numeric_spinner(
+                    ui,
+                    ("tr_spw_min", a.id),
+                    &mut cfg.spawn_interval_min_sec,
+                    SpinnerConfig {
+                        min: 0.4,
+                        max: 30.0,
+                        step: 0.2,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.spawn_interval_min_sec - prev).abs() > 1e-6 {
+                    if cfg.spawn_interval_max_sec < cfg.spawn_interval_min_sec {
+                        cfg.spawn_interval_max_sec = cfg.spawn_interval_min_sec;
+                    }
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Jeda Spawn Max:");
+                let prev = cfg.spawn_interval_max_sec;
+                numeric_spinner(
+                    ui,
+                    ("tr_spw_max", a.id),
+                    &mut cfg.spawn_interval_max_sec,
+                    SpinnerConfig {
+                        min: 0.5,
+                        max: 60.0,
+                        step: 0.2,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.spawn_interval_max_sec - prev).abs() > 1e-6 {
+                    if cfg.spawn_interval_min_sec > cfg.spawn_interval_max_sec {
+                        cfg.spawn_interval_min_sec = cfg.spawn_interval_max_sec;
+                    }
+                    cfg_changed = true;
+                }
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Lebar Lajur:");
+                let prev = cfg.lane_width_m;
+                numeric_spinner(
+                    ui,
+                    ("tr_lane_w", a.id),
+                    &mut cfg.lane_width_m,
+                    SpinnerConfig {
+                        min: 2.2,
+                        max: 10.0,
+                        step: 0.2,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.lane_width_m - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Jarak Aman:");
+                let prev = cfg.min_safe_gap_m;
+                numeric_spinner(
+                    ui,
+                    ("tr_gap", a.id),
+                    &mut cfg.min_safe_gap_m,
+                    SpinnerConfig {
+                        min: 2.0,
+                        max: 20.0,
+                        step: 0.5,
+                        drag_speed: 0.2,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.min_safe_gap_m - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.add_space(4.0);
+
+            if ui
+                .checkbox(
+                    &mut cfg.allow_overtaking,
+                    "Aktifkan Menyalip (cek arus berlawanan)",
+                )
+                .changed()
+            {
+                cfg_changed = true;
+            }
+            if cfg.allow_overtaking {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Sisi Salip:");
+                    for &side in OvertakeSide::ALL {
+                        if ui
+                            .selectable_label(cfg.overtake_side == side, side.label())
+                            .clicked()
+                            && cfg.overtake_side != side
+                        {
+                            cfg.overtake_side = side;
+                            cfg_changed = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Rem Depan Disalip:");
+                    let prev = cfg.front_yield_slowdown_pct;
+                    numeric_spinner(
+                        ui,
+                        ("tr_yield_pct", a.id),
+                        &mut cfg.front_yield_slowdown_pct,
+                        SpinnerConfig {
+                            min: 0.0,
+                            max: 50.0,
+                            step: 5.0,
+                            drag_speed: 1.0,
+                            decimals: 0,
+                            suffix: " %",
+                            wrap_around: false,
+                        },
+                    );
+                    if (cfg.front_yield_slowdown_pct - prev).abs() > 1e-6 {
+                        cfg_changed = true;
+                    }
+                });
+            }
+            if ui
+                .checkbox(
+                    &mut cfg.yield_at_intersections,
+                    "Beri jalan di persimpangan antar jalur",
+                )
+                .changed()
+            {
+                cfg_changed = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Seed Sync: #{}", cfg.seed % 100_000))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                if ui
+                    .small_button("Acak Pola")
+                    .on_hover_text(
+                        "Ubah seed acak deterministik (tetap sinkron identik dengan Layar Besar)",
+                    )
+                    .clicked()
+                {
+                    cfg.seed = cfg.seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    cfg_changed = true;
+                }
+            });
+        });
+    });
+
+    if cfg_changed {
+        write_traffic_anim_config(a, &cfg);
     }
 }
 

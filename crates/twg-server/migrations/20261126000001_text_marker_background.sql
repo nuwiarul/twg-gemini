@@ -1,0 +1,5 @@
+ALTER TABLE text_markers
+    ADD COLUMN IF NOT EXISTS show_background BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE text_markers
+    ALTER COLUMN altitude SET DEFAULT 0.0;

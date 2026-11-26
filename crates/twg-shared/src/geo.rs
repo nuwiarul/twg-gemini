@@ -232,4 +232,32 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn tile_local_rects_align_identically_across_all_zoom_levels() {
+        let anchor = GeoAnchor::new(115.2182, -8.6710);
+        let test_lng = 115.2167;
+        let test_lat = -8.6705;
+        let marker_local = anchor.lng_lat_alt_to_local(test_lng, test_lat, 0.0);
+
+        for z in 12u8..=19 {
+            let tile = lng_lat_to_tile(test_lng, test_lat, z);
+            let (center, w_m, h_m) = anchor.tile_local_rect(tile);
+            let (min_mx, min_my, max_mx, max_my) = tile_bounds_mercator(tile);
+            let (mx, my) = lng_lat_to_mercator(test_lng, test_lat);
+
+            // Normalized UV inside this tile (`u=0` West -> `u=1` East, `v=0` North -> `v=1` South)
+            let u = (mx - min_mx) / (max_mx - min_mx);
+            let v = (max_my - my) / (max_my - min_my);
+            let world_x = center[0] + ((u - 0.5) as f32) * w_m;
+            let world_z = center[2] + ((v - 0.5) as f32) * h_m;
+
+            assert!(
+                (world_x - marker_local[0]).abs() < 0.05 && (world_z - marker_local[2]).abs() < 0.05,
+                "z={z} tile shifted! marker=({},{}) tile_pt=({world_x},{world_z})",
+                marker_local[0],
+                marker_local[2]
+            );
+        }
+    }
 }

@@ -529,11 +529,17 @@ pub struct TextMarker {
     pub text: String,
     pub color: String,
     pub font_size: f64,
+    #[serde(default = "default_text_show_background")]
+    pub show_background: bool,
     pub lng: f64,
     pub lat: f64,
     pub altitude: f64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_text_show_background() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -564,6 +564,7 @@ pub fn egui_root_system(
                 | ToolMode::DrawBuilding
                 | ToolMode::DrawLine
                 | ToolMode::DrawRoute
+                | ToolMode::DrawTrafficLane
                 | ToolMode::PickRouteMarker
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker

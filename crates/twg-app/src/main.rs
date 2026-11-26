@@ -53,6 +53,7 @@ use crate::{
         route_edit::RouteEditState,
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
+        traffic::{TrafficVisualPool, traffic_visual_system},
         water_cannon::{WaterCannonVisualPool, water_cannon_visual_system},
     },
     state::{
@@ -138,6 +139,7 @@ fn main() {
         .init_resource::<ShootFxVisualPool>()
         .init_resource::<ParticleFxPool>()
         .init_resource::<PointerArrowVisualPool>()
+        .init_resource::<TrafficVisualPool>()
         .init_resource::<SkyboxManager>()
         .init_resource::<MarkerWorldBounds>()
         .init_resource::<BasicMeshTextureCache>()
@@ -204,6 +206,7 @@ fn main() {
                     shoot_fx_visual_system,
                     particle_fx_visual_system,
                     pointer_arrow_visual_system,
+                    traffic_visual_system,
                 )
                     .chain(),
             )
@@ -1105,6 +1108,7 @@ fn process_net_events_system(
                 let anim_id = a.id;
                 let anim_name = a.name.clone();
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
+                let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
@@ -1114,6 +1118,7 @@ fn process_net_events_system(
                 let is_multi = twg_shared::route_formation::is_multi_route_anim(&a);
                 let bound_empty = twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
                 let needs_marker_pick = !is_particle
+                    && !is_traffic
                     && !is_shoot
                     && !is_pointer
                     && !is_spawn_hide
@@ -1133,6 +1138,10 @@ fn process_net_events_system(
                         state.particle_preview_reset_nonce.wrapping_add(1);
                     state.status_banner = Some(format!(
                         "Partikel '{anim_name}' diletakkan — geser posisi via Move Gizmo (X / Alt / Z) atau ubah setting di Inspector!"
+                    ));
+                } else if is_traffic {
+                    state.status_banner = Some(format!(
+                        "Simulasi Traffic '{anim_name}' dibuat — tambah jalur balik / atur pool kendaraan di Inspector lalu klik Preview!"
                     ));
                 } else if is_shoot {
                     let kind_label = twg_shared::shoot_anim::shoot_anim_kind(

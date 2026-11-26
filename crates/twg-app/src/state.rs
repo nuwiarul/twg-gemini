@@ -981,10 +981,12 @@ pub enum ToolMode {
     RotateMarker,
     ScaleMarker,
     DrawLine,
+    #[allow(dead_code)] // Kept for existing scenario/draft handling; no longer exposed in the toolbar.
     DrawBuilding,
     DrawBasicPolygon,
     PlaceText,
     DrawRoute,
+    DrawTrafficLane,
     PickRouteMarker,
     PickShootMarker,
     PickPointerMarker,
@@ -1005,6 +1007,7 @@ impl ToolMode {
             Self::DrawBasicPolygon => "Draw Polygon",
             Self::PlaceText => "Add Label",
             Self::DrawRoute => "Draw Route",
+            Self::DrawTrafficLane => "Draw Traffic",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
             Self::PickPointerMarker => "Pilih Target Panah",
@@ -1066,6 +1069,7 @@ impl AnimCategory {
     pub fn from_anim_type(anim_type: &str) -> Self {
         match anim_type {
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
+            s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
             s if s == "particle"
                 || s.starts_with("particle_")
@@ -1352,6 +1356,8 @@ impl PlaybackState {
         for a in anims {
             let playable = if twg_shared::particle_anim::is_particle_anim(a) {
                 !a.geom.is_empty()
+            } else if twg_shared::traffic_anim::is_traffic_anim(a) {
+                twg_shared::traffic_anim::parse_traffic_anim_config(a).has_playable_setup()
             } else if twg_shared::shoot_anim::is_shoot_anim(a)
                 || twg_shared::pointer_anim::is_pointer_arrow_anim(a)
             {
@@ -1403,6 +1409,24 @@ pub struct CommandLogEntry {
     pub actor: String,
     pub command: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrafficPreviewLayout {
+    /// Places up to 2 preview models front-to-back along the road centerline.
+    #[default]
+    FrontBack,
+    /// Places up to 2 preview models side-by-side (left/right) for easy height & width comparison.
+    SideBySide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrafficScalePreviewState {
+    pub anim_id: Uuid,
+    /// Up to 2 vehicle pool indices rendered on the lane for direct scale comparison.
+    pub pool_indices: Vec<usize>,
+    /// Which pool index in `pool_indices` currently owns the interactive 3D Scale Gizmo.
+    pub active_gizmo_pool_idx: usize,
 }
 
 #[derive(Resource)]
@@ -1540,6 +1564,18 @@ pub struct AppState {
     pub new_route_name: String,
     pub new_route_speed: f64,
     pub new_route_loop: bool,
+    pub drawing_traffic_lane_for_anim_id: Option<Uuid>,
+    pub new_traffic_name: String,
+    pub traffic_pool_search: String,
+    pub traffic_pool_category_filter: Option<String>,
+    pub traffic_reverse_offset_m: f64,
+    pub traffic_reverse_side: twg_shared::traffic_anim::OvertakeSide,
+    pub traffic_scale_preview: Option<TrafficScalePreviewState>,
+    pub traffic_preview_layout: TrafficPreviewLayout,
+    pub traffic_preview_gap_m: f64,
+    /// Measured unscaled local 3D mesh extents `[width_x, height_y, length_z]` per `model_path`
+    /// so preview spacing & length hints automatically match each GLB's true physical size.
+    pub traffic_model_unit_dims: HashMap<String, [f32; 3]>,
     pub new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind,
     pub new_shoot_name: String,
     pub shoot_preview_reset_nonce: u64,
@@ -1758,6 +1794,16 @@ impl AppState {
             new_route_name: "Rute Unit 1".to_string(),
             new_route_speed: 5.0,
             new_route_loop: false,
+            drawing_traffic_lane_for_anim_id: None,
+            new_traffic_name: "Traffic Lalu Lintas 1".to_string(),
+            traffic_pool_search: String::new(),
+            traffic_pool_category_filter: None,
+            traffic_reverse_offset_m: 4.0,
+            traffic_reverse_side: twg_shared::traffic_anim::OvertakeSide::Right,
+            traffic_scale_preview: None,
+            traffic_preview_layout: TrafficPreviewLayout::FrontBack,
+            traffic_preview_gap_m: 4.0,
+            traffic_model_unit_dims: HashMap::new(),
             new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind::WaterCannon,
             new_shoot_name: "Water Cannon 1".to_string(),
             shoot_preview_reset_nonce: 0,
@@ -2000,6 +2046,8 @@ impl AppState {
                 .map(|a| {
                     let kind = if twg_shared::shoot_anim::is_shoot_anim(a) {
                         "Shoot Animation"
+                    } else if twg_shared::traffic_anim::is_traffic_anim(a) {
+                        "Simulasi Traffic"
                     } else if twg_shared::particle_anim::is_particle_anim(a) {
                         "Particle Animation"
                     } else if twg_shared::pointer_anim::is_pointer_arrow_anim(a) {
@@ -2493,6 +2541,7 @@ impl AppState {
             text: "POSKO UTAMA SEKTOR A".into(),
             color: "#38bdf8".into(),
             font_size: 15.0,
+            show_background: true,
             lng: 115.2173,
             lat: -8.6704,
             altitude: 34.0,

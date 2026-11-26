@@ -953,6 +953,9 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }
+    if crate::traffic_anim::is_traffic_anim(anim) {
+        return crate::traffic_anim::parse_traffic_anim_config(anim).has_playable_setup();
+    }
     if crate::shoot_anim::is_shoot_anim(anim) || crate::pointer_anim::is_pointer_arrow_anim(anim) {
         return anim
             .marker_id

@@ -486,7 +486,7 @@ pub async fn fetch_text_markers(
 ) -> Result<Vec<TextMarker>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT id, operasi_id, skenario_id, text, color, font_size, lng, lat, altitude, created_at, updated_at
+        SELECT id, operasi_id, skenario_id, text, color, font_size, show_background, lng, lat, altitude, created_at, updated_at
         FROM text_markers
         WHERE skenario_id = $1
         ORDER BY created_at ASC
@@ -508,9 +508,9 @@ pub async fn create_text_marker(
 
     let row = sqlx::query(
         r#"
-        INSERT INTO text_markers (operasi_id, skenario_id, text, color, font_size, lng, lat, altitude)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, operasi_id, skenario_id, text, color, font_size, lng, lat, altitude, created_at, updated_at
+        INSERT INTO text_markers (operasi_id, skenario_id, text, color, font_size, show_background, lng, lat, altitude)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, operasi_id, skenario_id, text, color, font_size, show_background, lng, lat, altitude, created_at, updated_at
         "#,
     )
     .bind(req.operasi_id)
@@ -518,6 +518,7 @@ pub async fn create_text_marker(
     .bind(req.text.trim())
     .bind(req.color)
     .bind(req.font_size)
+    .bind(req.show_background)
     .bind(req.lng)
     .bind(req.lat)
     .bind(req.altitude)
@@ -550,14 +551,15 @@ pub async fn update_text_marker(
     let row = sqlx::query(
         r#"
         UPDATE text_markers
-        SET text = $1, color = $2, font_size = $3, lng = $4, lat = $5, altitude = $6, updated_at = NOW()
-        WHERE id = $7
-        RETURNING id, operasi_id, skenario_id, text, color, font_size, lng, lat, altitude, created_at, updated_at
+        SET text = $1, color = $2, font_size = $3, show_background = $4, lng = $5, lat = $6, altitude = $7, updated_at = NOW()
+        WHERE id = $8
+        RETURNING id, operasi_id, skenario_id, text, color, font_size, show_background, lng, lat, altitude, created_at, updated_at
         "#,
     )
     .bind(req.text.trim())
     .bind(req.color)
     .bind(req.font_size)
+    .bind(req.show_background)
     .bind(req.lng)
     .bind(req.lat)
     .bind(req.altitude)
@@ -600,6 +602,7 @@ fn map_text_marker_row(row: &sqlx::postgres::PgRow) -> Result<TextMarker, sqlx::
         text: row.try_get("text")?,
         color: row.try_get("color")?,
         font_size: row.try_get("font_size")?,
+        show_background: row.try_get("show_background")?,
         lng: row.try_get("lng")?,
         lat: row.try_get("lat")?,
         altitude: row.try_get("altitude")?,

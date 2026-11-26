@@ -374,7 +374,7 @@ pub fn draw_top_bar(
                             ] {
                                 let allowed = !is_play_mode || tool == ToolMode::Select;
                                 let active = state.tool_mode == tool;
-                                if draw_transform_tool_btn(ui, tool, shortcut, active, allowed, tip) {
+                                if draw_toolbar_tool_btn(ui, tool, shortcut, active, allowed, tip) {
                                     state.tool_mode = tool;
                                     state.draft_points_lnglat.clear();
                                     state.measure_points_lnglat.clear();
@@ -388,31 +388,22 @@ pub fn draw_top_bar(
                 // Secondary plotting tools (Place 3D removed — use 3D Catalog drag-drop or + Tambah)
                 for tool in [
                     ToolMode::DrawLine,
-                    ToolMode::DrawBuilding,
                     ToolMode::PlaceText,
-                    ToolMode::DrawRoute,
                     ToolMode::Measure,
                 ] {
                     let allowed = !is_play_mode || tool == ToolMode::Measure;
                     let active = state.tool_mode == tool;
-                    let resp = ui.add_enabled(allowed, egui::Button::selectable(active, tool.label()));
-                    if resp.clicked() {
+                    let tip = match tool {
+                        ToolMode::DrawLine => "Draw Line: klik titik-titik di peta, lalu Enter untuk selesai",
+                        ToolMode::PlaceText => "Add Label: letakkan satu label, lalu otomatis kembali ke Select",
+                        ToolMode::Measure => "Measure: ukur jarak antar titik di peta",
+                        _ => unreachable!(),
+                    };
+                    if draw_toolbar_tool_btn(ui, tool, "", active, allowed, tip) {
                         state.tool_mode = tool;
                         state.draft_points_lnglat.clear();
                         if tool != ToolMode::Measure {
                             state.measure_points_lnglat.clear();
-                        }
-                        if tool == ToolMode::DrawRoute {
-                            state.new_route_is_multi = false;
-                            state.new_route_formation =
-                                twg_shared::route_formation::RouteFormationKind::Grid;
-                            state.route_target_marker_id = None;
-                            state.picking_marker_for_anim_id = None;
-                            state.new_route_name = format!("Rute Unit {}", state.anims.len() + 1);
-                            state.status_banner = Some(
-                                "Langkah 1/2: Klik titik garis rute di peta (min 2), lalu tekan Enter untuk memilih Model 3D."
-                                    .into(),
-                            );
                         }
                     }
                 }
@@ -423,6 +414,7 @@ pub fn draw_top_bar(
                         | ToolMode::DrawBuilding
                         | ToolMode::DrawBasicPolygon
                         | ToolMode::DrawRoute
+                        | ToolMode::DrawTrafficLane
                 ) && !state.draft_points_lnglat.is_empty()
                 {
                     let finish_btn = egui::Button::new(
@@ -436,6 +428,7 @@ pub fn draw_top_bar(
                     }
                     if ui.button("Batal").clicked() {
                         state.draft_points_lnglat.clear();
+                        state.drawing_traffic_lane_for_anim_id = None;
                         state.tool_mode = ToolMode::Select;
                     }
                 }
@@ -617,7 +610,7 @@ pub fn broadcast_playback_cmd(
     );
 }
 
-fn draw_transform_tool_btn(
+fn draw_toolbar_tool_btn(
     ui: &mut egui::Ui,
     tool: ToolMode,
     shortcut: &str,
@@ -686,7 +679,7 @@ fn draw_transform_tool_btn(
     }
 
     let icon_center = egui::pos2(rect.left() + 8.0 + icon_w * 0.5, rect.center().y);
-    draw_transform_tool_icon(painter, icon_center, tool, fg, active);
+    draw_toolbar_tool_icon(painter, icon_center, tool, fg, active);
 
     let text_pos = egui::pos2(
         rect.left() + 8.0 + icon_w + 5.0,
@@ -710,7 +703,8 @@ fn draw_transform_tool_btn(
     clicked
 }
 
-fn draw_transform_tool_icon(
+/// Toolbar icons are drawn from local vector paths, not icon-font glyphs.
+fn draw_toolbar_tool_icon(
     painter: &egui::Painter,
     c: egui::Pos2,
     tool: ToolMode,
@@ -840,6 +834,67 @@ fn draw_transform_tool_icon(
                 egui::Stroke::new(1.0, fg),
                 egui::StrokeKind::Inside,
             );
+        }
+        ToolMode::DrawLine => {
+            let line_col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(56, 189, 248)
+            };
+            let a = c + egui::vec2(-5.5, 4.0);
+            let b = c + egui::vec2(-1.2, -2.0);
+            let d = c + egui::vec2(5.5, 2.5);
+            painter.line_segment([a, b], egui::Stroke::new(1.8, line_col));
+            painter.line_segment([b, d], egui::Stroke::new(1.8, line_col));
+            for point in [a, b, d] {
+                painter.circle_filled(point, 2.1, line_col);
+                painter.circle_stroke(point, 2.1, egui::Stroke::new(0.8, fg));
+            }
+        }
+        ToolMode::PlaceText => {
+            let col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(196, 181, 253)
+            };
+            let body = egui::Rect::from_center_size(c + egui::vec2(0.0, -0.8), egui::vec2(12.0, 9.0));
+            painter.rect_stroke(body, 2.0, egui::Stroke::new(1.4, col), egui::StrokeKind::Inside);
+            painter.line_segment(
+                [body.left_center() + egui::vec2(2.5, -1.5), body.right_center() + egui::vec2(-2.5, -1.5)],
+                egui::Stroke::new(1.3, col),
+            );
+            painter.line_segment(
+                [body.left_center() + egui::vec2(2.5, 1.8), body.center() + egui::vec2(1.5, 1.8)],
+                egui::Stroke::new(1.3, col),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    body.left_bottom() + egui::vec2(3.0, 0.0),
+                    body.left_bottom() + egui::vec2(6.0, 0.0),
+                    body.left_bottom() + egui::vec2(4.2, 3.5),
+                ],
+                col,
+                egui::Stroke::NONE,
+            ));
+        }
+        ToolMode::Measure => {
+            let col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(45, 212, 191)
+            };
+            let a = c + egui::vec2(-5.2, 4.8);
+            let b = c + egui::vec2(5.2, -4.8);
+            painter.line_segment([a, b], egui::Stroke::new(2.4, col));
+            let dir = (b - a).normalized();
+            let normal = egui::vec2(-dir.y, dir.x);
+            for t in [0.12, 0.36, 0.60, 0.84] {
+                let p = a + (b - a) * t;
+                let tick_len = if (t - 0.60).abs() < f32::EPSILON { 3.6 } else { 2.4 };
+                painter.line_segment([p - normal * tick_len, p + normal * tick_len], egui::Stroke::new(1.0, col));
+            }
+            painter.circle_filled(a, 1.6, fg);
+            painter.circle_filled(b, 1.6, fg);
         }
         _ => {}
     }

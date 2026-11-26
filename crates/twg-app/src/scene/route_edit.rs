@@ -9,6 +9,7 @@ use twg_shared::{
         PatwalUnitRole, RouteFormationKind, anim_bound_marker_ids, is_multi_route_anim,
         parse_multi_route_config, sample_multi_route_poses,
     },
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
 };
 use uuid::Uuid;
 
@@ -45,6 +46,7 @@ pub enum RouteHoverTarget {
 #[derive(Debug, Clone)]
 pub struct ActiveWaypointDrag {
     pub anim_id: Uuid,
+    pub traffic_lane_idx: Option<usize>,
     pub waypoint_idx: usize,
     pub handle: RouteWaypointGizmoHandle,
     pub start_world_pos: Vec3,
@@ -60,6 +62,8 @@ pub struct ActiveWaypointDrag {
 #[derive(Resource, Default)]
 pub struct RouteEditState {
     pub editing_anim_id: Option<Uuid>,
+    /// When editing a `traffic_flow` animation, identifies which lane inside `cfg.lanes` is active.
+    pub traffic_lane_idx: Option<usize>,
     pub selected_waypoint: Option<usize>,
     pub add_point_on_map_mode: bool,
     pub hovered: Option<RouteHoverTarget>,
@@ -81,11 +85,84 @@ impl RouteEditState {
 
     pub fn clear(&mut self) {
         self.editing_anim_id = None;
+        self.traffic_lane_idx = None;
         self.selected_waypoint = None;
         self.add_point_on_map_mode = false;
         self.hovered = None;
         self.active_drag = None;
     }
+}
+
+/// Returns the waypoint polyline currently being edited for `anim` (either `anim.geom`
+/// for regular routes, or `cfg.lanes[lane_idx].geom` for a Traffic animation).
+pub fn editable_anim_geom(anim: &Anim, traffic_lane_idx: Option<usize>) -> Vec<[f64; 3]> {
+    if is_traffic_anim(anim) {
+        let cfg = parse_traffic_anim_config(anim);
+        let idx = traffic_lane_idx.unwrap_or(0);
+        cfg.lanes
+            .get(idx)
+            .map(|l| l.geom.clone())
+            .unwrap_or_default()
+    } else {
+        anim.geom.clone()
+    }
+}
+
+/// Writes an edited waypoint polyline back into `anim` (syncing `cfg.lanes[lane_idx]` for Traffic
+/// or `anim.geom` + `duration_sec` for regular routes).
+pub fn write_editable_anim_geom(
+    anim: &mut Anim,
+    traffic_lane_idx: Option<usize>,
+    geom: Vec<[f64; 3]>,
+) {
+    if is_traffic_anim(anim) {
+        let mut cfg = parse_traffic_anim_config(anim);
+        let idx = traffic_lane_idx.unwrap_or(0);
+        if let Some(lane) = cfg.lanes.get_mut(idx) {
+            lane.geom = geom;
+            write_traffic_anim_config(anim, &cfg);
+        }
+    } else {
+        anim.geom = geom;
+        anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
+    }
+}
+
+/// Finds which Traffic lane (if any) was clicked on the 3D map for a given Traffic animation.
+pub fn hit_test_traffic_lane_index(
+    cursor_px: Vec2,
+    state: &AppState,
+    anim: &Anim,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<usize> {
+    if !is_traffic_anim(anim) {
+        return None;
+    }
+    let cfg = parse_traffic_anim_config(anim);
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, lane) in cfg.lanes.iter().enumerate() {
+        if lane.geom.len() < 2 {
+            continue;
+        }
+        let projected: Vec<Option<Vec2>> = lane
+            .geom
+            .iter()
+            .map(|&pt| {
+                let w = waypoint_world_pos(state, pt);
+                camera.world_to_viewport(cam_gtf, w).ok()
+            })
+            .collect();
+        for pair in projected.windows(2) {
+            if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                let d = point_to_segment_dist(cursor_px, a, b);
+                if d <= 14.0 && best.is_none_or(|cur| d < cur.1) {
+                    best = Some((idx, d));
+                }
+            }
+        }
+    }
+    best.map(|(idx, _)| idx)
 }
 
 /// Inserts a midpoint waypoint halfway between `geom[seg_idx]` and `geom[seg_idx + 1]`.
@@ -138,8 +215,35 @@ pub fn hit_test_any_route_line(
     for anim in &state.anims {
         if state.hidden_entity_ids.contains(&anim.id)
             || state.locked_entity_ids.contains(&anim.id)
-            || anim.geom.len() < 2
         {
+            continue;
+        }
+        if twg_shared::traffic_anim::is_traffic_anim(anim) {
+            let cfg = twg_shared::traffic_anim::parse_traffic_anim_config(anim);
+            for lane in &cfg.lanes {
+                if lane.geom.len() < 2 {
+                    continue;
+                }
+                let projected: Vec<Option<Vec2>> = lane
+                    .geom
+                    .iter()
+                    .map(|&pt| {
+                        let w = waypoint_world_pos(state, pt);
+                        camera.world_to_viewport(cam_gtf, w).ok()
+                    })
+                    .collect();
+                for pair in projected.windows(2) {
+                    if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                        let d = point_to_segment_dist(cursor_px, a, b);
+                        if d <= 10.5 && best.is_none_or(|cur| d < cur.1) {
+                            best = Some((anim.id, d));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if anim.geom.len() < 2 {
             continue;
         }
         let projected: Vec<Option<Vec2>> = anim
@@ -176,23 +280,25 @@ fn delete_badge_screen_pos(origin_2d: Vec2) -> Vec2 {
     origin_2d + Vec2::new(-24.0, 22.0)
 }
 
-/// Removes a waypoint from a route animation if at least 2 waypoints will remain.
+/// Removes a waypoint from a route animation (or active Traffic lane) if at least 2 waypoints will remain.
 pub fn remove_route_waypoint(
     state: &mut AppState,
     route_edit: &mut RouteEditState,
     anim_id: Uuid,
     idx: usize,
 ) -> bool {
+    let lane_idx = route_edit.traffic_lane_idx;
     let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) else {
         return false;
     };
-    if anim.geom.len() <= 2 || idx >= anim.geom.len() {
-        state.status_banner = Some("Rute animasi membutuhkan minimal 2 titik.".into());
+    let mut geom = editable_anim_geom(anim, lane_idx);
+    if geom.len() <= 2 || idx >= geom.len() {
+        state.status_banner = Some("Jalur animasi membutuhkan minimal 2 titik.".into());
         return false;
     }
-    anim.geom.remove(idx);
-    anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
-    let new_len = anim.geom.len();
+    geom.remove(idx);
+    let new_len = geom.len();
+    write_editable_anim_geom(anim, lane_idx, geom);
     let updated = anim.clone();
     if state.anim_edit.as_ref().is_some_and(|e| e.id == anim_id) {
         state.anim_edit = Some(updated);
@@ -220,21 +326,23 @@ pub fn hit_test_route_editor(
     cursor_px: Vec2,
     state: &AppState,
     anim: &Anim,
+    traffic_lane_idx: Option<usize>,
     selected_waypoint: Option<usize>,
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> Option<RouteHoverTarget> {
-    if anim.geom.len() < 2 {
+    let geom = editable_anim_geom(anim, traffic_lane_idx);
+    if geom.len() < 2 {
         return None;
     }
 
     // Priority 1: Active Waypoint Delete 'x' Badge & 3D Move Gizmo (Red X, Green Alt/Y, Blue Z, Yellow Free)
     if let Some(wi) = selected_waypoint
-        && let Some(&pt) = anim.geom.get(wi)
+        && let Some(&pt) = geom.get(wi)
     {
         let origin = waypoint_world_pos(state, pt);
         if let Ok(o2) = camera.world_to_viewport(cam_gtf, origin) {
-            if anim.geom.len() > 2 && cursor_px.distance(delete_badge_screen_pos(o2)) <= 11.5 {
+            if geom.len() > 2 && cursor_px.distance(delete_badge_screen_pos(o2)) <= 11.5 {
                 return Some(RouteHoverTarget::DeleteWaypoint(wi));
             }
             if cursor_px.distance(o2) <= 13.0 {
@@ -269,7 +377,7 @@ pub fn hit_test_route_editor(
 
     // Priority 2: Waypoint dots
     let mut best_w: Option<(usize, f32)> = None;
-    for (i, &pt) in anim.geom.iter().enumerate() {
+    for (i, &pt) in geom.iter().enumerate() {
         let w = waypoint_world_pos(state, pt);
         if let Ok(s) = camera.world_to_viewport(cam_gtf, w) {
             let d = cursor_px.distance(s);
@@ -284,9 +392,9 @@ pub fn hit_test_route_editor(
 
     // Priority 3: Segment midpoint "+" handles
     let mut best_m: Option<(usize, f32)> = None;
-    for i in 0..(anim.geom.len() - 1) {
-        let a = anim.geom[i];
-        let b = anim.geom[i + 1];
+    for i in 0..(geom.len() - 1) {
+        let a = geom[i];
+        let b = geom[i + 1];
         let mid = [
             (a[0] + b[0]) * 0.5,
             (a[1] + b[1]) * 0.5,
@@ -307,13 +415,15 @@ pub fn hit_test_route_editor(
 pub fn begin_waypoint_drag(
     state: &AppState,
     anim: &Anim,
+    traffic_lane_idx: Option<usize>,
     waypoint_idx: usize,
     handle: RouteWaypointGizmoHandle,
     cursor_px: Vec2,
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> Option<ActiveWaypointDrag> {
-    let &pt = anim.geom.get(waypoint_idx)?;
+    let geom = editable_anim_geom(anim, traffic_lane_idx);
+    let &pt = geom.get(waypoint_idx)?;
     let start_world_pos = waypoint_world_pos(state, pt);
     let axis_world = match handle {
         RouteWaypointGizmoHandle::AxisX => Vec3::X,
@@ -334,6 +444,7 @@ pub fn begin_waypoint_drag(
 
     Some(ActiveWaypointDrag {
         anim_id: anim.id,
+        traffic_lane_idx,
         waypoint_idx,
         handle,
         start_world_pos,
@@ -375,19 +486,20 @@ pub fn update_waypoint_drag(
         } else {
             (raw_alt * 10.0).round() / 10.0
         };
-        if let Some(anim) = state.anims.iter_mut().find(|a| a.id == drag.anim_id)
-            && drag.waypoint_idx < anim.geom.len()
-        {
-            anim.geom[drag.waypoint_idx][2] = new_alt;
-            anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
-            let updated = anim.clone();
-            if state.anim_edit.as_ref().is_some_and(|e| e.id == drag.anim_id) {
-                state.anim_edit = Some(updated);
+        if let Some(anim) = state.anims.iter_mut().find(|a| a.id == drag.anim_id) {
+            let mut geom = editable_anim_geom(anim, drag.traffic_lane_idx);
+            if drag.waypoint_idx < geom.len() {
+                geom[drag.waypoint_idx][2] = new_alt;
+                write_editable_anim_geom(anim, drag.traffic_lane_idx, geom);
+                let updated = anim.clone();
+                if state.anim_edit.as_ref().is_some_and(|e| e.id == drag.anim_id) {
+                    state.anim_edit = Some(updated);
+                }
+                state.dirty_anim_ids.insert(drag.anim_id);
+                drag.moved = true;
+                drag.prev_cursor_px = cursor_px;
+                return true;
             }
-            state.dirty_anim_ids.insert(drag.anim_id);
-            drag.moved = true;
-            drag.prev_cursor_px = cursor_px;
-            return true;
         }
         return false;
     }
@@ -414,28 +526,30 @@ pub fn update_waypoint_drag(
         .geo_anchor
         .local_to_lng_lat_alt([new_world.x, 0.0, new_world.z]);
 
-    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == drag.anim_id)
-        && drag.waypoint_idx < anim.geom.len()
-    {
-        let keep_alt = anim.geom[drag.waypoint_idx][2];
-        anim.geom[drag.waypoint_idx] = [lng, lat, keep_alt];
-        anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
-        let updated = anim.clone();
-        if state.anim_edit.as_ref().is_some_and(|e| e.id == drag.anim_id) {
-            state.anim_edit = Some(updated);
+    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == drag.anim_id) {
+        let mut geom = editable_anim_geom(anim, drag.traffic_lane_idx);
+        if drag.waypoint_idx < geom.len() {
+            let keep_alt = geom[drag.waypoint_idx][2];
+            geom[drag.waypoint_idx] = [lng, lat, keep_alt];
+            write_editable_anim_geom(anim, drag.traffic_lane_idx, geom);
+            let updated = anim.clone();
+            if state.anim_edit.as_ref().is_some_and(|e| e.id == drag.anim_id) {
+                state.anim_edit = Some(updated);
+            }
+            state.dirty_anim_ids.insert(drag.anim_id);
+            drag.moved = true;
+            drag.prev_cursor_px = cursor_px;
+            return true;
         }
-        state.dirty_anim_ids.insert(drag.anim_id);
-        drag.moved = true;
-        drag.prev_cursor_px = cursor_px;
-        return true;
     }
     false
 }
 
-/// Appends a new waypoint to the end of the route at the clicked ground point.
+/// Appends a new waypoint to the end of the route (or active Traffic lane) at the clicked ground point.
 pub fn append_waypoint_from_cursor_click(
     state: &mut AppState,
     anim_id: Uuid,
+    traffic_lane_idx: Option<usize>,
     cursor_px: Vec2,
     camera: &Camera,
     cam_gtf: &GlobalTransform,
@@ -445,10 +559,11 @@ pub fn append_waypoint_from_cursor_click(
     let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
 
     if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
-        let alt = anim.geom.last().map(|p| p[2]).unwrap_or(0.0);
-        anim.geom.push([lng, lat, alt]);
-        anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
-        let new_idx = anim.geom.len() - 1;
+        let mut geom = editable_anim_geom(anim, traffic_lane_idx);
+        let alt = geom.last().map(|p| p[2]).unwrap_or(0.0);
+        geom.push([lng, lat, alt]);
+        let new_idx = geom.len() - 1;
+        write_editable_anim_geom(anim, traffic_lane_idx, geom);
         let updated = anim.clone();
         if state.anim_edit.as_ref().is_some_and(|e| e.id == anim_id) {
             state.anim_edit = Some(updated);
@@ -496,8 +611,11 @@ pub fn draw_route_editor_overlay(
         ))
         .with_clip_rect(clip_rect);
 
-    // 1. Live numbered waypoints & rubber-band while drawing a new route (Step 1/2)
-    if state.tool_mode == ToolMode::DrawRoute {
+    // 1. Live numbered waypoints & rubber-band while drawing a new route or traffic lane
+    if matches!(
+        state.tool_mode,
+        ToolMode::DrawRoute | ToolMode::DrawTrafficLane
+    ) {
         draw_route_draft_overlay(&painter, clip_rect, state, camera, cam_gtf);
         return;
     }
@@ -1189,13 +1307,13 @@ pub fn draw_route_editor_overlay(
     let Some(anim) = state.anims.iter().find(|a| a.id == edit_id) else {
         return;
     };
-    if anim.geom.len() < 2 {
+    let geom = editable_anim_geom(anim, route_edit.traffic_lane_idx);
+    if geom.len() < 2 {
         return;
     }
 
-    let n = anim.geom.len();
-    let world_pts: Vec<Vec3> = anim
-        .geom
+    let n = geom.len();
+    let world_pts: Vec<Vec3> = geom
         .iter()
         .map(|&p| waypoint_world_pos(state, p))
         .collect();
@@ -1278,10 +1396,10 @@ pub fn draw_route_editor_overlay(
             continue;
         };
         // Vertical drop-stem & compact altitude tag when elevated above ground
-        if anim.geom[i][2].abs() > 0.2 {
+        if geom[i][2].abs() > 0.2 {
             let g_local = state
                 .geo_anchor
-                .lng_lat_alt_to_local(anim.geom[i][0], anim.geom[i][1], 0.0);
+                .lng_lat_alt_to_local(geom[i][0], geom[i][1], 0.0);
             if let Ok(gs_v) = camera.world_to_viewport(cam_gtf, Vec3::from_array(g_local)) {
                 let gs = to_pos2(gs_v);
                 painter.line_segment(
@@ -1290,7 +1408,7 @@ pub fn draw_route_editor_overlay(
                 );
                 painter.circle_filled(gs, 3.0, egui::Color32::from_rgba_unmultiplied(52, 211, 153, 190));
             }
-            let alt_txt = format!("{:.1}m", anim.geom[i][2]);
+            let alt_txt = format!("{:.1}m", geom[i][2]);
             painter.text(
                 scr + egui::vec2(13.0, -11.0),
                 egui::Align2::LEFT_CENTER,
@@ -1470,7 +1588,7 @@ pub fn draw_route_editor_overlay(
         egui::Id::new("twg_route_edit_hud"),
     ));
     if let Some(d) = &route_edit.active_drag
-        && let Some(&pt) = anim.geom.get(d.waypoint_idx)
+        && let Some(&pt) = geom.get(d.waypoint_idx)
     {
         let txt = if d.handle == RouteWaypointGizmoHandle::AxisY {
             format!("Titik #{}: Altitude {:.1} m", d.waypoint_idx + 1, pt[2])

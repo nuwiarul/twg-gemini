@@ -368,6 +368,9 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::pointer_anim::is_pointer_arrow_anim(anim) {
         return crate::pointer_anim::parse_pointer_arrow_config(anim).continuous;
     }
+    if crate::traffic_anim::is_traffic_anim(anim) {
+        return crate::traffic_anim::parse_traffic_anim_config(anim).continuous;
+    }
     false
 }
 

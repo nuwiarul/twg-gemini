@@ -282,6 +282,8 @@ pub struct CreateTextMarkerRequest {
     pub color: String,
     #[serde(default = "default_font_size")]
     pub font_size: f64,
+    #[serde(default = "default_text_show_background")]
+    pub show_background: bool,
     pub lng: f64,
     pub lat: f64,
     #[serde(default = "default_text_alt")]
@@ -293,6 +295,8 @@ pub struct UpdateTextMarkerRequest {
     pub text: String,
     pub color: String,
     pub font_size: f64,
+    #[serde(default = "default_text_show_background")]
+    pub show_background: bool,
     pub lng: f64,
     pub lat: f64,
     pub altitude: f64,
@@ -502,7 +506,10 @@ fn default_font_size() -> f64 {
     14.0
 }
 fn default_text_alt() -> f64 {
-    12.0
+    0.0
+}
+fn default_text_show_background() -> bool {
+    true
 }
 fn default_anim_speed() -> f64 {
     12.0

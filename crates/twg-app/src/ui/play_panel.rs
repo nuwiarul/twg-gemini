@@ -15,6 +15,7 @@ use twg_shared::{
         shoot_anim_is_continuous, shoot_anim_kind,
     },
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
 };
 use uuid::Uuid;
 
@@ -625,6 +626,7 @@ pub fn draw_play_animation_panel(
                         let shoot_kind = shoot_anim_kind(anim);
                         let is_shoot = shoot_kind.is_some();
                         let is_particle = is_particle_anim(anim);
+                        let is_traffic = is_traffic_anim(anim);
                         let is_pointer = is_pointer_arrow_anim(anim);
                         let is_spawn_hide = is_spawn_hide_anim(anim);
                         let is_group = is_group_anim(anim);
@@ -633,6 +635,11 @@ pub fn draw_play_animation_panel(
                             shoot_anim_is_continuous(anim)
                         } else {
                             false
+                        };
+                        let tr_cfg = if is_traffic {
+                            Some(parse_traffic_anim_config(anim))
+                        } else {
+                            None
                         };
                         let p_cfg = if is_particle {
                             Some(parse_particle_anim_config(anim))
@@ -663,6 +670,15 @@ pub fn draw_play_animation_panel(
                                 (elapsed, 0.0, p)
                             } else {
                                 let dur = anim.duration_sec.max(0.5);
+                                (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
+                            }
+                        } else if let Some(ref trc) = tr_cfg {
+                            let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
+                            if trc.continuous {
+                                let p = if status == AnimRunStatus::Playing { 1.0 } else { 0.0 };
+                                (elapsed, 0.0, p)
+                            } else {
+                                let dur = anim.duration_sec.max(10.0);
                                 (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
                             }
                         } else if let Some(ref pcfg) = p_cfg {
@@ -826,6 +842,13 @@ pub fn draw_play_animation_panel(
                                             egui::Color32::from_rgb(239, 68, 68),
                                         ),
                                     }
+                                } else if is_traffic {
+                                    (
+                                        "LALU LINTAS",
+                                        egui::Color32::from_rgb(120, 53, 15),
+                                        egui::Color32::from_rgb(253, 230, 138),
+                                        egui::Color32::from_rgb(245, 158, 11),
+                                    )
                                 } else if is_pointer {
                                     (
                                         "MENUNJUK",
@@ -878,6 +901,7 @@ pub fn draw_play_animation_panel(
                             AnimRunStatus::Paused => (
                                 if is_shoot
                                     || is_particle
+                                    || is_traffic
                                     || is_pointer
                                     || is_spawn_hide
                                     || is_group
@@ -999,6 +1023,8 @@ pub fn draw_play_animation_panel(
                                                 egui::Color32::from_rgb(45, 212, 191),
                                             ),
                                         }
+                                    } else if is_traffic {
+                                        ("[TRAFFIC]", egui::Color32::from_rgb(251, 191, 36))
                                     } else if is_multi {
                                         if parse_multi_route_config(anim).formation
                                             == RouteFormationKind::Patwal
@@ -1134,6 +1160,27 @@ pub fn draw_play_animation_panel(
                                         )
                                         .truncate(),
                                     );
+                                } else if let Some(ref trc) = tr_cfg {
+                                    let active_lanes = trc
+                                        .lanes
+                                        .iter()
+                                        .filter(|l| l.enabled && l.geom.len() >= 2)
+                                        .count();
+                                    let info_line = format!(
+                                        "{active_lanes} Jalur  •  {} Model Pool  •  {:.0}–{:.0} km/j{}",
+                                        trc.vehicle_pool.len(),
+                                        trc.min_speed_mps * 3.6,
+                                        trc.max_speed_mps * 3.6,
+                                        if trc.allow_overtaking { "  •  Salip" } else { "" }
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(info_line)
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(253, 230, 138)),
+                                        )
+                                        .truncate(),
+                                    );
                                 } else if let Some(ref pcfg) = p_cfg {
                                     let pos_line = if !anim.geom.is_empty() {
                                         let [lng, lat, alt] = particle_anim_position(anim);
@@ -1239,6 +1286,23 @@ pub fn draw_play_animation_panel(
                                             let rep_tail = if anim.replay { "  •  Repeat" } else { "" };
                                             format!("Mode: {trig}{delay_tail}{rep_tail}{play_all_tail}")
                                         }
+                                    }
+                                } else if let Some(ref trc) = tr_cfg {
+                                    if trc.continuous {
+                                        format!(
+                                            "Pool: max {}/jalur (tot {})  •  Terus ({:.1}s)",
+                                            trc.max_vehicles_per_lane,
+                                            trc.max_total_vehicles,
+                                            dist_m
+                                        )
+                                    } else {
+                                        format!(
+                                            "Pool: max {}/jalur  •  {:.1} / {:.1} dtk{}",
+                                            trc.max_vehicles_per_lane,
+                                            dist_m,
+                                            total_m,
+                                            if anim.replay { "  •  Repeat" } else { "" }
+                                        )
                                     }
                                 } else if let Some(ref pcfg) = p_cfg {
                                     if pcfg.continuous {
@@ -1901,6 +1965,17 @@ fn anim_matches_play_search(
         if !cfg.label_text.is_empty() {
             haystack.push(' ');
             haystack.push_str(&cfg.label_text);
+        }
+    } else if is_traffic_anim(anim) {
+        let cfg = parse_traffic_anim_config(anim);
+        haystack.push_str(" traffic lalu lintas kendaraan jalan salip ");
+        for l in &cfg.lanes {
+            haystack.push(' ');
+            haystack.push_str(&l.name);
+        }
+        for v in &cfg.vehicle_pool {
+            haystack.push(' ');
+            haystack.push_str(&v.name);
         }
     } else if is_multi_route_anim(anim) {
         let cfg = parse_multi_route_config(anim);

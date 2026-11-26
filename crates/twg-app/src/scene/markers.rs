@@ -32,6 +32,10 @@ use twg_shared::{
         SpawnHideAction, SpawnHideConfig, parse_spawn_hide_config, spawn_hide_action,
         write_spawn_hide_config,
     },
+    traffic_anim::{
+        ANIM_TYPE_TRAFFIC_FLOW, TrafficAnimConfig, TrafficLane, TrafficVehicleEntry,
+        is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config,
+    },
 };
 use uuid::Uuid;
 
@@ -50,7 +54,8 @@ use crate::{
         buildings::TacticalBuildingEntity,
         gizmo::{
             GIZMO_SCREEN_RADIUS_PX, GizmoHandle, GizmoMode, TransformGizmoState,
-            begin_gizmo_drag, begin_particle_move_drag, compute_gizmo_world_radius,
+            begin_gizmo_drag, begin_particle_move_drag, begin_text_marker_move_drag,
+            begin_traffic_preview_scale_drag, compute_gizmo_world_radius,
             gizmo_mode_for_tool, hit_test_gizmo, marker_quat, marker_world_origin,
             particle_anim_world_origin, update_gizmo_drag,
         },
@@ -68,10 +73,12 @@ use crate::{
         },
         route_edit::{
             RouteEditState, RouteHoverTarget, RouteWaypointGizmoHandle,
-            append_waypoint_from_cursor_click, begin_waypoint_drag, hit_test_any_route_line,
-            hit_test_route_editor, insert_route_midpoint_after, remove_route_waypoint,
-            update_waypoint_drag,
+            append_waypoint_from_cursor_click, begin_waypoint_drag, editable_anim_geom,
+            hit_test_any_route_line, hit_test_route_editor, hit_test_traffic_lane_index,
+            insert_route_midpoint_after, remove_route_waypoint, update_waypoint_drag,
+            write_editable_anim_geom,
         },
+        traffic::resolve_active_traffic_scale_gizmo_pose,
     },
     state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode, UiPointerState},
 };
@@ -701,6 +708,7 @@ pub fn save_all_scenario_changes(
                     text: t.text,
                     color: t.color,
                     font_size: t.font_size,
+                    show_background: t.show_background,
                     lng: t.lng,
                     lat: t.lat,
                     altitude: t.altitude,
@@ -2067,35 +2075,52 @@ pub fn map_interaction_system(
         return;
     }
 
+    // Auto-clear on-map Traffic Scale Preview if user switches selection or starts Play/Preview
+    if let Some(ref preview) = state.traffic_scale_preview {
+        let prev_aid = preview.anim_id;
+        let still_valid = !playback.play_test_mode
+            && playback.editor_preview_anim_id.is_none()
+            && state.selected == SelectedEntity::Anim(prev_aid)
+            && !state.locked_entity_ids.contains(&prev_aid)
+            && resolve_active_traffic_scale_gizmo_pose(&state).is_some();
+        if !still_valid {
+            state.traffic_scale_preview = None;
+        }
+    }
+
     // Keep RouteEditState synchronized with current selection & lock status
     // Auto-enable interactive waypoint editing whenever an unlocked Route Animation is selected
     if !playback.play_test_mode
         && state.tool_mode.is_transform_tool()
+        && state.traffic_scale_preview.is_none()
         && let SelectedEntity::Anim(sel_id) = state.selected
         && !state.locked_entity_ids.contains(&sel_id)
         && state
             .anims
             .iter()
             .find(|a| a.id == sel_id)
-            .is_some_and(|a| a.geom.len() >= 2)
+            .is_some_and(|a| !is_traffic_anim(a) && a.geom.len() >= 2)
         && route_edit.editing_anim_id != Some(sel_id)
     {
         route_edit.editing_anim_id = Some(sel_id);
+        route_edit.traffic_lane_idx = None;
         route_edit.selected_waypoint = None;
         route_edit.add_point_on_map_mode = false;
         route_edit.active_drag = None;
     }
 
     if let Some(edit_id) = route_edit.editing_anim_id {
+        let lane_idx = route_edit.traffic_lane_idx;
         let valid = !playback.play_test_mode
             && state.tool_mode.is_transform_tool()
+            && state.traffic_scale_preview.is_none()
             && matches!(state.selected, SelectedEntity::Anim(sid) if sid == edit_id)
             && !state.locked_entity_ids.contains(&edit_id)
             && state
                 .anims
                 .iter()
                 .find(|a| a.id == edit_id)
-                .is_some_and(|a| a.geom.len() >= 2);
+                .is_some_and(|a| editable_anim_geom(a, lane_idx).len() >= 2);
         if !valid {
             route_edit.clear();
         } else if let Some(wi) = route_edit.selected_waypoint {
@@ -2103,7 +2128,7 @@ pub fn map_interaction_system(
                 .anims
                 .iter()
                 .find(|a| a.id == edit_id)
-                .map(|a| a.geom.len())
+                .map(|a| editable_anim_geom(a, lane_idx).len())
                 .unwrap_or(0);
             if wi >= n {
                 route_edit.selected_waypoint = None;
@@ -2214,6 +2239,7 @@ pub fn map_interaction_system(
                     | ToolMode::DrawBuilding
                     | ToolMode::DrawBasicPolygon
                     | ToolMode::DrawRoute
+                    | ToolMode::DrawTrafficLane
             )
             && !state.draft_points_lnglat.is_empty()
         {
@@ -2221,6 +2247,13 @@ pub fn map_interaction_system(
             return;
         }
         if keys.just_pressed(KeyCode::Escape) {
+            if state.tool_mode == ToolMode::DrawTrafficLane {
+                state.draft_points_lnglat.clear();
+                state.drawing_traffic_lane_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Penggambaran Jalur Traffic dibatalkan.".into());
+                return;
+            }
             if state.tool_mode == ToolMode::PickShootMarker {
                 state.picking_shoot_for_anim_id = None;
                 state.tool_mode = ToolMode::Select;
@@ -2468,12 +2501,14 @@ pub fn map_interaction_system(
         return;
     }
 
-    // Release active transform gizmo drag: mark marker or particle anim dirty so toolbar Simpan saves all edits
+    // Release active transform gizmo drag and mark its edited entity for toolbar Simpan.
     if (mouse_buttons.just_released(MouseButton::Left) || !mouse_buttons.pressed(MouseButton::Left))
         && let Some(finished) = gizmo_state.active_drag.take()
     {
         if finished.moved {
-            if finished.is_particle_anim {
+            if finished.is_text_marker {
+                state.dirty_text_ids.insert(finished.marker_id);
+            } else if finished.is_particle_anim || finished.traffic_scale_preview.is_some() {
                 state.dirty_anim_ids.insert(finished.marker_id);
             } else {
                 state.dirty_marker_ids.insert(finished.marker_id);
@@ -2563,6 +2598,7 @@ pub fn map_interaction_system(
                 cursor_px,
                 &state,
                 a,
+                route_edit.traffic_lane_idx,
                 route_edit.selected_waypoint,
                 camera,
                 cam_gtf,
@@ -2614,6 +2650,29 @@ pub fn map_interaction_system(
                         );
                         hit_test_gizmo(cursor_px, mode, origin, rot_quat, radius, camera, cam_gtf)
                     })
+            } else if state.tool_mode.is_transform_tool()
+                && let SelectedEntity::Anim(sel_id) = state.selected
+                && !state.locked_entity_ids.contains(&sel_id)
+                && let Some(sp) = resolve_active_traffic_scale_gizmo_pose(&state)
+                && sp.anim_id == sel_id
+            {
+                let origin = sp.world_pos;
+                let rot_quat = Quat::from_rotation_y(sp.model_yaw_deg.to_radians());
+                let radius = compute_gizmo_world_radius(
+                    camera,
+                    cam_gtf,
+                    origin,
+                    GIZMO_SCREEN_RADIUS_PX,
+                );
+                hit_test_gizmo(
+                    cursor_px,
+                    GizmoMode::Scale,
+                    origin,
+                    rot_quat,
+                    radius,
+                    camera,
+                    cam_gtf,
+                )
             } else if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
                 && let SelectedEntity::Anim(sel_id) = state.selected
                 && !state.locked_entity_ids.contains(&sel_id)
@@ -2624,6 +2683,38 @@ pub fn map_interaction_system(
                     .find(|a| a.id == sel_id && is_particle_anim(a) && !a.geom.is_empty())
                     .and_then(|a| {
                         let origin = particle_anim_world_origin(&state, a);
+                        let radius = compute_gizmo_world_radius(
+                            camera,
+                            cam_gtf,
+                            origin,
+                            GIZMO_SCREEN_RADIUS_PX,
+                        );
+                        hit_test_gizmo(
+                            cursor_px,
+                            GizmoMode::Move,
+                            origin,
+                            Quat::IDENTITY,
+                            radius,
+                            camera,
+                            cam_gtf,
+                        )
+                    })
+            } else if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
+                && let SelectedEntity::TextMarker(sel_id) = state.selected
+                && !state.locked_entity_ids.contains(&sel_id)
+            {
+                state
+                    .text_markers
+                    .iter()
+                    .find(|text| text.id == sel_id)
+                    .and_then(|text| {
+                        let origin = Vec3::from_array(
+                            state.geo_anchor.lng_lat_alt_to_local(
+                                text.lng,
+                                text.lat,
+                                text.altitude,
+                            ),
+                        );
                         let radius = compute_gizmo_world_radius(
                             camera,
                             cam_gtf,
@@ -2790,6 +2881,7 @@ pub fn map_interaction_system(
                     && let Some(drag) = begin_waypoint_drag(
                         &state,
                         &anim,
+                        route_edit.traffic_lane_idx,
                         wi,
                         handle,
                         cursor_px,
@@ -2818,6 +2910,7 @@ pub fn map_interaction_system(
                     && let Some(drag) = begin_waypoint_drag(
                         &state,
                         &anim,
+                        route_edit.traffic_lane_idx,
                         wi,
                         RouteWaypointGizmoHandle::Free,
                         cursor_px,
@@ -2836,11 +2929,12 @@ pub fn map_interaction_system(
                 return;
             }
             Some(RouteHoverTarget::Midpoint(seg_idx)) => {
+                let lane_idx = route_edit.traffic_lane_idx;
                 if let Some(mut anim_clone) = state.anims.iter().find(|a| a.id == edit_id).cloned()
                 {
-                    let new_idx = insert_route_midpoint_after(&mut anim_clone.geom, seg_idx);
-                    anim_clone.duration_sec =
-                        route_estimated_duration_sec(&anim_clone.geom, anim_clone.speed);
+                    let mut geom = editable_anim_geom(&anim_clone, lane_idx);
+                    let new_idx = insert_route_midpoint_after(&mut geom, seg_idx);
+                    write_editable_anim_geom(&mut anim_clone, lane_idx, geom);
                     if let Some(a) = state.anims.iter_mut().find(|x| x.id == edit_id) {
                         *a = anim_clone.clone();
                     }
@@ -2853,6 +2947,7 @@ pub fn map_interaction_system(
                     if let Some(drag) = begin_waypoint_drag(
                         &state,
                         &anim_clone,
+                        lane_idx,
                         new_idx,
                         RouteWaypointGizmoHandle::Free,
                         cursor_px,
@@ -2864,7 +2959,7 @@ pub fn map_interaction_system(
                     gizmo_state.suppress_camera_pan = true;
                     gizmo_state.empty_click_start_px = None;
                     state.status_banner = Some(format!(
-                        "Titik #{} disisipkan di jalur rute — tarik untuk membentuk belokan.",
+                        "Titik #{} disisipkan di jalur — tarik untuk membentuk belokan.",
                         new_idx + 1
                     ));
                 }
@@ -2875,6 +2970,7 @@ pub fn map_interaction_system(
                     if let Some(new_idx) = append_waypoint_from_cursor_click(
                         &mut state,
                         edit_id,
+                        route_edit.traffic_lane_idx,
                         cursor_px,
                         camera,
                         cam_gtf,
@@ -2883,7 +2979,7 @@ pub fn map_interaction_system(
                         gizmo_state.suppress_camera_pan = true;
                         gizmo_state.empty_click_start_px = None;
                         state.status_banner = Some(format!(
-                            "Titik #{} ditambahkan di ujung rute — geser titik atau klik peta lagi.",
+                            "Titik #{} ditambahkan di ujung jalur — geser titik atau klik peta lagi.",
                             new_idx + 1
                         ));
                     }
@@ -3006,7 +3102,7 @@ pub fn map_interaction_system(
         }
     }
 
-    // Priority 1: Clicking a handle on the active 3D Transform Gizmo (Marker or Particle Animation)
+    // Priority 1: Clicking a handle on the active 3D Move/Transform Gizmo.
     if !playback.play_test_mode
         && let Some(handle) = gizmo_state.hovered_handle
     {
@@ -3025,6 +3121,21 @@ pub fn map_interaction_system(
             gizmo_state.empty_click_start_px = None;
             return;
         }
+        if state.tool_mode.is_transform_tool()
+            && let SelectedEntity::Anim(sel_id) = state.selected
+            && !state.locked_entity_ids.contains(&sel_id)
+            && state
+                .traffic_scale_preview
+                .as_ref()
+                .is_some_and(|p| p.anim_id == sel_id)
+            && let Some(drag) =
+                begin_traffic_preview_scale_drag(&state, handle, cursor_px, camera, cam_gtf)
+        {
+            gizmo_state.active_drag = Some(drag);
+            gizmo_state.suppress_camera_pan = true;
+            gizmo_state.empty_click_start_px = None;
+            return;
+        }
         if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
             && let SelectedEntity::Anim(sel_id) = state.selected
             && !state.locked_entity_ids.contains(&sel_id)
@@ -3035,6 +3146,28 @@ pub fn map_interaction_system(
                 .cloned()
             && let Some(drag) =
                 begin_particle_move_drag(&anim, handle, cursor_px, &state, camera, cam_gtf)
+        {
+            gizmo_state.active_drag = Some(drag);
+            gizmo_state.suppress_camera_pan = true;
+            gizmo_state.empty_click_start_px = None;
+            return;
+        }
+        if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
+            && let SelectedEntity::TextMarker(sel_id) = state.selected
+            && !state.locked_entity_ids.contains(&sel_id)
+            && let Some(text) = state.text_markers.iter().find(|text| text.id == sel_id)
+            && let Some(drag) = begin_text_marker_move_drag(
+                text.id,
+                Vec3::from_array(
+                    state
+                        .geo_anchor
+                        .lng_lat_alt_to_local(text.lng, text.lat, text.altitude),
+                ),
+                handle,
+                cursor_px,
+                camera,
+                cam_gtf,
+            )
         {
             gizmo_state.active_drag = Some(drag);
             gizmo_state.suppress_camera_pan = true;
@@ -3122,27 +3255,32 @@ pub fn map_interaction_system(
                     gizmo_state.empty_click_start_px = None;
                 }
                 Some(SelectedEntity::Anim(id)) => {
-                    let is_route_poly = state
-                        .anims
-                        .iter()
-                        .find(|a| a.id == id)
-                        .is_some_and(|a| a.geom.len() >= 2);
-                    let is_part = state
-                        .anims
-                        .iter()
-                        .find(|a| a.id == id)
-                        .is_some_and(is_particle_anim);
+                    let clicked_anim = state.anims.iter().find(|a| a.id == id).cloned();
+                    let is_route_poly = clicked_anim
+                        .as_ref()
+                        .is_some_and(|a| !is_traffic_anim(a) && a.geom.len() >= 2);
+                    let clicked_traffic_lane = clicked_anim.as_ref().and_then(|a| {
+                        if is_traffic_anim(a) {
+                            hit_test_traffic_lane_index(cursor_px, &state, a, camera, cam_gtf)
+                                .or(Some(0))
+                        } else {
+                            None
+                        }
+                    });
+                    let is_part = clicked_anim.as_ref().is_some_and(is_particle_anim);
                     state.selected = SelectedEntity::Anim(id);
-                    state.anim_edit = state.anims.iter().find(|a| a.id == id).cloned();
+                    state.anim_edit = clicked_anim;
                     state.marker_edit = None;
                     state.building_edit = None;
                     state.line_edit = None;
                     state.text_edit = None;
-                    if is_route_poly
+                    if (is_route_poly || clicked_traffic_lane.is_some())
+                        && state.traffic_scale_preview.is_none()
                         && !playback.play_test_mode
                         && !state.locked_entity_ids.contains(&id)
                     {
                         route_edit.editing_anim_id = Some(id);
+                        route_edit.traffic_lane_idx = clicked_traffic_lane;
                         route_edit.selected_waypoint = None;
                         route_edit.add_point_on_map_mode = false;
                         route_edit.active_drag = None;
@@ -3173,7 +3311,8 @@ pub fn map_interaction_system(
         ToolMode::DrawLine
         | ToolMode::DrawBuilding
         | ToolMode::DrawBasicPolygon
-        | ToolMode::DrawRoute => {
+        | ToolMode::DrawRoute
+        | ToolMode::DrawTrafficLane => {
             if playback.play_test_mode {
                 return;
             }
@@ -3214,19 +3353,27 @@ pub fn map_interaction_system(
             };
             if state.offline_preview {
                 let now = chrono::Utc::now();
+                let text_id = Uuid::new_v4();
                 state.text_markers.push(TextMarker {
-                    id: Uuid::new_v4(),
+                    id: text_id,
                     operasi_id: sk.operasi_id,
                     skenario_id: sk.id,
                     text: label,
                     color: "#38bdf8".into(),
                     font_size: 14.0,
+                    show_background: true,
                     lng,
                     lat,
-                    altitude: 12.0,
+                    altitude: 0.0,
                     created_at: now,
                     updated_at: now,
                 });
+                state.selected = SelectedEntity::TextMarker(text_id);
+                state.text_edit = state
+                    .text_markers
+                    .iter()
+                    .find(|text| text.id == text_id)
+                    .cloned();
             } else if let Some(auth) = current_auth(&state) {
                 api.send(ApiCommand::CreateTextMarker {
                     auth,
@@ -3236,12 +3383,16 @@ pub fn map_interaction_system(
                         text: label,
                         color: "#38bdf8".into(),
                         font_size: 14.0,
+                        show_background: true,
                         lng,
                         lat,
-                        altitude: 12.0,
+                        altitude: 0.0,
                     },
                 });
             }
+            // Add Label is deliberately a one-shot tool to prevent accidental duplicates.
+            state.tool_mode = ToolMode::Select;
+            state.status_banner = Some("Label ditambahkan — kembali ke mode Select.".into());
         }
         ToolMode::PickRouteMarker => {
             if playback.play_test_mode {
@@ -4127,6 +4278,140 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 format!("Rute Unit {}", state.anims.len() + 2)
             };
         }
+        ToolMode::DrawTrafficLane => {
+            if pts.len() < 2 {
+                state.status_banner = Some("Jalur Traffic butuh minimal 2 titik waypoint.".into());
+                return;
+            }
+            let geom: Vec<[f64; 3]> = pts.into_iter().map(|[lng, lat]| [lng, lat, 0.0]).collect();
+
+            if let Some(target_aid) = state.drawing_traffic_lane_for_anim_id.take() {
+                if let Some(existing) = state
+                    .anims
+                    .iter_mut()
+                    .find(|a| a.id == target_aid && is_traffic_anim(a))
+                {
+                    let mut cfg = parse_traffic_anim_config(existing);
+                    let lane_num = cfg.lanes.len() + 1;
+                    cfg.lanes
+                        .push(TrafficLane::new(format!("Jalur {lane_num}"), geom));
+                    write_traffic_anim_config(existing, &cfg);
+                    let updated = existing.clone();
+                    state.selected = SelectedEntity::Anim(target_aid);
+                    state.anim_edit = Some(updated);
+                    state.dirty_anim_ids.insert(target_aid);
+                    state.status_banner = Some(format!(
+                        "Jalur {lane_num} ditambahkan ke Simulasi Traffic! Klik Preview untuk menguji atau Simpan untuk menyimpan."
+                    ));
+                }
+                state.tool_mode = ToolMode::Select;
+                return;
+            }
+
+            let traffic_cnt = state.anims.iter().filter(|a| is_traffic_anim(a)).count() + 1;
+            let name = if state.new_traffic_name.trim().is_empty() {
+                format!("Traffic Lalu Lintas {traffic_cnt}")
+            } else {
+                state.new_traffic_name.trim().to_string()
+            };
+
+            // Pre-populate vehicle pool with up to 4 ready vehicle models from the 3D catalog so preview works immediately
+            let mut auto_pool: Vec<TrafficVehicleEntry> = state
+                .catalog
+                .iter()
+                .filter(|m| {
+                    let cat = m.category.to_lowercase();
+                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                })
+                .take(4)
+                .map(|m| TrafficVehicleEntry {
+                    model_path: m.model_path.clone(),
+                    name: m.name.clone(),
+                    scale: 1.0,
+                    length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                    weight: 1.0,
+                    rot_y_offset_deg: m.default_rotation_deg[1],
+                })
+                .collect();
+            if auto_pool.is_empty() {
+                // Fallback to any ready model if no vehicle category exists yet
+                auto_pool = state
+                    .catalog
+                    .iter()
+                    .filter(|m| m.ready)
+                    .take(2)
+                    .map(|m| TrafficVehicleEntry {
+                        model_path: m.model_path.clone(),
+                        name: m.name.clone(),
+                        scale: 1.0,
+                        length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                        weight: 1.0,
+                        rot_y_offset_deg: m.default_rotation_deg[1],
+                    })
+                    .collect();
+            }
+
+            let cfg = TrafficAnimConfig {
+                lanes: vec![TrafficLane::new("Jalur 1", geom.clone())],
+                vehicle_pool: auto_pool,
+                seed: 20_261_126_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
+                ..Default::default()
+            };
+            let data = serde_json::json!({ "traffic": cfg });
+            let sort_order = (state.anims.len() + 1) as i32;
+
+            if state.offline_preview {
+                let now = chrono::Utc::now();
+                let a = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: ANIM_TYPE_TRAFFIC_FLOW.to_string(),
+                    sort_order,
+                    speed: 10.0,
+                    duration_sec: 60.0,
+                    replay: true,
+                    autoplay: false,
+                    geom,
+                    data,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let aid = a.id;
+                state.selected = SelectedEntity::Anim(aid);
+                state.anim_edit = Some(a.clone());
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.anims.push(a);
+                state.status_banner = Some(format!(
+                    "Simulasi Traffic '{name}' dibuat! Gunakan 'Duplikat Jalur Balik' atau atur pool kendaraan di Inspector."
+                ));
+            } else if let Some(auth) = current_auth(state) {
+                api.send(ApiCommand::CreateAnim {
+                    auth,
+                    req: CreateAnimRequest {
+                        operasi_id: sk.operasi_id,
+                        skenario_id: sk.id,
+                        marker_id: None,
+                        name,
+                        anim_type: ANIM_TYPE_TRAFFIC_FLOW.to_string(),
+                        sort_order,
+                        speed: 10.0,
+                        duration_sec: 60.0,
+                        replay: true,
+                        autoplay: false,
+                        geom,
+                        data,
+                    },
+                });
+            }
+            state.tool_mode = ToolMode::Select;
+            state.new_traffic_name = format!("Traffic Lalu Lintas {}", traffic_cnt + 1);
+        }
         _ => {}
     }
 }
@@ -4526,8 +4811,16 @@ fn pick_scene_entity(
                 .geo_anchor
                 .lng_lat_alt_to_local(tm.lng, tm.lat, tm.altitude);
             if let Ok(screen) = camera.world_to_viewport(cam_gtf, Vec3::from_array(local)) {
-                let half_w = (tm.text.len() as f32 * 3.8 + 10.0).clamp(24.0, 160.0);
-                let half_h = (tm.font_size as f32 * 0.75 + 4.0).clamp(11.0, 22.0);
+                let meters_per_px = compute_gizmo_world_radius(
+                    camera,
+                    cam_gtf,
+                    Vec3::from_array(local),
+                    1.0,
+                );
+                let font_px = (tm.font_size as f32 / meters_per_px).clamp(3.0, 512.0);
+                let half_w = (tm.text.chars().count() as f32 * font_px * 0.34 + font_px * 0.75)
+                    .clamp(12.0, 2_048.0);
+                let half_h = (font_px * 0.65 + 5.0).clamp(5.0, 512.0);
                 if (cursor_px.x - screen.x).abs() <= half_w
                     && (cursor_px.y - screen.y).abs() <= half_h
                 {

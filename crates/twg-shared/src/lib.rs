@@ -9,4 +9,5 @@ pub mod route_formation;
 pub mod rts_nav;
 pub mod shoot_anim;
 pub mod spawn_hide_anim;
+pub mod traffic_anim;
 pub mod ws;

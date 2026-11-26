@@ -14,6 +14,7 @@ pub mod polygon_edit;
 pub mod route_edit;
 pub mod shoot_fx;
 pub mod skybox;
+pub mod traffic;
 pub mod water_cannon;
 
 pub fn parse_hex_color(hex: &str, alpha: f32) -> bevy::prelude::Color {
@@ -139,6 +140,16 @@ pub fn anim_primary_focus_lnglat(
     all_anims: &[twg_shared::models::Anim],
     markers: &[twg_shared::models::Marker],
 ) -> Option<(f64, f64)> {
+    if twg_shared::traffic_anim::is_traffic_anim(anim) {
+        let cfg = twg_shared::traffic_anim::parse_traffic_anim_config(anim);
+        if let Some(p) = cfg
+            .lanes
+            .iter()
+            .find_map(|l| l.geom.first())
+        {
+            return Some((p[0], p[1]));
+        }
+    }
     if let Some(p) = anim.geom.first() {
         return Some((p[0], p[1]));
     }

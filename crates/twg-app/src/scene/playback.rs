@@ -17,6 +17,7 @@ use twg_shared::{
     },
     shoot_anim::{is_shoot_anim, shoot_anim_effective_duration_sec, shoot_anim_is_continuous},
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
 };
 use uuid::Uuid;
 
@@ -119,6 +120,7 @@ pub fn playback_system(
         let editing_tool = matches!(
             state.tool_mode,
             ToolMode::DrawRoute
+                | ToolMode::DrawTrafficLane
                 | ToolMode::PickRouteMarker
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
@@ -211,6 +213,32 @@ pub fn playback_system(
                         track.distance_m = total_dur;
                         track.status = AnimRunStatus::Finished;
                         track.completed_cycles = track.completed_cycles.saturating_add(1);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Traffic simulation animations track elapsed seconds in `track.distance_m`
+        if is_traffic_anim(anim) {
+            let cfg = parse_traffic_anim_config(anim);
+            let dur_sec = anim.duration_sec.max(10.0);
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = if cfg.continuous { 0.0 } else { dur_sec };
+
+            if track.status == AnimRunStatus::Playing {
+                if !cfg.has_playable_setup() {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += step_dt;
+                    if !cfg.continuous && track.distance_m >= dur_sec {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= dur_sec;
+                        } else {
+                            track.distance_m = dur_sec;
+                            track.status = AnimRunStatus::Finished;
+                        }
                     }
                 }
             }

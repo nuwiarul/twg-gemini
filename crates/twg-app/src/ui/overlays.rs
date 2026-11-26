@@ -4,8 +4,9 @@ use bevy_egui::egui;
 use crate::{
     map::camera::TacticalCamera,
     scene::{
-        basic_mesh::BasicMeshShape, markers::MarkerWorldBounds, parse_hex_color,
-        play_rts::PlayRtsState, playback::PlaybackOverrides, pointer_arrow::PointerArrowVisualPool,
+        basic_mesh::BasicMeshShape, gizmo::compute_gizmo_world_radius,
+        markers::MarkerWorldBounds, parse_hex_color, play_rts::PlayRtsState,
+        playback::PlaybackOverrides, pointer_arrow::PointerArrowVisualPool,
     },
     state::{AnimRunStatus, AppState, PlaybackState, ToolMode},
 };
@@ -36,7 +37,8 @@ pub fn draw_projected_labels(
             let local = state
                 .geo_anchor
                 .lng_lat_alt_to_local(tm.lng, tm.lat, tm.altitude);
-            if let Ok(screen) = camera.world_to_viewport(cam_gtf, Vec3::from_array(local)) {
+            let world_pos = Vec3::from_array(local);
+            if let Ok(screen) = camera.world_to_viewport(cam_gtf, world_pos) {
                 let pos = egui::pos2(screen.x, screen.y);
                 if clip_rect.contains(pos) {
                     let c = parse_hex_color(&tm.color, 1.0).to_srgba();
@@ -45,7 +47,14 @@ pub fn draw_projected_labels(
                         (c.green * 255.0) as u8,
                         (c.blue * 255.0) as u8,
                     );
-                    draw_badge(&painter, pos, &tm.text, color, tm.font_size as f32);
+                    draw_badge(
+                        &painter,
+                        pos,
+                        &tm.text,
+                        color,
+                        world_text_font_size_px(camera, cam_gtf, world_pos, tm.font_size as f32),
+                        tm.show_background,
+                    );
                 }
             }
         }
@@ -81,6 +90,7 @@ pub fn draw_projected_labels(
                         &m.name,
                         egui::Color32::from_rgb(226, 232, 240),
                         11.5,
+                        true,
                     );
                 }
             }
@@ -230,6 +240,15 @@ pub fn draw_projected_labels(
                 "Langkah 1/2 Gambar Garis Rute: {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
                 state.draft_points_lnglat.len()
             ),
+            ToolMode::DrawTrafficLane => format!(
+                "Gambar Jalur Traffic ({}): {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
+                if state.drawing_traffic_lane_for_anim_id.is_some() {
+                    "Tambah Jalur"
+                } else {
+                    "Jalur 1"
+                },
+                state.draft_points_lnglat.len()
+            ),
             ToolMode::PickRouteMarker
             | ToolMode::PickShootMarker
             | ToolMode::PickPointerMarker
@@ -273,32 +292,60 @@ pub fn draw_projected_labels(
     }
 }
 
+/// Converts a label's world-space font size to screen pixels so it responds
+/// to camera zoom and distance just like a 3D object.
+fn world_text_font_size_px(
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+    world_pos: Vec3,
+    font_size: f32,
+) -> f32 {
+    let meters_per_px = compute_gizmo_world_radius(camera, cam_gtf, world_pos, 1.0);
+    (font_size.max(1.0) / meters_per_px).clamp(3.0, 512.0)
+}
+
 fn draw_badge(
     painter: &egui::Painter,
     center: egui::Pos2,
     text: &str,
     text_color: egui::Color32,
     font_size: f32,
+    show_background: bool,
 ) {
-    let font = egui::FontId::proportional(font_size.clamp(10.0, 22.0));
+    let font = egui::FontId::proportional(font_size.clamp(3.0, 512.0));
     let galley = painter.layout_no_wrap(text.to_string(), font, text_color);
     let pad = egui::vec2(6.0, 3.0);
     let rect = egui::Rect::from_center_size(center, galley.size() + pad * 2.0);
-    painter.rect_filled(
-        rect,
-        4.0,
-        egui::Color32::from_rgba_unmultiplied(10, 15, 24, 195),
-    );
-    painter.rect_stroke(
-        rect,
-        4.0,
-        egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(56, 189, 248, 120),
-        ),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(rect.min + pad, galley, text_color);
+    if show_background {
+        painter.rect_filled(
+            rect,
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(10, 15, 24, 195),
+        );
+        painter.rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(56, 189, 248, 120),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(rect.min + pad, galley, text_color);
+    } else {
+        let origin = center - galley.size() * 0.5;
+        let shadow = painter.layout_no_wrap(
+            text.to_string(),
+            egui::FontId::proportional(font_size.clamp(3.0, 512.0)),
+            egui::Color32::from_rgba_unmultiplied(5, 10, 18, 225),
+        );
+        painter.galley(
+            origin + egui::vec2(1.5, 1.5),
+            shadow,
+            egui::Color32::from_rgba_unmultiplied(5, 10, 18, 225),
+        );
+        painter.galley(origin, galley, text_color);
+    }
 }
 
 fn draw_pointer_label(

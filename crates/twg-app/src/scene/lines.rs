@@ -5,6 +5,7 @@ use twg_shared::{
     group_anim::GroupAnimMode,
     particle_anim::{is_particle_anim, particle_anim_position},
     spawn_hide_anim::SpawnHideAction,
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
 };
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ use crate::{
         playback::PlaybackOverrides,
         resolve_group_highlight_entries,
         route_edit::RouteEditState,
+        traffic::resolve_traffic_scale_preview_poses,
     },
     state::{AppState, PlaybackState, SelectedEntity, ToolMode},
 };
@@ -52,7 +54,142 @@ pub fn draw_lines_and_routes_system(
             .unwrap_or_default();
 
         for anim in &state.anims {
-            if state.hidden_entity_ids.contains(&anim.id) || anim.geom.len() < 2 {
+            if state.hidden_entity_ids.contains(&anim.id) {
+                continue;
+            }
+            if is_traffic_anim(anim) {
+                let cfg = parse_traffic_anim_config(anim);
+                let is_selected =
+                    matches!(state.selected, SelectedEntity::Anim(id) if id == anim.id);
+                let editing_lane = if route_edit.is_editing(anim.id) {
+                    route_edit.traffic_lane_idx
+                } else {
+                    None
+                };
+                let is_hovered = matches!(
+                    gizmo_state.hovered_entity,
+                    Some(SelectedEntity::Anim(id)) if id == anim.id
+                );
+                let grp_info = group_hl_map.get(&anim.id).copied();
+                let is_grp_focused = grp_info.is_some_and(|(_, foc)| foc);
+                let is_grp_member = grp_info.is_some();
+                let lane_palette = [
+                    Color::srgb(0.08, 0.85, 0.65),
+                    Color::srgb(0.98, 0.68, 0.16),
+                    Color::srgb(0.22, 0.74, 0.98),
+                    Color::srgb(0.76, 0.48, 0.98),
+                    Color::srgb(0.96, 0.42, 0.56),
+                ];
+                let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+                for (lane_idx, lane) in cfg.lanes.iter().enumerate() {
+                    if lane.geom.len() < 2 {
+                        continue;
+                    }
+                    let is_this_lane_editing = editing_lane == Some(lane_idx);
+                    let base_col = if !lane.enabled {
+                        Color::srgba(0.45, 0.50, 0.58, 0.45)
+                    } else if is_this_lane_editing {
+                        Color::srgb(0.20, 0.98, 0.62)
+                    } else if is_grp_focused {
+                        Color::srgb(1.0, 0.88, 0.16)
+                    } else if is_grp_member {
+                        match group_hl_mode.unwrap_or_default() {
+                            GroupAnimMode::Combine => Color::srgb(0.28, 0.68, 1.0),
+                            GroupAnimMode::Sequence => Color::srgb(0.72, 0.44, 1.0),
+                        }
+                    } else if is_hovered {
+                        Color::srgb(0.98, 0.88, 0.28)
+                    } else {
+                        lane_palette[lane_idx % lane_palette.len()]
+                    };
+                    let pts: Vec<Vec3> = lane
+                        .geom
+                        .iter()
+                        .map(|p| {
+                            Vec3::from_array(
+                                state
+                                    .geo_anchor
+                                    .lng_lat_alt_to_local(p[0], p[1], p[2].max(0.45)),
+                            )
+                        })
+                        .collect();
+                    for w in pts.windows(2) {
+                        gizmos.line(w[0], w[1], base_col);
+                        if is_selected || is_hovered || is_grp_member || is_this_lane_editing {
+                            gizmos.line(w[0] + Vec3::Y * 0.12, w[1] + Vec3::Y * 0.12, base_col);
+                        }
+                        // Draw directional chevron arrows along each segment so lane direction is obvious
+                        let seg = w[1] - w[0];
+                        let seg_len = Vec2::new(seg.x, seg.z).length();
+                        if seg_len >= 4.0 {
+                            let fwd = Vec3::new(seg.x, 0.0, seg.z).normalize_or_zero();
+                            let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+                            let arrow_count = ((seg_len / 24.0).floor() as usize).clamp(1, 10);
+                            for k in 0..arrow_count {
+                                let t = (k as f32 + 0.5) / arrow_count as f32;
+                                let tip = w[0].lerp(w[1], t) + fwd * 0.9;
+                                let wing_back = tip - fwd * 1.9;
+                                gizmos.line(tip, wing_back + right * 0.95, base_col);
+                                gizmos.line(tip, wing_back - right * 0.95, base_col);
+                            }
+                        }
+                    }
+                    // Start spawn ring (greenish) & end despawn ring (warm)
+                    if !is_this_lane_editing {
+                        if let Some(&start_p) = pts.first() {
+                            gizmos.circle(
+                                Isometry3d::new(start_p, flat_rot),
+                                if is_selected { 1.35 } else { 0.95 },
+                                Color::srgb(0.16, 0.96, 0.56),
+                            );
+                        }
+                        if let Some(&end_p) = pts.last() {
+                            gizmos.circle(
+                                Isometry3d::new(end_p, flat_rot),
+                                if is_selected { 1.1 } else { 0.8 },
+                                Color::srgb(0.96, 0.36, 0.36),
+                            );
+                        }
+                    }
+                }
+                // Draw on-map vehicle length & road-width footprint guide for up to 2 preview models
+                for sp in resolve_traffic_scale_preview_poses(&state) {
+                    if sp.anim_id != anim.id {
+                        continue;
+                    }
+                    let yaw = sp.road_yaw_deg.to_radians();
+                    let fwd = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+                    let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+                    let half_l = (sp.visual_length_m * 0.5).max(0.75);
+                    let half_w = (sp.visual_width_m * 0.5).max(0.6);
+                    let base = Vec3::new(sp.world_pos.x, sp.world_pos.y + 0.14, sp.world_pos.z);
+                    let fl = base + fwd * half_l - right * half_w;
+                    let fr = base + fwd * half_l + right * half_w;
+                    let br = base - fwd * half_l + right * half_w;
+                    let bl = base - fwd * half_l - right * half_w;
+                    let box_col = if sp.is_active_gizmo {
+                        Color::srgb(0.22, 0.92, 0.98)
+                    } else {
+                        Color::srgb(0.98, 0.68, 0.16)
+                    };
+                    let arrow_col = if sp.is_active_gizmo {
+                        Color::srgb(0.98, 0.85, 0.2)
+                    } else {
+                        Color::srgb(0.98, 0.68, 0.16)
+                    };
+                    gizmos.line(fl, fr, box_col);
+                    gizmos.line(fr, br, box_col);
+                    gizmos.line(br, bl, box_col);
+                    gizmos.line(bl, fl, box_col);
+                    // Forward heading arrow in front of the bounding footprint
+                    let tip = base + fwd * (half_l + 1.6);
+                    gizmos.line(base + fwd * half_l, tip, arrow_col);
+                    gizmos.line(tip, tip - fwd * 0.6 + right * 0.45, arrow_col);
+                    gizmos.line(tip, tip - fwd * 0.6 - right * 0.45, arrow_col);
+                }
+                continue;
+            }
+            if anim.geom.len() < 2 {
                 continue;
             }
             let is_editing = route_edit.is_editing(anim.id);
@@ -201,9 +338,17 @@ pub fn draw_lines_and_routes_system(
         }
     }
 
-    // Active DrawRoute draft
-    if state.tool_mode == ToolMode::DrawRoute && !state.draft_points_lnglat.is_empty() {
-        let color = Color::srgb(0.10, 0.92, 0.58);
+    // Active DrawRoute / DrawTrafficLane draft
+    if matches!(
+        state.tool_mode,
+        ToolMode::DrawRoute | ToolMode::DrawTrafficLane
+    ) && !state.draft_points_lnglat.is_empty()
+    {
+        let color = if state.tool_mode == ToolMode::DrawTrafficLane {
+            Color::srgb(0.98, 0.72, 0.14)
+        } else {
+            Color::srgb(0.10, 0.92, 0.58)
+        };
         let pts: Vec<Vec3> = state
             .draft_points_lnglat
             .iter()

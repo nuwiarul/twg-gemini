@@ -22,6 +22,7 @@ use twg_shared::{
         SpawnHideAction, SpawnHideConfig, is_spawn_hide_anim, parse_spawn_hide_config,
         spawn_hide_action,
     },
+    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
 };
 use uuid::Uuid;
 
@@ -3979,6 +3980,7 @@ fn draw_particle_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: 
 
 fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
     let is_drawing_route = state.tool_mode == ToolMode::DrawRoute;
+    let is_drawing_traffic = state.tool_mode == ToolMode::DrawTrafficLane;
     let is_picking_unit = state.tool_mode == ToolMode::PickRouteMarker;
     let picking_is_multi = is_picking_unit
         && state
@@ -3987,14 +3989,14 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
             .is_some_and(is_multi_route_anim);
 
     egui::Frame::new()
-        .fill(if is_drawing_route || is_picking_unit {
+        .fill(if is_drawing_route || is_drawing_traffic || is_picking_unit {
             egui::Color32::from_rgb(6, 56, 46)
         } else {
             egui::Color32::from_rgb(22, 30, 45)
         })
         .stroke(egui::Stroke::new(
             1.2,
-            if is_drawing_route || is_picking_unit {
+            if is_drawing_route || is_drawing_traffic || is_picking_unit {
                 egui::Color32::from_rgb(16, 185, 129)
             } else {
                 egui::Color32::from_rgb(42, 60, 86)
@@ -4036,7 +4038,36 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
             );
             ui.add_space(5.0);
 
-            if is_drawing_route {
+            if is_drawing_traffic {
+                let mode_tag = if state.drawing_traffic_lane_for_anim_id.is_some() {
+                    "Tambah Jalur Traffic"
+                } else {
+                    "Simulasi Traffic (Jalur 1)"
+                };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Menggambar: {mode_tag} ({} titik)",
+                        state.draft_points_lnglat.len()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(253, 230, 138)),
+                );
+                ui.add_space(3.0);
+                let cancel_btn = egui::Button::new(
+                    egui::RichText::new("Batal Gambar Jalur (Esc)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(180, 83, 9))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(cancel_btn).clicked() {
+                    state.tool_mode = ToolMode::Select;
+                    state.draft_points_lnglat.clear();
+                    state.drawing_traffic_lane_for_anim_id = None;
+                }
+            } else if is_drawing_route {
                 let mode_tag = if state.new_route_is_multi
                     && state.new_route_formation == RouteFormationKind::Patwal
                 {
@@ -4186,6 +4217,35 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                             .into(),
                     );
                 }
+
+                ui.add_space(4.0);
+                let traffic_btn = egui::Button::new(
+                    egui::RichText::new("+ Simulasi Traffic (Lalu Lintas)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(217, 119, 6))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, traffic_btn)
+                    .on_hover_text(
+                        "Simulasi arus lalu lintas otomatis: multi-jalur (termasuk 2 arah), pool kendaraan 3D random, kecepatan acak, anti-tabrak & menyalip cerdas",
+                    )
+                    .clicked()
+                {
+                    let traffic_idx = state.anims.iter().filter(|a| is_traffic_anim(a)).count() + 1;
+                    state.tool_mode = ToolMode::DrawTrafficLane;
+                    state.drawing_traffic_lane_for_anim_id = None;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_name = format!("Traffic Lalu Lintas {traffic_idx}");
+                    state.status_banner = Some(
+                        "Simulasi Traffic: Klik titik-titik Jalur 1 di peta (min 2 titik), lalu tekan Enter / Finish. Setelah itu bisa Duplikat Jalur Balik & pilih kendaraan di Inspector."
+                            .into(),
+                    );
+                }
             }
         });
 }
@@ -4313,6 +4373,9 @@ fn draw_ordered_animation_list(
                 let can_play = anim_is_playable(a, &state.markers);
                 let cat = AnimCategory::from_anim_type(&a.anim_type);
                 let (cat_tag, cat_col) = match cat {
+                    AnimCategory::Route if is_traffic_anim(a) => {
+                        ("TRAFFIC", egui::Color32::from_rgb(217, 119, 6))
+                    }
                     AnimCategory::Route if is_multi => {
                         if parse_multi_route_config(a).formation == RouteFormationKind::Patwal {
                             ("PATWAL", egui::Color32::from_rgb(37, 99, 235))
@@ -4557,6 +4620,16 @@ fn draw_ordered_animation_list(
                                     cfg.transition.short_label()
                                 )
                             }
+                        } else if is_traffic_anim(a) {
+                            let cfg = parse_traffic_anim_config(a);
+                            let active_lanes = cfg.lanes.iter().filter(|l| l.enabled && l.geom.len() >= 2).count();
+                            format!(
+                                "{active_lanes} Jalur  •  {} Model Pool  •  {:.0}–{:.0} m/s{}",
+                                cfg.vehicle_pool.len(),
+                                cfg.min_speed_mps,
+                                cfg.max_speed_mps,
+                                if cfg.allow_overtaking { "  •  Salip" } else { "" }
+                            )
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a

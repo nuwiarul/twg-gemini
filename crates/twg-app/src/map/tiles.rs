@@ -90,7 +90,7 @@ pub struct TileManager {
     failed_keys: HashSet<TileKey>,
     spawned: HashMap<TileKey, Entity>,
     active_provider: Option<TileProvider>,
-    last_anchor_coords: (f64, f64),
+    last_anchor_coords: Option<(f64, f64)>,
     frame_counter: u64,
 }
 
@@ -156,9 +156,16 @@ impl TileManager {
             failed_keys: HashSet::new(),
             spawned: HashMap::new(),
             active_provider: None,
-            last_anchor_coords: (f64::NAN, f64::NAN),
+            last_anchor_coords: None,
             frame_counter: 0,
         }
+    }
+}
+
+fn anchor_coords_changed(last: Option<(f64, f64)>, current: (f64, f64)) -> bool {
+    match last {
+        None => true,
+        Some((lng, lat)) => (lng - current.0).abs() > 1e-9 || (lat - current.1).abs() > 1e-9,
     }
 }
 
@@ -230,8 +237,29 @@ pub fn tile_streaming_system(
         tile_mgr.failed_keys.insert(key);
     }
 
-    // Drain loaded tile images and spawn mesh entities
+    // Drain loaded tile images and spawn mesh entities at the current GeoAnchor
     let anchor = state.geo_anchor;
+    let anchor_pair = (anchor.center_lng, anchor.center_lat);
+    let anchor_changed = anchor_coords_changed(tile_mgr.last_anchor_coords, anchor_pair);
+    if anchor_changed {
+        tile_mgr.last_anchor_coords = Some(anchor_pair);
+        // Re-align all already-spawned tiles to the new GeoAnchor immediately (and drop very distant tiles).
+        // Previously `last_anchor_coords` was initialized to `(NaN, NaN)`, causing `NaN > 1e-7` to always be
+        // false so older cached zoom levels remained stuck at the previous anchor offset (~100-200m shift!).
+        for (entity, comp, mut tf, _) in &mut tile_q {
+            let (center, w_m, h_m) = anchor.tile_local_rect(comp.key.coord);
+            if center[0].hypot(center[2]) > 500_000.0 {
+                tile_mgr.spawned.remove(&comp.key);
+                commands.entity(entity).despawn();
+            } else {
+                tf.translation.x = center[0];
+                tf.translation.z = center[2];
+                tf.scale = Vec3::new(w_m, 1.0, h_m);
+            }
+        }
+        tile_mgr.failed_keys.clear();
+    }
+
     while let Ok(loaded) = tile_mgr.loaded_rx.try_recv() {
         tile_mgr.in_flight.remove(&loaded.key);
         if tile_mgr.spawned.contains_key(&loaded.key) {
@@ -271,7 +299,7 @@ pub fn tile_streaming_system(
             .spawn((
                 Mesh3d(tile_mgr.unit_plane.clone()),
                 MeshMaterial3d(mat_handle),
-                Transform::from_xyz(center[0], -0.08, center[2]).with_scale(Vec3::new(w_m, 1.0, h_m)),
+                Transform::from_xyz(center[0], -0.02, center[2]).with_scale(Vec3::new(w_m, 1.0, h_m)),
                 Visibility::Visible,
                 MapTileEntity {
                     key: loaded.key,
@@ -289,19 +317,6 @@ pub fn tile_streaming_system(
     } else {
         None
     };
-
-    // If anchor changed, despawn old tiles so coordinates align exactly
-    let anchor_pair = (anchor.center_lng, anchor.center_lat);
-    if (tile_mgr.last_anchor_coords.0 - anchor_pair.0).abs() > 1e-7
-        || (tile_mgr.last_anchor_coords.1 - anchor_pair.1).abs() > 1e-7
-    {
-        tile_mgr.last_anchor_coords = anchor_pair;
-        for (_, entity) in tile_mgr.spawned.drain() {
-            commands.entity(entity).despawn();
-        }
-        tile_mgr.in_flight.clear();
-        tile_mgr.failed_keys.clear();
-    }
 
     if tile_mgr.active_provider != wanted_provider {
         tile_mgr.active_provider = wanted_provider;
@@ -362,7 +377,7 @@ pub fn tile_streaming_system(
                     y: ty,
                 },
             },
-            -0.05,
+            -0.02,
         ));
     }
 
@@ -383,7 +398,7 @@ pub fn tile_streaming_system(
                             y: ty,
                         },
                     },
-                    -0.35,
+                    -0.12,
                 ));
             }
         }
@@ -402,7 +417,9 @@ pub fn tile_streaming_system(
         }
     }
 
-    // Update visibility & Y layer of spawned tiles
+    // Update visibility & Y layer of spawned tiles.
+    // Layer order keeps `fine_z` cleanly on top (-0.02), closer cached zooms right beneath it
+    // (avoiding z-fighting between zoom levels and minimizing tilt parallax vs y=0 markers).
     for (_, mut comp, mut tf, mut vis) in &mut tile_q {
         if let Some(&y_offset) = desired_y.get(&comp.key) {
             comp.last_used_frame = frame;
@@ -411,8 +428,10 @@ pub fn tile_streaming_system(
         } else if comp.key.provider != provider {
             *vis = Visibility::Hidden;
         } else {
-            // Keep adjacent cached tiles slightly lower as visual buffer
-            tf.translation.y = -0.6;
+            let z_diff = comp.key.coord.z.abs_diff(fine_z).min(12) as f32;
+            // Slightly prefer higher-res cached tile over lower-res when equidistant in zoom
+            let finer_bias = if comp.key.coord.z > fine_z { 0.0 } else { 0.01 };
+            tf.translation.y = -0.06 - z_diff * 0.03 - finer_bias;
             *vis = Visibility::Visible;
         }
     }
@@ -431,5 +450,24 @@ pub fn tile_streaming_system(
             tile_mgr.spawned.remove(&key);
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anchor_change_detection_triggers_on_init_and_small_shifts() {
+        assert!(anchor_coords_changed(None, (115.2167, -8.6705)));
+        assert!(!anchor_coords_changed(
+            Some((115.2167, -8.6705)),
+            (115.2167, -8.6705)
+        ));
+        // ~150m shift in longitude (~0.0014 deg) must trigger immediate tile realignment
+        assert!(anchor_coords_changed(
+            Some((115.2167, -8.6705)),
+            (115.2181, -8.6705)
+        ));
     }
 }
