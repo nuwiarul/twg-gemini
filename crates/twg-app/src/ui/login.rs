@@ -5,9 +5,7 @@ use crate::{
         asset_sync::{AssetSyncBridge, AssetSyncCommand},
         client::{ApiClientBridge, ApiCommand},
     },
-    settings::{
-        ServerProtocol, reset_local_server_settings, save_local_server_settings,
-    },
+    settings::{ServerProtocol, reset_local_server_settings, save_local_server_settings},
     state::AppState,
     ui::{app_icon::draw_app_brand_icon, password_input::draw_password_input},
 };
@@ -340,9 +338,11 @@ fn draw_hidden_server_settings_section(
                     };
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new(label).size(11.0).strong().color(fg))
-                                .fill(fill)
-                                .min_size(egui::vec2(58.0, 22.0)),
+                            egui::Button::new(
+                                egui::RichText::new(label).size(11.0).strong().color(fg),
+                            )
+                            .fill(fill)
+                            .min_size(egui::vec2(58.0, 22.0)),
                         )
                         .clicked()
                     {
@@ -396,9 +396,7 @@ fn draw_hidden_server_settings_section(
                     );
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut state.server_settings.port)
-                            .hint_text(
-                                state.server_settings.protocol.default_port().to_string(),
-                            )
+                            .hint_text(state.server_settings.protocol.default_port().to_string())
                             .desired_width(port_w),
                     );
                     if resp.changed() {
@@ -440,13 +438,11 @@ fn draw_hidden_server_settings_section(
                 );
             } else if let Some((ok, msg)) = &state.server_settings_feedback {
                 ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(msg).size(10.5).color(if *ok {
-                        egui::Color32::from_rgb(74, 222, 128)
-                    } else {
-                        egui::Color32::from_rgb(248, 113, 113)
-                    }),
-                );
+                ui.label(egui::RichText::new(msg).size(10.5).color(if *ok {
+                    egui::Color32::from_rgb(74, 222, 128)
+                } else {
+                    egui::Color32::from_rgb(248, 113, 113)
+                }));
             }
 
             ui.add_space(8.0);
@@ -542,10 +538,8 @@ fn draw_hidden_server_settings_section(
                             state.server_settings = def;
                             state.server_url = url.clone();
                             state.server_settings_saved_locally = false;
-                            state.server_settings_feedback = Some((
-                                true,
-                                "Pengaturan dikembalikan ke default.".into(),
-                            ));
+                            state.server_settings_feedback =
+                                Some((true, "Pengaturan dikembalikan ke default.".into()));
                             sync_bridge.send(AssetSyncCommand::SyncWithServer {
                                 server_url: url,
                                 local_root: state.assets_root.clone(),

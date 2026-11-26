@@ -132,7 +132,9 @@ pub fn draw_media_left_panel_body(
 
             for item in &filtered {
                 let selected = state.selected_media_id == Some(item.id);
-                let ready = state.available_model_paths.contains(&item.active_file.rel_path)
+                let ready = state
+                    .available_model_paths
+                    .contains(&item.active_file.rel_path)
                     || state.assets_root.join(&item.active_file.rel_path).exists();
                 let bg = if selected {
                     egui::Color32::from_rgb(14, 116, 144)
@@ -248,7 +250,11 @@ pub fn draw_media_center_preview(
     sync_bridge: &AssetSyncBridge,
     media_type: MediaAssetType,
 ) {
-    let Some(asset) = state.selected_media().cloned().filter(|m| m.media_type == media_type) else {
+    let Some(asset) = state
+        .selected_media()
+        .cloned()
+        .filter(|m| m.media_type == media_type)
+    else {
         egui::Area::new(egui::Id::new("media_center_empty"))
             .fixed_pos(center_rect.min)
             .show(ctx, |ui| {
@@ -299,13 +305,18 @@ pub fn draw_media_center_preview(
                 .fill(egui::Color32::from_rgb(10, 15, 24))
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
-                    ui.set_min_size((center_rect.size() - egui::vec2(32.0, 32.0)).max(egui::vec2(64.0, 64.0)));
+                    ui.set_min_size(
+                        (center_rect.size() - egui::vec2(32.0, 32.0)).max(egui::vec2(64.0, 64.0)),
+                    );
 
                     if !local_ready {
                         ui.centered_and_justified(|ui| {
                             ui.colored_label(
                                 egui::Color32::from_rgb(250, 204, 21),
-                                format!("Mengunduh {} dari server untuk preview offline...", asset.name),
+                                format!(
+                                    "Mengunduh {} dari server untuk preview offline...",
+                                    asset.name
+                                ),
                             );
                         });
                         return;
@@ -435,7 +446,10 @@ fn draw_texture_canvas(
                             ui.painter().image(
                                 tex_id,
                                 tile_rect,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
                                 egui::Color32::WHITE,
                             );
                         }
@@ -548,15 +562,12 @@ fn draw_sound_player_canvas(
                     egui::vec2(ui.available_width(), 56.0),
                     egui::Sense::hover(),
                 );
-                ui.painter().rect_filled(
-                    bar_rect,
-                    6.0,
-                    egui::Color32::from_rgb(11, 17, 29),
-                );
+                ui.painter()
+                    .rect_filled(bar_rect, 6.0, egui::Color32::from_rgb(11, 17, 29));
                 let num_bars = 32;
                 let gap = 4.0;
-                let bw = ((bar_rect.width() - gap * (num_bars as f32 + 1.0)) / num_bars as f32)
-                    .max(3.0);
+                let bw =
+                    ((bar_rect.width() - gap * (num_bars as f32 + 1.0)) / num_bars as f32).max(3.0);
                 for i in 0..num_bars {
                     let phase = pos * 8.0 + i as f32 * 0.45;
                     let amp = if is_playing {
@@ -712,11 +723,7 @@ fn draw_video_player_canvas(
 ) {
     let is_this = player.video_asset_id == Some(asset.id);
     if is_this {
-        player.poll_video_frame(
-            ctx,
-            &state.assets_root,
-            Some(&asset.active_file.rel_path),
-        );
+        player.poll_video_frame(ctx, &state.assets_root, Some(&asset.active_file.rel_path));
     }
 
     let is_playing = is_this && player.video_playing && !player.video_paused;
@@ -1040,10 +1047,7 @@ fn draw_media_create_form(
         }
     });
     if let Some(p) = &state.media_form.file_path {
-        let fname = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("selected");
+        let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("selected");
         ui.label(
             egui::RichText::new(format!("Dipilih: {fname}"))
                 .size(11.0)
@@ -1246,10 +1250,7 @@ fn draw_media_inspect_and_edit(
                         state.media_form.submitting = true;
                         state.media_form.error = None;
                         state.media_form.success = None;
-                        api.send(ApiCommand::RestoreMediaTextureOriginal {
-                            auth,
-                            id: asset.id,
-                        });
+                        api.send(ApiCommand::RestoreMediaTextureOriginal { auth, id: asset.id });
                     }
                 }
             });
@@ -1266,12 +1267,9 @@ fn draw_media_inspect_and_edit(
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.label(
-                egui::RichText::new(format!(
-                    "Slug: {} | Versi: v{}",
-                    asset.slug, asset.version
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(203, 213, 225)),
+                egui::RichText::new(format!("Slug: {} | Versi: v{}", asset.slug, asset.version))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
             );
             ui.label(
                 egui::RichText::new(format!(
@@ -1305,14 +1303,10 @@ fn draw_media_inspect_and_edit(
     // --- Section 3: Edit Metadata / Replace File ---
     ui.heading(format!("Edit {}", media_type.label()));
     ui.label("Nama Asset:");
-    ui.add(
-        egui::TextEdit::singleline(&mut state.media_form.name).desired_width(f32::INFINITY),
-    );
+    ui.add(egui::TextEdit::singleline(&mut state.media_form.name).desired_width(f32::INFINITY));
     ui.add_space(4.0);
     ui.label("Kategori / Grup:");
-    ui.add(
-        egui::TextEdit::singleline(&mut state.media_form.category).desired_width(f32::INFINITY),
-    );
+    ui.add(egui::TextEdit::singleline(&mut state.media_form.category).desired_width(f32::INFINITY));
     ui.add_space(6.0);
 
     ui.label(
@@ -1323,8 +1317,16 @@ fn draw_media_inspect_and_edit(
     );
     if media_type == MediaAssetType::Texture {
         ui.horizontal(|ui| {
-            ui.radio_value(&mut state.media_form.crop_mode, "crop".to_string(), "Center-Crop");
-            ui.radio_value(&mut state.media_form.crop_mode, "resize".to_string(), "Fit/Resize");
+            ui.radio_value(
+                &mut state.media_form.crop_mode,
+                "crop".to_string(),
+                "Center-Crop",
+            );
+            ui.radio_value(
+                &mut state.media_form.crop_mode,
+                "resize".to_string(),
+                "Fit/Resize",
+            );
         });
     }
     ui.horizontal(|ui| {
@@ -1414,10 +1416,7 @@ fn draw_media_inspect_and_edit(
             {
                 state.media_form.submitting = true;
                 state.media_form.error = None;
-                api.send(ApiCommand::DeleteMediaAsset {
-                    auth,
-                    id: asset.id,
-                });
+                api.send(ApiCommand::DeleteMediaAsset { auth, id: asset.id });
             }
             if ui.button("Batal").clicked() {
                 state.media_form.confirm_delete_id = None;

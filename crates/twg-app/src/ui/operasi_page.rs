@@ -577,7 +577,10 @@ fn draw_operasi_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClien
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgb(17, 24, 39))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(56, 189, 248),
+                        ))
                         .corner_radius(10.0)
                         .inner_margin(egui::Margin::same(22))
                         .show(ui, |ui| {
@@ -793,7 +796,10 @@ fn draw_operasi_form_modal(
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(17, 24, 39))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(56, 189, 248),
+                ))
                 .corner_radius(10.0)
                 .inner_margin(egui::Margin::same(22))
                 .show(ui, |ui| {
@@ -814,7 +820,10 @@ fn draw_operasi_form_modal(
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add_enabled(!state.operasi_table.submitting, egui::Button::new("X"))
+                                .add_enabled(
+                                    !state.operasi_table.submitting,
+                                    egui::Button::new("X"),
+                                )
                                 .clicked()
                             {
                                 close = true;

@@ -408,8 +408,7 @@ pub fn draw_profile_screen(
         } else if new_pw.len() < 6 {
             state.profile_form.password_error = Some("Password baru minimal 6 karakter.".into());
         } else if new_pw != conf_pw {
-            state.profile_form.password_error =
-                Some("Konfirmasi password baru tidak sama.".into());
+            state.profile_form.password_error = Some("Konfirmasi password baru tidak sama.".into());
         } else if let Some(auth) = current_auth(state) {
             state.profile_form.password_submitting = true;
             state.profile_form.password_error = None;

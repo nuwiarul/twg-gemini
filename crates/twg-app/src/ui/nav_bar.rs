@@ -17,7 +17,9 @@ use crate::{
 };
 
 pub fn format_timestamp(dt: DateTime<Utc>) -> String {
-    dt.with_timezone(&Local).format("%d %b %Y %H:%M").to_string()
+    dt.with_timezone(&Local)
+        .format("%d %b %Y %H:%M")
+        .to_string()
 }
 
 pub fn trigger_load_operasis(state: &mut AppState, api: &ApiClientBridge) {
@@ -84,11 +86,7 @@ pub fn trigger_load_skenarios(state: &mut AppState, api: &ApiClientBridge) {
     });
 }
 
-pub fn navigate_to_operasi_skenarios(
-    state: &mut AppState,
-    api: &ApiClientBridge,
-    op: Operasi,
-) {
+pub fn navigate_to_operasi_skenarios(state: &mut AppState, api: &ApiClientBridge, op: Operasi) {
     let op_id = op.id;
     let changed_op = state.skenario_table.filter_operasi_id != Some(op_id);
     state.selected_operasi_id = Some(op_id);
@@ -215,11 +213,7 @@ pub fn open_tactical_skenario(
     }
 }
 
-pub fn enter_layar_besar(
-    state: &mut AppState,
-    playback: &mut PlaybackState,
-    ws: &WsClientBridge,
-) {
+pub fn enter_layar_besar(state: &mut AppState, playback: &mut PlaybackState, ws: &WsClientBridge) {
     playback.stop_play_test();
     state.skenario_table.close_modal();
     state.play_session_mode = PlaySessionMode::BigScreen;
@@ -235,8 +229,9 @@ pub fn enter_layar_besar(
     state.big_screen.pending_skenario_id = None;
     state.big_screen.pending_camera_payload = None;
     state.big_screen.skip_next_cached_state = false;
-    state.big_screen.last_event_text =
-        Some("Menunggu skenario di-load dari Play Skenario Tactical (Admin / Admin Satker)...".into());
+    state.big_screen.last_event_text = Some(
+        "Menunggu skenario di-load dari Play Skenario Tactical (Admin / Admin Satker)...".into(),
+    );
     state.screen = AppScreen::LayarBesar;
     ws.send(WsOutCommand::Subscribe {
         skenario_id: None,
@@ -381,7 +376,9 @@ pub fn draw_screen_nav_tabs(
             state.play_session_mode = PlaySessionMode::LocalPreview;
             state.skenario_table.close_modal();
             state.restore_active_skenario_map_state();
-            if state.reload_plot_on_return && let Some(sk) = state.active_skenario.clone() {
+            if state.reload_plot_on_return
+                && let Some(sk) = state.active_skenario.clone()
+            {
                 open_plot_skenario(state, playback, api, &sk);
             } else {
                 state.screen = AppScreen::PlotSkenario;
@@ -580,10 +577,7 @@ pub fn draw_global_top_bar(
                     }
 
                     if state.offline_preview {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(250, 204, 21),
-                            "OFFLINE PREVIEW",
-                        );
+                        ui.colored_label(egui::Color32::from_rgb(250, 204, 21), "OFFLINE PREVIEW");
                     } else {
                         let ws_color = if state.ws_connected {
                             egui::Color32::from_rgb(74, 222, 128)

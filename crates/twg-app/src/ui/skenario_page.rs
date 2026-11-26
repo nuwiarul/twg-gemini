@@ -937,10 +937,22 @@ fn draw_skenario_map_hud(ctx: &egui::Context, map_rect: egui::Rect, state: &mut 
     let shadow_col = egui::Color32::from_rgba_unmultiplied(8, 12, 20, 200);
     painter.circle_stroke(c, 13.0, egui::Stroke::new(3.0, shadow_col));
     painter.circle_stroke(c, 13.0, egui::Stroke::new(1.5, ring_col));
-    painter.line_segment([c - egui::vec2(20.0, 0.0), c - egui::vec2(6.0, 0.0)], egui::Stroke::new(2.0, ring_col));
-    painter.line_segment([c + egui::vec2(6.0, 0.0), c + egui::vec2(20.0, 0.0)], egui::Stroke::new(2.0, ring_col));
-    painter.line_segment([c - egui::vec2(0.0, 20.0), c - egui::vec2(0.0, 6.0)], egui::Stroke::new(2.0, ring_col));
-    painter.line_segment([c + egui::vec2(0.0, 6.0), c + egui::vec2(0.0, 20.0)], egui::Stroke::new(2.0, ring_col));
+    painter.line_segment(
+        [c - egui::vec2(20.0, 0.0), c - egui::vec2(6.0, 0.0)],
+        egui::Stroke::new(2.0, ring_col),
+    );
+    painter.line_segment(
+        [c + egui::vec2(6.0, 0.0), c + egui::vec2(20.0, 0.0)],
+        egui::Stroke::new(2.0, ring_col),
+    );
+    painter.line_segment(
+        [c - egui::vec2(0.0, 20.0), c - egui::vec2(0.0, 6.0)],
+        egui::Stroke::new(2.0, ring_col),
+    );
+    painter.line_segment(
+        [c + egui::vec2(0.0, 6.0), c + egui::vec2(0.0, 20.0)],
+        egui::Stroke::new(2.0, ring_col),
+    );
     painter.circle_filled(c, 2.5, egui::Color32::from_rgb(248, 113, 113));
 
     // Top-left live telemetry overlay (non-interactable so map drags pass straight through)
@@ -987,7 +999,10 @@ fn draw_skenario_map_hud(ctx: &egui::Context, map_rect: egui::Rect, state: &mut 
 
     // Top-right floating map controls (Compass + Zoom In / Out + 2D/3D toggle)
     egui::Area::new(egui::Id::new("skenario_map_floating_controls"))
-        .fixed_pos(egui::pos2((map_rect.max.x - 62.0).max(map_rect.min.x + 12.0), map_rect.min.y + 14.0))
+        .fixed_pos(egui::pos2(
+            (map_rect.max.x - 62.0).max(map_rect.min.x + 12.0),
+            map_rect.min.y + 14.0,
+        ))
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(egui::Color32::from_rgba_unmultiplied(15, 23, 42, 225))
@@ -1031,7 +1046,10 @@ fn draw_skenario_map_hud(ctx: &egui::Context, map_rect: egui::Rect, state: &mut 
 
                         ui.add_space(4.0);
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("+").size(15.0).strong()).min_size(egui::vec2(34.0, 26.0)))
+                            .add(
+                                egui::Button::new(egui::RichText::new("+").size(15.0).strong())
+                                    .min_size(egui::vec2(34.0, 26.0)),
+                            )
                             .on_hover_text("Zoom In (+0.5)")
                             .clicked()
                         {
@@ -1040,7 +1058,10 @@ fn draw_skenario_map_hud(ctx: &egui::Context, map_rect: egui::Rect, state: &mut 
                             state.skenario_table.map_preview_dirty = true;
                         }
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("-").size(15.0).strong()).min_size(egui::vec2(34.0, 26.0)))
+                            .add(
+                                egui::Button::new(egui::RichText::new("-").size(15.0).strong())
+                                    .min_size(egui::vec2(34.0, 26.0)),
+                            )
                             .on_hover_text("Zoom Out (-0.5)")
                             .clicked()
                         {
@@ -2630,7 +2651,10 @@ fn draw_skenario_modals(ctx: &egui::Context, state: &mut AppState, api: &ApiClie
 
             if submit_copy {
                 let new_name = state.skenario_table.form_name.trim().to_string();
-                let target_op = state.skenario_table.form_operasi_id.unwrap_or(sk.operasi_id);
+                let target_op = state
+                    .skenario_table
+                    .form_operasi_id
+                    .unwrap_or(sk.operasi_id);
                 if new_name.is_empty() {
                     state.skenario_table.form_error =
                         Some("Nama skenario hasil salinan wajib diisi.".into());

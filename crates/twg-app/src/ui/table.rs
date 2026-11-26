@@ -30,10 +30,8 @@ pub fn draw_aligned_row(
 
     ui.push_id(row_id, |ui| {
         for (idx, &w) in widths.iter().enumerate() {
-            let cell_max = egui::Rect::from_min_size(
-                egui::pos2(x, start.y),
-                egui::vec2(w, 10_000.0),
-            );
+            let cell_max =
+                egui::Rect::from_min_size(egui::pos2(x, start.y), egui::vec2(w, 10_000.0));
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt(idx)

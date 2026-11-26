@@ -84,7 +84,14 @@ pub fn draw_assets_screen(
     );
 
     if let Some(media_type) = state.assets_section.media_type() {
-        draw_media_center_preview(ctx, center_rect, state, media_player, sync_bridge, media_type);
+        draw_media_center_preview(
+            ctx,
+            center_rect,
+            state,
+            media_player,
+            sync_bridge,
+            media_type,
+        );
     } else {
         draw_viewport_hud(ctx, center_rect, state);
     }
@@ -145,21 +152,19 @@ fn draw_assets_top_bar(
                     } else {
                         0.0
                     };
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(180.0)
-                            .text(if state.sync_status.checking {
-                                "Cek server...".to_string()
-                            } else {
-                                format!(
-                                    "Sync {}/{} ({:.1}/{:.1} MB)",
-                                    state.sync_status.completed_files,
-                                    state.sync_status.total_files,
-                                    state.sync_status.downloaded_bytes as f64 / (1024.0 * 1024.0),
-                                    state.sync_status.total_bytes as f64 / (1024.0 * 1024.0),
-                                )
-                            }),
-                    );
+                    ui.add(egui::ProgressBar::new(frac).desired_width(180.0).text(
+                        if state.sync_status.checking {
+                            "Cek server...".to_string()
+                        } else {
+                            format!(
+                                "Sync {}/{} ({:.1}/{:.1} MB)",
+                                state.sync_status.completed_files,
+                                state.sync_status.total_files,
+                                state.sync_status.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                                state.sync_status.total_bytes as f64 / (1024.0 * 1024.0),
+                            )
+                        },
+                    ));
                 } else {
                     let col = if state.sync_status.offline_mode {
                         egui::Color32::from_rgb(250, 204, 21)
@@ -301,19 +306,17 @@ fn draw_assets_left_panel(
                     }
 
                     let cat_active = state.asset_form_mode == AssetFormMode::Categories;
-                    let cat_btn = egui::Button::new(
-                        egui::RichText::new("+ Kategori")
-                            .color(if cat_active {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgb(125, 211, 252)
-                            }),
-                    )
-                    .fill(if cat_active {
-                        egui::Color32::from_rgb(30, 64, 175)
-                    } else {
-                        egui::Color32::from_rgb(30, 41, 59)
-                    });
+                    let cat_btn =
+                        egui::Button::new(egui::RichText::new("+ Kategori").color(if cat_active {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(125, 211, 252)
+                        }))
+                        .fill(if cat_active {
+                            egui::Color32::from_rgb(30, 64, 175)
+                        } else {
+                            egui::Color32::from_rgb(30, 41, 59)
+                        });
                     if ui.add(cat_btn).clicked() {
                         state.asset_form_mode = AssetFormMode::Categories;
                         state.category_form.error = None;
@@ -726,10 +729,7 @@ fn draw_create_form(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBrid
         .fill(egui::Color32::from_rgb(14, 116, 144));
 
     if ui
-        .add_enabled(
-            !state.asset_form.submitting,
-            submit_btn,
-        )
+        .add_enabled(!state.asset_form.submitting, submit_btn)
         .clicked()
     {
         if state.asset_form.name.trim().is_empty() {
@@ -789,7 +789,8 @@ fn draw_create_form(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBrid
                 },
             });
         } else {
-            state.asset_form.error = Some("Harus login sebagai Admin untuk mengunggah model.".into());
+            state.asset_form.error =
+                Some("Harus login sebagai Admin untuk mengunggah model.".into());
         }
     }
 }
@@ -917,12 +918,9 @@ fn draw_inspect_and_edit(
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.label(
-                egui::RichText::new(format!(
-                    "Slug: {} | Versi: v{}",
-                    asset.slug, asset.version
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(203, 213, 225)),
+                egui::RichText::new(format!("Slug: {} | Versi: v{}", asset.slug, asset.version))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
             );
             let lod0_label = if asset.model_type == ModelAssetType::Animated {
                 "Idle LOD0"
@@ -986,9 +984,7 @@ fn draw_inspect_and_edit(
     ui.heading("Edit Model Asset (Admin)");
 
     ui.label("Nama Model:");
-    ui.add(
-        egui::TextEdit::singleline(&mut state.asset_form.name).desired_width(f32::INFINITY),
-    );
+    ui.add(egui::TextEdit::singleline(&mut state.asset_form.name).desired_width(f32::INFINITY));
     ui.add_space(4.0);
 
     ui.label("Kategori Folder:");
@@ -1097,9 +1093,8 @@ fn draw_inspect_and_edit(
                 && (state.asset_form.idle_file_path.is_none()
                     || state.asset_form.walk_file_path.is_none())
             {
-                state.asset_form.error = Some(
-                    "Mengubah tipe ke Animasi wajib memilih file Idle dan Walk.".into(),
-                );
+                state.asset_form.error =
+                    Some("Mengubah tipe ke Animasi wajib memilih file Idle dan Walk.".into());
                 return;
             }
             if let Some(auth) = current_auth(state) {
@@ -1161,10 +1156,7 @@ fn draw_inspect_and_edit(
             {
                 state.asset_form.submitting = true;
                 state.asset_form.error = None;
-                api.send(ApiCommand::DeleteModelAsset {
-                    auth,
-                    id: asset.id,
-                });
+                api.send(ApiCommand::DeleteModelAsset { auth, id: asset.id });
             }
             if ui.button("Batal").clicked() {
                 state.asset_form.confirm_delete_id = None;
@@ -1258,7 +1250,11 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
             );
 
             ui.columns(2, |cols| {
-                cols[0].label(egui::RichText::new("Default Scale (min 0.01)").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                cols[0].label(
+                    egui::RichText::new("Default Scale (min 0.01)")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
                 numeric_spinner(
                     &mut cols[0],
                     "cat_new_default_scale",
@@ -1273,7 +1269,11 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                         wrap_around: false,
                     },
                 );
-                cols[1].label(egui::RichText::new("Urutan").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                cols[1].label(
+                    egui::RichText::new("Urutan")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
                 numeric_spinner_i32(
                     &mut cols[1],
                     "cat_new_sort_order",
@@ -1316,12 +1316,12 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                 .clicked()
             {
                 let name = state.category_form.new_name.trim().to_string();
-                let slug = slugify_category_input(if state.category_form.new_slug.trim().is_empty()
-                {
-                    &name
-                } else {
-                    &state.category_form.new_slug
-                });
+                let slug =
+                    slugify_category_input(if state.category_form.new_slug.trim().is_empty() {
+                        &name
+                    } else {
+                        &state.category_form.new_slug
+                    });
                 if name.is_empty() {
                     state.category_form.error = Some("Nama kategori wajib diisi.".into());
                 } else if slug.is_empty() || slug == "all" {
@@ -1405,7 +1405,9 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                         );
                     }
                     let beh_col = match cat.play_behavior {
-                        CategoryPlayBehavior::StaticObstacle => egui::Color32::from_rgb(248, 113, 113),
+                        CategoryPlayBehavior::StaticObstacle => {
+                            egui::Color32::from_rgb(248, 113, 113)
+                        }
                         CategoryPlayBehavior::GizmoMove => egui::Color32::from_rgb(251, 191, 36),
                         CategoryPlayBehavior::RtsUnit => egui::Color32::from_rgb(52, 211, 153),
                     };
@@ -1486,7 +1488,11 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                             }
                         });
                     ui.columns(2, |cols| {
-                        cols[0].label(egui::RichText::new("Scale (min 0.01)").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                        cols[0].label(
+                            egui::RichText::new("Scale (min 0.01)")
+                                .size(10.5)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
                         numeric_spinner(
                             &mut cols[0],
                             ("cat_edit_scale", &cat.category),
@@ -1501,7 +1507,11 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                                 wrap_around: false,
                             },
                         );
-                        cols[1].label(egui::RichText::new("Urutan").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                        cols[1].label(
+                            egui::RichText::new("Urutan")
+                                .size(10.5)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
                         numeric_spinner_i32(
                             &mut cols[1],
                             ("cat_edit_sort", &cat.category),
@@ -1540,8 +1550,7 @@ fn draw_categories_manager(ui: &mut egui::Ui, state: &mut AppState, api: &ApiCli
                     });
                 }
 
-                if state.category_form.confirm_delete_slug.as_deref()
-                    == Some(cat.category.as_str())
+                if state.category_form.confirm_delete_slug.as_deref() == Some(cat.category.as_str())
                 {
                     ui.separator();
                     ui.colored_label(
@@ -1605,12 +1614,39 @@ fn draw_transform_defaults_inputs(ui: &mut egui::Ui, state: &mut AppState) {
         wrap_around: false,
     };
     ui.columns(3, |cols| {
-        cols[0].label(egui::RichText::new("Rot° X").size(10.5).color(egui::Color32::from_rgb(248, 113, 113)));
-        numeric_spinner(&mut cols[0], "asset_rot_x", &mut state.asset_form.default_rot_x, rot_cfg);
-        cols[1].label(egui::RichText::new("Rot° Y").size(10.5).color(egui::Color32::from_rgb(74, 222, 128)));
-        numeric_spinner(&mut cols[1], "asset_rot_y", &mut state.asset_form.default_rot_y, rot_cfg);
-        cols[2].label(egui::RichText::new("Rot° Z").size(10.5).color(egui::Color32::from_rgb(96, 165, 250)));
-        numeric_spinner(&mut cols[2], "asset_rot_z", &mut state.asset_form.default_rot_z, rot_cfg);
+        cols[0].label(
+            egui::RichText::new("Rot° X")
+                .size(10.5)
+                .color(egui::Color32::from_rgb(248, 113, 113)),
+        );
+        numeric_spinner(
+            &mut cols[0],
+            "asset_rot_x",
+            &mut state.asset_form.default_rot_x,
+            rot_cfg,
+        );
+        cols[1].label(
+            egui::RichText::new("Rot° Y")
+                .size(10.5)
+                .color(egui::Color32::from_rgb(74, 222, 128)),
+        );
+        numeric_spinner(
+            &mut cols[1],
+            "asset_rot_y",
+            &mut state.asset_form.default_rot_y,
+            rot_cfg,
+        );
+        cols[2].label(
+            egui::RichText::new("Rot° Z")
+                .size(10.5)
+                .color(egui::Color32::from_rgb(96, 165, 250)),
+        );
+        numeric_spinner(
+            &mut cols[2],
+            "asset_rot_z",
+            &mut state.asset_form.default_rot_z,
+            rot_cfg,
+        );
     });
 }
 
@@ -1631,10 +1667,7 @@ fn draw_file_picker_row(
         }
     });
     if let Some(p) = slot {
-        let fname = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("selected");
+        let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("selected");
         ui.label(
             egui::RichText::new(format!("Dipilih: {fname}"))
                 .size(11.0)
@@ -1698,12 +1731,9 @@ fn draw_viewport_hud(ctx: &egui::Context, center_rect: egui::Rect, state: &AppSt
                             .color(egui::Color32::WHITE),
                     );
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{} • {lod_tag}{var_tag}",
-                            asset.category
-                        ))
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                        egui::RichText::new(format!("{} • {lod_tag}{var_tag}", asset.category))
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(56, 189, 248)),
                     );
                     ui.label(
                         egui::RichText::new(&target_rel)

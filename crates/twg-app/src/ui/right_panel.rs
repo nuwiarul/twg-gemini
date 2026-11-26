@@ -14,9 +14,7 @@ use twg_shared::{
         ParticleAnimConfig, ParticleAnimKind, is_particle_anim, parse_particle_anim_config,
         particle_anim_position, set_particle_anim_position, write_particle_anim_config,
     },
-    pointer_anim::{
-        is_pointer_arrow_anim, parse_pointer_arrow_config, write_pointer_arrow_config,
-    },
+    pointer_anim::{is_pointer_arrow_anim, parse_pointer_arrow_config, write_pointer_arrow_config},
     route_formation::{
         FormationCornerMode, PatwalLeadMotoLayout, PatwalUnitRole, RouteFormationKind,
         anim_bound_marker_ids, anim_is_playable, is_multi_route_anim, parse_multi_route_config,
@@ -52,9 +50,7 @@ use crate::{
         markers::{MAX_OBJECT_3D_SCALE, MIN_OBJECT_3D_SCALE, current_auth, finish_active_draft},
         media_preview::MediaPreviewPlayer,
         playback::{route_estimated_duration_sec, route_total_length_m},
-        polygon_edit::{
-            PolygonEditState, ensure_editable_polygon_points, insert_midpoint_after,
-        },
+        polygon_edit::{PolygonEditState, ensure_editable_polygon_points, insert_midpoint_after},
         route_edit::{RouteEditState, insert_route_midpoint_after},
     },
     state::{AnimRunStatus, AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode},
@@ -114,11 +110,21 @@ pub fn draw_right_panel(
                                 ("3D MARKER", egui::Color32::from_rgb(14, 116, 144))
                             }
                         }
-                        SelectedEntity::Building(_) => ("BUILDING", egui::Color32::from_rgb(5, 150, 105)),
-                        SelectedEntity::Line(_) => ("PLOT LINE", egui::Color32::from_rgb(180, 83, 9)),
-                        SelectedEntity::TextMarker(_) => ("TEXT LABEL", egui::Color32::from_rgb(109, 40, 217)),
-                        SelectedEntity::Anim(_) => ("ROUTE ANIM", egui::Color32::from_rgb(16, 185, 129)),
-                        SelectedEntity::None => ("SKENARIO ROOT", egui::Color32::from_rgb(51, 65, 85)),
+                        SelectedEntity::Building(_) => {
+                            ("BUILDING", egui::Color32::from_rgb(5, 150, 105))
+                        }
+                        SelectedEntity::Line(_) => {
+                            ("PLOT LINE", egui::Color32::from_rgb(180, 83, 9))
+                        }
+                        SelectedEntity::TextMarker(_) => {
+                            ("TEXT LABEL", egui::Color32::from_rgb(109, 40, 217))
+                        }
+                        SelectedEntity::Anim(_) => {
+                            ("ROUTE ANIM", egui::Color32::from_rgb(16, 185, 129))
+                        }
+                        SelectedEntity::None => {
+                            ("SKENARIO ROOT", egui::Color32::from_rgb(51, 65, 85))
+                        }
                     };
                     egui::Frame::new()
                         .fill(badge.1)
@@ -153,7 +159,10 @@ pub fn draw_right_panel(
             if playback.play_test_mode {
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(6, 78, 59))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(16, 185, 129)))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(16, 185, 129),
+                    ))
                     .corner_radius(5.0)
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
@@ -223,7 +232,12 @@ pub fn draw_right_panel(
         .width()
 }
 
-fn inspector_card(ui: &mut egui::Ui, title: &str, default_open: bool, body: impl FnOnce(&mut egui::Ui)) {
+fn inspector_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    default_open: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(22, 30, 45))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 52, 74)))
@@ -277,7 +291,11 @@ fn hex_to_srgb(hex: &str) -> [u8; 3] {
 
 fn color_hex_picker(ui: &mut egui::Ui, label: &str, hex: &mut String) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).size(11.5).color(egui::Color32::LIGHT_GRAY));
+        ui.label(
+            egui::RichText::new(label)
+                .size(11.5)
+                .color(egui::Color32::LIGHT_GRAY),
+        );
         let mut rgb = hex_to_srgb(hex);
         if ui.color_edit_button_srgb(&mut rgb).changed() {
             *hex = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
@@ -290,7 +308,10 @@ fn draw_locked_banner(ui: &mut egui::Ui, can_unlock: bool) -> bool {
     let mut unlock_clicked = false;
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(66, 32, 6))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(245, 158, 11)))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgb(245, 158, 11),
+        ))
         .corner_radius(5.0)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
@@ -459,8 +480,8 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
             });
         }
         ToolMode::DrawRoute => {
-            let is_patwal_mode = state.new_route_is_multi
-                && state.new_route_formation == RouteFormationKind::Patwal;
+            let is_patwal_mode =
+                state.new_route_is_multi && state.new_route_formation == RouteFormationKind::Patwal;
             let card_title = if is_patwal_mode {
                 "Langkah 1/2: Gambar Garis Rute Patwal"
             } else if state.new_route_is_multi {
@@ -490,10 +511,7 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                         state.new_route_is_multi = true;
                         state.new_route_formation = RouteFormationKind::Grid;
                     }
-                    if ui
-                        .selectable_label(is_patwal_mode, "Patwal")
-                        .clicked()
-                    {
+                    if ui.selectable_label(is_patwal_mode, "Patwal").clicked() {
                         state.new_route_is_multi = true;
                         state.new_route_formation = RouteFormationKind::Patwal;
                     }
@@ -821,9 +839,12 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                     }
                     if bound_ids.len() > 6 {
                         ui.label(
-                            egui::RichText::new(format!("  ... +{} objek lainnya", bound_ids.len() - 6))
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                            egui::RichText::new(format!(
+                                "  ... +{} objek lainnya",
+                                bound_ids.len() - 6
+                            ))
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
                         );
                     }
                 }
@@ -860,8 +881,7 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                                     .anims
                                     .iter()
                                     .filter(|a| {
-                                        ParticleAnimKind::from_anim_type(&a.anim_type)
-                                            == Some(kind)
+                                        ParticleAnimKind::from_anim_type(&a.anim_type) == Some(kind)
                                     })
                                     .count()
                                     + 1;
@@ -948,12 +968,20 @@ fn draw_marker_inspector(
     // 1. Identity Component
     inspector_card(ui, "Node Identity", true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
-            ui.label(egui::RichText::new("Name").size(11.0).color(egui::Color32::LIGHT_GRAY));
+            ui.label(
+                egui::RichText::new("Name")
+                    .size(11.0)
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
             ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(f32::INFINITY));
             ui.add_space(4.0);
             ui.checkbox(&mut m.is_spawn, "Active / Visible (Spawned)");
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Description").size(11.0).color(egui::Color32::LIGHT_GRAY));
+            ui.label(
+                egui::RichText::new("Description")
+                    .size(11.0)
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
             let mut desc = m.description.clone().unwrap_or_default();
             if ui
                 .add(
@@ -976,7 +1004,12 @@ fn draw_marker_inspector(
     inspector_card(ui, "Transform", true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
             // Position (Geo Coordinates)
-            ui.label(egui::RichText::new("Position (Geo / Alt)").size(11.0).strong().color(egui::Color32::from_rgb(203, 213, 225)));
+            ui.label(
+                egui::RichText::new("Position (Geo / Alt)")
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+            );
             ui.horizontal(|ui| {
                 axis_badge(ui, "Lng", egui::Color32::from_rgb(185, 28, 28));
                 numeric_spinner(
@@ -1032,7 +1065,12 @@ fn draw_marker_inspector(
             ui.add_space(6.0);
 
             // Rotation (Euler degrees)
-            ui.label(egui::RichText::new("Rotation (°)").size(11.0).strong().color(egui::Color32::from_rgb(203, 213, 225)));
+            ui.label(
+                egui::RichText::new("Rotation (°)")
+                    .size(11.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+            );
             let rot_cfg = SpinnerConfig {
                 min: -360.0,
                 max: 360.0,
@@ -1059,7 +1097,12 @@ fn draw_marker_inspector(
 
             // Scale (default 0.1, min 0.01)
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Scale (min 0.01)").size(11.0).strong().color(egui::Color32::from_rgb(203, 213, 225)));
+                ui.label(
+                    egui::RichText::new("Scale (min 0.01)")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.checkbox(&mut state.uniform_scale_lock, "Uniform");
                 });
@@ -2051,7 +2094,8 @@ fn draw_marker_inspector(
                     .color(egui::Color32::WHITE),
             )
             .fill(egui::Color32::from_rgb(14, 116, 144));
-            if ui.add(save_btn).clicked() && !state.offline_preview
+            if ui.add(save_btn).clicked()
+                && !state.offline_preview
                 && let Some(auth) = current_auth(state)
             {
                 api.send(ApiCommand::UpdateMarker {
@@ -2154,7 +2198,12 @@ fn draw_building_inspector(
     let editable = !playback.play_test_mode && !is_locked;
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&b.name).size(13.5).strong().color(egui::Color32::WHITE));
+        ui.label(
+            egui::RichText::new(&b.name)
+                .size(13.5)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("Focus").clicked()
                 && let Some(pt) = b.geom.first()
@@ -2203,9 +2252,8 @@ fn draw_building_inspector(
     });
 
     if editable {
-        let b_changed = b.name != orig.name
-            || b.color != orig.color
-            || (b.height - orig.height).abs() > 1e-6;
+        let b_changed =
+            b.name != orig.name || b.color != orig.color || (b.height - orig.height).abs() > 1e-6;
         if b_changed {
             if let Some(existing) = state.buildings.iter_mut().find(|x| x.id == b.id) {
                 *existing = b.clone();
@@ -2263,7 +2311,12 @@ fn draw_line_inspector(
     let editable = !playback.play_test_mode && !is_locked;
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&l.name).size(13.5).strong().color(egui::Color32::WHITE));
+        ui.label(
+            egui::RichText::new(&l.name)
+                .size(13.5)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("Focus").clicked()
                 && let Some(pt) = l.geom.first()
@@ -2287,7 +2340,11 @@ fn draw_line_inspector(
             ui.add_space(4.0);
             color_hex_picker(ui, "Color:", &mut l.color);
             ui.columns(2, |cols| {
-                cols[0].label(egui::RichText::new("Width").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                cols[0].label(
+                    egui::RichText::new("Width")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
                 numeric_spinner(
                     &mut cols[0],
                     ("line_width", l.id),
@@ -2302,7 +2359,11 @@ fn draw_line_inspector(
                         wrap_around: false,
                     },
                 );
-                cols[1].label(egui::RichText::new("Alpha").size(10.5).color(egui::Color32::LIGHT_GRAY));
+                cols[1].label(
+                    egui::RichText::new("Alpha")
+                        .size(10.5)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
                 numeric_spinner(
                     &mut cols[1],
                     ("line_alpha", l.id),
@@ -2388,7 +2449,12 @@ fn draw_text_inspector(
     let editable = !playback.play_test_mode && !is_locked;
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&t.text).size(13.5).strong().color(egui::Color32::WHITE));
+        ui.label(
+            egui::RichText::new(&t.text)
+                .size(13.5)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("Focus").clicked() {
                 let local = state.geo_anchor.lng_lat_alt_to_local(t.lng, t.lat, 0.0);
@@ -2847,36 +2913,71 @@ fn draw_anim_inspector(
     } else if let Some(shoot_kind) = shoot_anim_kind(&a) {
         match shoot_kind {
             ShootAnimKind::WaterCannon => {
-                draw_water_cannon_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+                draw_water_cannon_inspector_cards(
+                    ui,
+                    state,
+                    route_edit,
+                    &mut a,
+                    &markers_list,
+                    editable,
+                );
             }
             ShootAnimKind::StoneThrow => {
-                draw_stone_throw_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+                draw_stone_throw_inspector_cards(
+                    ui,
+                    state,
+                    route_edit,
+                    &mut a,
+                    &markers_list,
+                    editable,
+                );
             }
             ShootAnimKind::TearGas => {
-                draw_tear_gas_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+                draw_tear_gas_inspector_cards(
+                    ui,
+                    state,
+                    route_edit,
+                    &mut a,
+                    &markers_list,
+                    editable,
+                );
             }
             ShootAnimKind::Bullet => {
-                draw_bullet_shoot_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+                draw_bullet_shoot_inspector_cards(
+                    ui,
+                    state,
+                    route_edit,
+                    &mut a,
+                    &markers_list,
+                    editable,
+                );
             }
             ShootAnimKind::Apar => {
-                draw_apar_spray_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
+                draw_apar_spray_inspector_cards(
+                    ui,
+                    state,
+                    route_edit,
+                    &mut a,
+                    &markers_list,
+                    editable,
+                );
             }
         }
     } else {
-    draw_editor_preview_card(ui, state, playback, route_edit, &a);
-    let is_multi = is_multi_route_anim(&a);
-    let linked_name = a
-        .marker_id
-        .and_then(|mid| markers_list.iter().find(|(id, _)| *id == mid))
-        .map(|(_, n)| n.clone());
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        let is_multi = is_multi_route_anim(&a);
+        let linked_name = a
+            .marker_id
+            .and_then(|mid| markers_list.iter().find(|(id, _)| *id == mid))
+            .map(|(_, n)| n.clone());
 
-    let settings_title = if is_multi {
-        "Rute Unit Multiple — Pengaturan"
-    } else {
-        "Rute Unit Tunggal — Pengaturan"
-    };
-    inspector_card(ui, settings_title, true, |ui| {
-        ui.add_enabled_ui(editable, |ui| {
+        let settings_title = if is_multi {
+            "Rute Unit Multiple — Pengaturan"
+        } else {
+            "Rute Unit Tunggal — Pengaturan"
+        };
+        inspector_card(ui, settings_title, true, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
             ui.label("Nama Animasi:");
             ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
             ui.add_space(6.0);
@@ -2992,16 +3093,16 @@ fn draw_anim_inspector(
                 .color(egui::Color32::from_rgb(110, 231, 183)),
             );
         });
-    });
+        });
 
-    // Multi-Unit Formation Cards (Unit List + Formation Settings + 2D Interactive Formation Pad)
-    if is_multi {
-        let mut cfg = parse_multi_route_config(&a);
-        let mut cfg_changed = false;
+        // Multi-Unit Formation Cards (Unit List + Formation Settings + 2D Interactive Formation Pad)
+        if is_multi {
+            let mut cfg = parse_multi_route_config(&a);
+            let mut cfg_changed = false;
 
-        let unit_card_title = format!("Daftar Unit Formasi ({} unit)", cfg.marker_ids.len());
-        inspector_card(ui, &unit_card_title, true, |ui| {
-            ui.add_enabled_ui(editable, |ui| {
+            let unit_card_title = format!("Daftar Unit Formasi ({} unit)", cfg.marker_ids.len());
+            inspector_card(ui, &unit_card_title, true, |ui| {
+                ui.add_enabled_ui(editable, |ui| {
                 let is_picking_this = state.tool_mode == ToolMode::PickRouteMarker
                     && state.picking_marker_for_anim_id == Some(a.id);
                 let pick_btn = egui::Button::new(
@@ -3271,10 +3372,10 @@ fn draw_anim_inspector(
                     }
                 }
             });
-        });
+            });
 
-        inspector_card(ui, "Formasi & Posisi Unit", true, |ui| {
-            ui.add_enabled_ui(editable, |ui| {
+            inspector_card(ui, "Formasi & Posisi Unit", true, |ui| {
+                ui.add_enabled_ui(editable, |ui| {
                 // Formation Preset Selector (5 Tactical Formations)
                 let prev_formation = cfg.formation;
                 ui.label(
@@ -3711,16 +3812,16 @@ fn draw_anim_inspector(
                     cfg_changed = true;
                 }
             });
-        });
+            });
 
-        if cfg_changed {
-            write_multi_route_config(&mut a, &cfg);
+            if cfg_changed {
+                write_multi_route_config(&mut a, &cfg);
+            }
         }
-    }
 
-    // Card 2: Interactive Route Polyline & Waypoint Editor (Auto-active on map + Inspector Spinners)
-    inspector_card(ui, "Edit Garis Rute (Peta & Titik)", true, |ui| {
-        ui.add_enabled_ui(editable, |ui| {
+        // Card 2: Interactive Route Polyline & Waypoint Editor (Auto-active on map + Inspector Spinners)
+        inspector_card(ui, "Edit Garis Rute (Peta & Titik)", true, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
             let is_editing_map = route_edit.is_editing(a.id);
             if !is_editing_map {
                 let edit_btn = egui::Button::new(
@@ -3987,7 +4088,7 @@ fn draw_anim_inspector(
                 a.duration_sec = route_estimated_duration_sec(&a.geom, a.speed);
             }
         });
-    });
+        });
     }
 
     if editable {
@@ -4074,8 +4175,7 @@ fn draw_anim_inspector(
                     state.dirty_anim_ids.remove(&a.id);
                 } else {
                     state.dirty_anim_ids.remove(&a.id);
-                    state.status_banner =
-                        Some(format!("Animasi '{}' disimpan (Offline).", a.name));
+                    state.status_banner = Some(format!("Animasi '{}' disimpan (Offline).", a.name));
                 }
             }
 
@@ -4382,10 +4482,7 @@ fn draw_particle_inspector_cards(
                             .color(egui::Color32::LIGHT_GRAY),
                     );
                     if ui
-                        .add(
-                            egui::Slider::new(&mut cfg.spread, 0.0..=2.0)
-                                .fixed_decimals(2),
-                        )
+                        .add(egui::Slider::new(&mut cfg.spread, 0.0..=2.0).fixed_decimals(2))
                         .changed()
                     {
                         cfg_changed = true;
@@ -4465,13 +4562,13 @@ fn draw_particle_inspector_cards(
                     ui.spacing_mut().item_spacing.y = 3.0;
                     for &(lbl, hex) in presets {
                         let active = cfg.color_hex.eq_ignore_ascii_case(hex);
-                        let btn = egui::Button::new(
-                            egui::RichText::new(lbl).size(9.5).color(if active {
+                        let btn = egui::Button::new(egui::RichText::new(lbl).size(9.5).color(
+                            if active {
                                 egui::Color32::WHITE
                             } else {
                                 egui::Color32::from_rgb(203, 213, 225)
-                            }),
-                        )
+                            },
+                        ))
                         .fill(if active {
                             egui::Color32::from_rgb(234, 88, 12)
                         } else {
@@ -4900,19 +4997,18 @@ fn draw_water_cannon_inspector_cards(
                     ("Biru Taktis", "#38bdf8"),
                 ] {
                     let active = cfg.color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(2, 132, 199)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(2, 132, 199)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.color_hex = hex.to_string();
                         cfg_changed = true;
@@ -5460,19 +5556,18 @@ fn draw_stone_throw_inspector_cards(
                     ("Koral Terang", "#a8a29e"),
                 ] {
                     let active = cfg.color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(180, 83, 9)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(180, 83, 9)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.color_hex = hex.to_string();
                         cfg_changed = true;
@@ -5487,7 +5582,10 @@ fn draw_stone_throw_inspector_cards(
             }
             ui.add_space(3.0);
             if ui
-                .checkbox(&mut cfg.dust_impact, "Percikan Debu Saat Batu Jatuh ke Tanah")
+                .checkbox(
+                    &mut cfg.dust_impact,
+                    "Percikan Debu Saat Batu Jatuh ke Tanah",
+                )
                 .changed()
             {
                 cfg_changed = true;
@@ -5923,19 +6021,18 @@ fn draw_tear_gas_inspector_cards(
                     ("Oranye Sinyal", "#fdba74"),
                 ] {
                     let active = cfg.smoke_color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(71, 85, 105)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(71, 85, 105)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.smoke_color_hex = hex.to_string();
                         cfg_changed = true;
@@ -6073,13 +6170,13 @@ fn draw_bullet_shoot_inspector_cards(
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for &mode in BulletFireMode::ALL {
                     let active = cfg.fire_mode == mode;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(mode.label()).size(9.5).color(if active {
+                    let btn = egui::Button::new(egui::RichText::new(mode.label()).size(9.5).color(
+                        if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
+                        },
+                    ))
                     .fill(if active {
                         egui::Color32::from_rgb(185, 28, 28)
                     } else {
@@ -6315,19 +6412,18 @@ fn draw_bullet_shoot_inspector_cards(
                     ("Putih Terang", "#ffffff"),
                 ] {
                     let active = cfg.color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(185, 28, 28)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(185, 28, 28)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.color_hex = hex.to_string();
                         cfg_changed = true;
@@ -6506,19 +6602,18 @@ fn draw_apar_spray_inspector_cards(
                     ("Serbuk Kuning", "#fef08a", 0.62, 1.20, 1.2),
                 ] {
                     let active = cfg.color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(15, 118, 110)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(15, 118, 110)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.color_hex = hex.to_string();
                         cfg.cone_spread = spread;
@@ -6994,19 +7089,18 @@ fn draw_pointer_arrow_inspector_cards(
                     ("Putih", "#f8fafc"),
                 ] {
                     let active = cfg.arrow_color_hex.eq_ignore_ascii_case(hex);
-                    let btn = egui::Button::new(
-                        egui::RichText::new(lbl).size(9.5).color(if active {
+                    let btn =
+                        egui::Button::new(egui::RichText::new(lbl).size(9.5).color(if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(203, 213, 225)
-                        }),
-                    )
-                    .fill(if active {
-                        egui::Color32::from_rgb(14, 116, 144)
-                    } else {
-                        egui::Color32::from_rgb(24, 34, 52)
-                    })
-                    .small();
+                        }))
+                        .fill(if active {
+                            egui::Color32::from_rgb(14, 116, 144)
+                        } else {
+                            egui::Color32::from_rgb(24, 34, 52)
+                        })
+                        .small();
                     if ui.add(btn).clicked() {
                         cfg.arrow_color_hex = hex.to_string();
                         cfg_changed = true;
@@ -7137,13 +7231,13 @@ fn draw_pointer_arrow_inspector_cards(
                         ("Hijau", "#4ade80"),
                     ] {
                         let active = cfg.text_color_hex.eq_ignore_ascii_case(hex);
-                        let btn = egui::Button::new(
-                            egui::RichText::new(lbl).size(9.5).color(if active {
+                        let btn = egui::Button::new(egui::RichText::new(lbl).size(9.5).color(
+                            if active {
                                 egui::Color32::WHITE
                             } else {
                                 egui::Color32::from_rgb(203, 213, 225)
-                            }),
-                        )
+                            },
+                        ))
                         .fill(if active {
                             egui::Color32::from_rgb(14, 116, 144)
                         } else {
@@ -8593,9 +8687,11 @@ fn draw_skenario_inspector(
                 )
                 .clicked()
             {
-                let (lng, lat, _) = state
-                    .geo_anchor
-                    .local_to_lng_lat_alt([tcam.target_local.x, 0.0, tcam.target_local.y]);
+                let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([
+                    tcam.target_local.x,
+                    0.0,
+                    tcam.target_local.y,
+                ]);
                 sk.center_lng = lng;
                 sk.center_lat = lat;
                 sk.zoom = zoom;
@@ -8638,7 +8734,10 @@ fn draw_live_ops_section(
 ) {
     inspector_card(
         ui,
-        &format!("Live Ops WebSocket ({} online)", state.online_operators.len()),
+        &format!(
+            "Live Ops WebSocket ({} online)",
+            state.online_operators.len()
+        ),
         false,
         |ui| {
             if state.can_control_active_big_screen()
@@ -8646,9 +8745,11 @@ fn draw_live_ops_section(
             {
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Sync Camera").clicked() {
-                        let (lng, lat, _) = state
-                            .geo_anchor
-                            .local_to_lng_lat_alt([tcam.target_local.x, 0.0, tcam.target_local.y]);
+                        let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([
+                            tcam.target_local.x,
+                            0.0,
+                            tcam.target_local.y,
+                        ]);
                         let zoom = tcam.current_zoom(820.0, state.geo_anchor.cos_lat);
                         ws.send(WsOutCommand::SendCommand(TacticalCommand {
                             operasi_id: sk.operasi_id,

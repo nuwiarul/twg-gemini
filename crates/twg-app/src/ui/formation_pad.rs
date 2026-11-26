@@ -307,11 +307,7 @@ pub fn draw_formation_pad(
             // Tiny forward-facing triangle chevron atop each pin
             let tip = pos - egui::vec2(0.0, r + 5.0);
             painter.add(egui::Shape::convex_polygon(
-                vec![
-                    tip,
-                    tip + egui::vec2(-3.2, 4.0),
-                    tip + egui::vec2(3.2, 4.0),
-                ],
+                vec![tip, tip + egui::vec2(-3.2, 4.0), tip + egui::vec2(3.2, 4.0)],
                 fill,
                 egui::Stroke::NONE,
             ));
@@ -361,13 +357,7 @@ pub fn draw_formation_pad(
                 lon_m
             )
         } else {
-            format!(
-                "#{} {} ({:+.1}m, {:+.1}m)",
-                idx + 1,
-                uname,
-                lat_m,
-                lon_m
-            )
+            format!("#{} {} ({:+.1}m, {:+.1}m)", idx + 1, uname, lat_m, lon_m)
         };
         let font = egui::FontId::proportional(9.5);
         let galley = painter.layout_no_wrap(tip, font, egui::Color32::WHITE);
@@ -406,16 +396,13 @@ pub fn draw_formation_pad(
             );
             for (lbl, val) in [("Bebas", 0.0_f64), ("0.5m", 0.5_f64), ("1.0m", 1.0_f64)] {
                 let active = (*snap_m - val).abs() < 0.01;
-                let btn = egui::Button::new(
-                    egui::RichText::new(lbl)
-                        .size(9.5)
-                        .strong()
-                        .color(if active {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::from_rgb(148, 163, 184)
-                        }),
-                )
+                let btn = egui::Button::new(egui::RichText::new(lbl).size(9.5).strong().color(
+                    if active {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(148, 163, 184)
+                    },
+                ))
                 .fill(if active {
                     egui::Color32::from_rgb(14, 116, 144)
                 } else {

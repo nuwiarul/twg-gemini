@@ -2,16 +2,10 @@ use bevy_egui::egui;
 use twg_shared::models::{MapMode, Skenario, TacticalOperasiCard};
 
 use crate::{
-    net::{
-        asset_sync::AssetSyncBridge,
-        client::ApiClientBridge,
-        ws_client::WsClientBridge,
-    },
+    net::{asset_sync::AssetSyncBridge, client::ApiClientBridge, ws_client::WsClientBridge},
     state::{AppState, PlaybackState},
     ui::{
-        nav_bar::{
-            draw_global_top_bar, open_tactical_skenario, trigger_load_tactical_operasis,
-        },
+        nav_bar::{draw_global_top_bar, open_tactical_skenario, trigger_load_tactical_operasis},
         pagination::draw_pagination_bar,
     },
 };

@@ -27,11 +27,7 @@ use bevy_egui::{EguiContext, EguiContexts, egui};
 
 use crate::{
     map::camera::{TacticalCamera, screen_pos_to_world_ground},
-    net::{
-        asset_sync::AssetSyncBridge,
-        client::ApiClientBridge,
-        ws_client::WsClientBridge,
-    },
+    net::{asset_sync::AssetSyncBridge, client::ApiClientBridge, ws_client::WsClientBridge},
     scene::{
         asset_preview::AssetPreviewStage,
         basic_mesh::{BasicMeshConfig, BasicMeshShape},
@@ -47,7 +43,7 @@ use crate::{
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
         route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
     },
-    state::{AppScreen, AppState, PlotExit, PlaybackState, ToolMode, UiPointerState},
+    state::{AppScreen, AppState, PlaybackState, PlotExit, ToolMode, UiPointerState},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -82,51 +78,6 @@ pub fn egui_root_system(
             .layer_id(egui::LayerId::background())
             .max_rect(screen_rect),
     );
-
-    if let Some(action) = state.pending_plot_exit {
-        let saving = state.saving_pending_count > 0;
-        let mut proceed = !saving && state.unsaved_change_count() == 0;
-        if !proceed {
-            egui::Modal::new("plot_exit_confirmation".into()).show(ctx, |ui| {
-                ui.heading("Tinggalkan Plot Editor?");
-                if saving {
-                    ui.label("Sedang menyimpan perubahan...");
-                } else {
-                    ui.label("Simpan semua perubahan sebelum keluar?");
-                }
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!saving, egui::Button::new("Yes")).clicked() {
-                        crate::scene::markers::save_all_scenario_changes(&mut state, &api, &ws);
-                        if state.saving_pending_count == 0 && state.unsaved_change_count() > 0 {
-                            state.pending_plot_exit = None;
-                        }
-                    }
-                    if ui.add_enabled(!saving, egui::Button::new("No")).clicked() {
-                        state.discard_plot_changes();
-                        proceed = true;
-                    }
-                    if ui.button("Batal").clicked() {
-                        state.pending_plot_exit = None;
-                    }
-                });
-            });
-        }
-        if proceed {
-            state.pending_plot_exit = None;
-            match action {
-                PlotExit::Page(page) => {
-                    topbar::leave_plot(page, &mut state, &mut playback, &api, &ws);
-                }
-                PlotExit::Close(window) => {
-                    commands.entity(window).try_despawn();
-                }
-            }
-        }
-        ui_state.wants_pointer = true;
-        ui_state.wants_keyboard = true;
-        ui_state.viewport_rect_logical = None;
-        return Ok(());
-    }
 
     if state.screen == AppScreen::Login {
         login::draw_login_screen(&mut viewport_ui, &mut state, &api, &sync_bridge);
@@ -372,7 +323,8 @@ pub fn egui_root_system(
             &sync_bridge,
         )
     };
-    let bottom = bottom_bar::draw_bottom_bar(&mut viewport_ui, &mut state, &tcam, &mut playback, &ws);
+    let bottom =
+        bottom_bar::draw_bottom_bar(&mut viewport_ui, &mut state, &tcam, &mut playback, &ws);
     let (left, right) = if playback.play_test_mode {
         // Play Skenario Mode: hide Editor panels (Layers, 3D Catalog, Basic Mesh, Inspector)
         // and show the dedicated Animation Player panel on the left.
@@ -505,8 +457,7 @@ pub fn egui_root_system(
                 state.dragging_catalog_entry = None;
                 state.catalog_drop_world_pos = None;
                 if let Some(hit) = drop_hit {
-                    let (lng, lat, _) =
-                        state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
+                    let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
                     if spawn_marker_from_catalog(&mut state, &api, &drag_entry, lng, lat) {
                         state.status_banner = Some(format!(
                             "Model '{}' diletakkan di peta (Lat {:.5}, Lng {:.5})",
@@ -547,8 +498,7 @@ pub fn egui_root_system(
                 state.dragging_basic_mesh = None;
                 state.catalog_drop_world_pos = None;
                 if let Some(hit) = drop_hit {
-                    let (lng, lat, _) =
-                        state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
+                    let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
                     if drag_shape == BasicMeshShape::Polygon {
                         state.tool_mode = ToolMode::DrawBasicPolygon;
                         state.draft_points_lnglat = vec![[lng, lat]];
@@ -613,8 +563,9 @@ pub fn egui_root_system(
 
     // Modal confirmation dialog before deleting any map object
     draw_delete_entity_confirm_modal(ctx, &mut state, &mut poly_edit, &mut route_edit, &api);
+    draw_plot_exit_confirm_modal(ctx, &mut commands, &mut state, &mut playback, &api, &ws);
 
-    let has_modal = state.pending_delete_entity.is_some();
+    let has_modal = state.pending_delete_entity.is_some() || state.pending_plot_exit.is_some();
     let pointer_in_center = ctx
         .pointer_latest_pos()
         .is_some_and(|p| center_rect.contains(p));
@@ -627,6 +578,209 @@ pub fn egui_root_system(
     ui_state.wants_keyboard = has_modal || ctx.egui_wants_keyboard_input();
 
     Ok(())
+}
+
+fn draw_plot_exit_confirm_modal(
+    ctx: &egui::Context,
+    commands: &mut Commands,
+    state: &mut AppState,
+    playback: &mut PlaybackState,
+    api: &ApiClientBridge,
+    ws: &WsClientBridge,
+) {
+    let Some(action) = state.pending_plot_exit else {
+        return;
+    };
+
+    let saving = state.saving_pending_count > 0;
+    let mut proceed = !saving && state.unsaved_change_count() == 0;
+    let mut save = false;
+    let mut discard = false;
+    let mut cancel = false;
+
+    if !proceed {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            state.pending_plot_exit = None;
+            return;
+        }
+
+        let screen = ctx.viewport_rect();
+        egui::Area::new(egui::Id::new("plot_exit_confirmation_backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(4, 8, 16, 175),
+                );
+            });
+
+        let change_count = state.unsaved_change_count();
+        egui::Window::new("Simpan Perubahan Plot Editor")
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .fixed_size(egui::vec2(430.0, 0.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(17, 24, 39))
+                    .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(217, 119, 6)))
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::same(16))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 2,
+                        color: egui::Color32::from_black_alpha(150),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(120, 53, 15))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(7, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("PERUBAHAN")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(254, 243, 199)),
+                            );
+                        });
+                    ui.label(
+                        egui::RichText::new("Simpan Perubahan?")
+                            .size(14.5)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                });
+
+                ui.add_space(10.0);
+                let message = if saving {
+                    "Perubahan sedang disimpan. Mohon tunggu hingga proses selesai."
+                } else {
+                    "Ada perubahan Plot Editor yang belum disimpan. Simpan sebelum melanjutkan?"
+                };
+                ui.label(
+                    egui::RichText::new(message)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
+                ui.add_space(8.0);
+
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(12, 18, 30))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(51, 65, 85)))
+                    .corner_radius(5.0)
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgb(146, 64, 14))
+                                .corner_radius(3.0)
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("PLOT EDITOR")
+                                            .size(10.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(254, 243, 199)),
+                                    );
+                                });
+                            ui.label(
+                                egui::RichText::new(if saving {
+                                    "Menyimpan perubahan...".to_string()
+                                } else {
+                                    format!("{change_count} perubahan belum disimpan")
+                                })
+                                .size(12.5)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                            );
+                        });
+                    });
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(if saving {
+                        "Jangan tutup aplikasi hingga penyimpanan selesai."
+                    } else {
+                        "Pilih Jangan Simpan untuk membuang perubahan ini."
+                    })
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(251, 191, 36)),
+                );
+
+                ui.add_space(14.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let save_button = egui::Button::new(
+                        egui::RichText::new(if saving { "Menyimpan..." } else { "Ya, Simpan" })
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(14, 116, 144))
+                    .min_size(egui::vec2(104.0, 28.0));
+                    if ui.add_enabled(!saving, save_button).clicked() {
+                        save = true;
+                    }
+
+                    let discard_button = egui::Button::new(
+                        egui::RichText::new("Jangan Simpan")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(254, 202, 202)),
+                    )
+                    .fill(egui::Color32::from_rgb(127, 29, 29))
+                    .min_size(egui::vec2(116.0, 28.0));
+                    if ui.add_enabled(!saving, discard_button).clicked() {
+                        discard = true;
+                    }
+
+                    let cancel_button = egui::Button::new(
+                        egui::RichText::new("Batal")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(226, 232, 240)),
+                    )
+                    .fill(egui::Color32::from_rgb(30, 41, 59))
+                    .min_size(egui::vec2(78.0, 28.0));
+                    if ui.add(cancel_button).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+    }
+
+    if save {
+        crate::scene::markers::save_all_scenario_changes(state, api, ws);
+        if state.saving_pending_count == 0 {
+            if state.unsaved_change_count() == 0 {
+                proceed = true;
+            } else {
+                state.pending_plot_exit = None;
+            }
+        }
+    } else if discard {
+        state.discard_plot_changes();
+        proceed = true;
+    } else if cancel {
+        state.pending_plot_exit = None;
+    }
+
+    if proceed {
+        state.pending_plot_exit = None;
+        match action {
+            PlotExit::Page(page) => topbar::leave_plot(page, state, playback, api, ws),
+            PlotExit::Close(window) => {
+                commands.entity(window).try_despawn();
+            }
+        }
+    }
 }
 
 fn draw_delete_entity_confirm_modal(
@@ -852,16 +1006,13 @@ pub fn draw_search_input_with_reset(
                 .hint_text(hint)
                 .desired_width(input_w),
         );
-        let btn = egui::Button::new(
-            egui::RichText::new("Reset")
-                .size(10.5)
-                .strong()
-                .color(if has_any_filter {
-                    egui::Color32::from_rgb(254, 202, 202)
-                } else {
-                    egui::Color32::from_rgb(100, 116, 139)
-                }),
-        )
+        let btn = egui::Button::new(egui::RichText::new("Reset").size(10.5).strong().color(
+            if has_any_filter {
+                egui::Color32::from_rgb(254, 202, 202)
+            } else {
+                egui::Color32::from_rgb(100, 116, 139)
+            },
+        ))
         .fill(if has_any_filter {
             egui::Color32::from_rgb(127, 29, 29)
         } else {
@@ -919,7 +1070,8 @@ mod plot_exit_tests {
             .add_message::<WindowCloseRequested>()
             .add_systems(Update, handle_close_requests);
         let window = app.world_mut().spawn(PrimaryWindow).id();
-        app.world_mut().write_message(WindowCloseRequested { window });
+        app.world_mut()
+            .write_message(WindowCloseRequested { window });
         app.update();
         assert!(app.world().get_entity(window).is_ok());
         assert!(matches!(
@@ -930,7 +1082,8 @@ mod plot_exit_tests {
         let mut state = app.world_mut().resource_mut::<AppState>();
         state.pending_plot_exit = None;
         state.clear_all_dirty();
-        app.world_mut().write_message(WindowCloseRequested { window });
+        app.world_mut()
+            .write_message(WindowCloseRequested { window });
         app.update();
         assert!(app.world().get_entity(window).is_err());
     }

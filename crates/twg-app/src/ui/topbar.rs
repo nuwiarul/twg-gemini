@@ -12,7 +12,9 @@ use crate::{
         ws_client::{WsClientBridge, WsOutCommand},
     },
     scene::markers::{finish_active_draft, save_all_scenario_changes},
-    state::{AppScreen, AppState, PlotExit, PlaySessionMode, PlaybackState, SkyboxPreset, ToolMode},
+    state::{
+        AppScreen, AppState, PlaySessionMode, PlaybackState, PlotExit, SkyboxPreset, ToolMode,
+    },
     ui::{
         app_icon::draw_app_brand_icon,
         nav_bar::{
@@ -626,7 +628,9 @@ fn draw_transform_tool_btn(
     let label = tool.label();
     let font = egui::FontId::proportional(11.5);
     let key_font = egui::FontId::proportional(9.5);
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font, egui::Color32::WHITE);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, egui::Color32::WHITE);
     let key_galley = ui.painter().layout_no_wrap(
         shortcut.to_string(),
         key_font,
@@ -732,8 +736,16 @@ fn draw_transform_tool_icon(
         }
         ToolMode::MoveMarker => {
             // 4-way gizmo cross arrows (subtle X/Y axis tint when inactive, crisp white when active)
-            let x_col = if active { fg } else { egui::Color32::from_rgb(248, 113, 113) };
-            let y_col = if active { fg } else { egui::Color32::from_rgb(74, 222, 128) };
+            let x_col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(248, 113, 113)
+            };
+            let y_col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(74, 222, 128)
+            };
             painter.line_segment(
                 [c - egui::vec2(5.5, 0.0), c + egui::vec2(5.5, 0.0)],
                 egui::Stroke::new(1.4, x_col),
@@ -744,10 +756,30 @@ fn draw_transform_tool_icon(
             );
             // Tiny arrowheads on 4 tips
             for (tip, d1, d2, col) in [
-                (egui::vec2(6.0, 0.0), egui::vec2(3.2, -2.2), egui::vec2(3.2, 2.2), x_col),
-                (egui::vec2(-6.0, 0.0), egui::vec2(-3.2, -2.2), egui::vec2(-3.2, 2.2), x_col),
-                (egui::vec2(0.0, -6.0), egui::vec2(-2.2, -3.2), egui::vec2(2.2, -3.2), y_col),
-                (egui::vec2(0.0, 6.0), egui::vec2(-2.2, 3.2), egui::vec2(2.2, 3.2), y_col),
+                (
+                    egui::vec2(6.0, 0.0),
+                    egui::vec2(3.2, -2.2),
+                    egui::vec2(3.2, 2.2),
+                    x_col,
+                ),
+                (
+                    egui::vec2(-6.0, 0.0),
+                    egui::vec2(-3.2, -2.2),
+                    egui::vec2(-3.2, 2.2),
+                    x_col,
+                ),
+                (
+                    egui::vec2(0.0, -6.0),
+                    egui::vec2(-2.2, -3.2),
+                    egui::vec2(2.2, -3.2),
+                    y_col,
+                ),
+                (
+                    egui::vec2(0.0, 6.0),
+                    egui::vec2(-2.2, 3.2),
+                    egui::vec2(2.2, 3.2),
+                    y_col,
+                ),
             ] {
                 painter.add(egui::Shape::convex_polygon(
                     vec![c + tip, c + d1, c + d2],
@@ -758,7 +790,11 @@ fn draw_transform_tool_icon(
         }
         ToolMode::RotateMarker => {
             // Circular orbit arc + arrowhead
-            let arc_col = if active { fg } else { egui::Color32::from_rgb(96, 165, 250) };
+            let arc_col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(96, 165, 250)
+            };
             let r = 5.0;
             let mut pts = Vec::with_capacity(14);
             for i in 0..=12 {
@@ -780,12 +816,24 @@ fn draw_transform_tool_icon(
         }
         ToolMode::ScaleMarker => {
             // Diagonal scale shaft with cube handles at tips
-            let col = if active { fg } else { egui::Color32::from_rgb(250, 204, 21) };
+            let col = if active {
+                fg
+            } else {
+                egui::Color32::from_rgb(250, 204, 21)
+            };
             let a = c + egui::vec2(-4.2, 4.2);
             let b = c + egui::vec2(4.2, -4.2);
             painter.line_segment([a, b], egui::Stroke::new(1.4, col));
-            painter.rect_filled(egui::Rect::from_center_size(a, egui::vec2(3.6, 3.6)), 0.5, col);
-            painter.rect_filled(egui::Rect::from_center_size(b, egui::vec2(4.4, 4.4)), 0.5, col);
+            painter.rect_filled(
+                egui::Rect::from_center_size(a, egui::vec2(3.6, 3.6)),
+                0.5,
+                col,
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(b, egui::vec2(4.4, 4.4)),
+                0.5,
+                col,
+            );
             painter.rect_stroke(
                 egui::Rect::from_center_size(c, egui::vec2(3.0, 3.0)),
                 0.5,

@@ -67,24 +67,39 @@ pub fn draw_left_panel(
                 .show(ui, |ui| {
                     ui.columns(4, |cols| {
                         for (idx, (tab, title, active_fill)) in [
-                            (LeftTab::Layers, "Layers", egui::Color32::from_rgb(14, 116, 144)),
-                            (LeftTab::Catalog, "Catalog", egui::Color32::from_rgb(14, 116, 144)),
-                            (LeftTab::BasicMesh, "Mesh", egui::Color32::from_rgb(109, 40, 217)),
-                            (LeftTab::Animations, "Animasi", egui::Color32::from_rgb(5, 150, 105)),
+                            (
+                                LeftTab::Layers,
+                                "Layers",
+                                egui::Color32::from_rgb(14, 116, 144),
+                            ),
+                            (
+                                LeftTab::Catalog,
+                                "Catalog",
+                                egui::Color32::from_rgb(14, 116, 144),
+                            ),
+                            (
+                                LeftTab::BasicMesh,
+                                "Mesh",
+                                egui::Color32::from_rgb(109, 40, 217),
+                            ),
+                            (
+                                LeftTab::Animations,
+                                "Animasi",
+                                egui::Color32::from_rgb(5, 150, 105),
+                            ),
                         ]
                         .into_iter()
                         .enumerate()
                         {
                             let is_active = state.left_tab == tab;
                             let btn = egui::Button::new(
-                                egui::RichText::new(title)
-                                    .size(10.5)
-                                    .strong()
-                                    .color(if is_active {
+                                egui::RichText::new(title).size(10.5).strong().color(
+                                    if is_active {
                                         egui::Color32::WHITE
                                     } else {
                                         egui::Color32::from_rgb(148, 163, 184)
-                                    }),
+                                    },
+                                ),
                             )
                             .fill(if is_active {
                                 active_fill
@@ -123,7 +138,11 @@ fn draw_eye_toggle_btn(ui: &mut egui::Ui, visible: bool, enabled: bool) -> egui:
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         if enabled && resp.hovered() {
-            p.rect_filled(rect, 3.0, egui::Color32::from_rgba_unmultiplied(148, 163, 184, 34));
+            p.rect_filled(
+                rect,
+                3.0,
+                egui::Color32::from_rgba_unmultiplied(148, 163, 184, 34),
+            );
         }
         let c = rect.center();
         let col = if !enabled {
@@ -162,7 +181,10 @@ fn draw_eye_toggle_btn(ui: &mut egui::Ui, visible: bool, enabled: bool) -> egui:
                 egui::Color32::from_rgb(100, 116, 139)
             };
             p.line_segment(
-                [egui::pos2(c.x - 5.2, c.y - 5.2), egui::pos2(c.x + 5.2, c.y + 5.2)],
+                [
+                    egui::pos2(c.x - 5.2, c.y - 5.2),
+                    egui::pos2(c.x + 5.2, c.y + 5.2),
+                ],
                 egui::Stroke::new(1.5, slash_col),
             );
         }
@@ -184,7 +206,11 @@ fn draw_lock_toggle_btn(ui: &mut egui::Ui, locked: bool, enabled: bool) -> egui:
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         if enabled && resp.hovered() {
-            p.rect_filled(rect, 3.0, egui::Color32::from_rgba_unmultiplied(148, 163, 184, 34));
+            p.rect_filled(
+                rect,
+                3.0,
+                egui::Color32::from_rgba_unmultiplied(148, 163, 184, 34),
+            );
         }
         let c = rect.center();
         let col = if !enabled {
@@ -217,7 +243,12 @@ fn draw_lock_toggle_btn(ui: &mut egui::Ui, locked: bool, enabled: bool) -> egui:
                 egui::Color32::from_rgb(17, 23, 35),
             );
         } else {
-            p.rect_stroke(body, 1.5, egui::Stroke::new(1.2, col), egui::StrokeKind::Middle);
+            p.rect_stroke(
+                body,
+                1.5,
+                egui::Stroke::new(1.2, col),
+                egui::StrokeKind::Middle,
+            );
             // Open shackle (lifted slightly on the right)
             let shackle = vec![
                 egui::pos2(c.x - 2.8, c.y - 0.5),
@@ -236,7 +267,12 @@ fn draw_lock_toggle_btn(ui: &mut egui::Ui, locked: bool, enabled: bool) -> egui:
     })
 }
 
-fn draw_filter_pill(ui: &mut egui::Ui, label: &str, active: bool, active_fill: egui::Color32) -> bool {
+fn draw_filter_pill(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    active_fill: egui::Color32,
+) -> bool {
     let btn = egui::Button::new(
         egui::RichText::new(label)
             .size(10.0)
@@ -282,7 +318,10 @@ fn draw_layers_tab(
                 .desired_width(ui.available_width() - 28.0),
         );
         if ui
-            .add_enabled(!state.layer_search.is_empty(), egui::Button::new("X").small())
+            .add_enabled(
+                !state.layer_search.is_empty(),
+                egui::Button::new("X").small(),
+            )
             .on_hover_text("Hapus kata kunci")
             .clicked()
         {
@@ -590,11 +629,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Go")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            125, 211, 252,
-                                                        )),
+                                                    egui::RichText::new("Go").size(10.5).color(
+                                                        egui::Color32::from_rgb(125, 211, 252),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -773,11 +810,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Go")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            125, 211, 252,
-                                                        )),
+                                                    egui::RichText::new("Go").size(10.5).color(
+                                                        egui::Color32::from_rgb(125, 211, 252),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -827,18 +862,15 @@ fn draw_layers_tab(
                                     toggle_locked_id = Some(b.id);
                                 }
 
-                                ui.label(
-                                    egui::RichText::new("[BLD]")
-                                        .size(9.5)
-                                        .strong()
-                                        .color(if sel {
-                                            egui::Color32::from_rgb(167, 243, 208)
-                                        } else if !vis {
-                                            egui::Color32::from_rgb(100, 116, 139)
-                                        } else {
-                                            egui::Color32::from_rgb(52, 211, 153)
-                                        }),
-                                );
+                                ui.label(egui::RichText::new("[BLD]").size(9.5).strong().color(
+                                    if sel {
+                                        egui::Color32::from_rgb(167, 243, 208)
+                                    } else if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        egui::Color32::from_rgb(52, 211, 153)
+                                    },
+                                ));
 
                                 let label_txt = format!("{} ({:.0}m)", b.name, b.height);
                                 let name_col = if sel {
@@ -902,11 +934,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Go")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            125, 211, 252,
-                                                        )),
+                                                    egui::RichText::new("Go").size(10.5).color(
+                                                        egui::Color32::from_rgb(125, 211, 252),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -1061,11 +1091,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Go")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            125, 211, 252,
-                                                        )),
+                                                    egui::RichText::new("Go").size(10.5).color(
+                                                        egui::Color32::from_rgb(125, 211, 252),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -1212,11 +1240,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Go")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            125, 211, 252,
-                                                        )),
+                                                    egui::RichText::new("Go").size(10.5).color(
+                                                        egui::Color32::from_rgb(125, 211, 252),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -1373,11 +1399,9 @@ fn draw_layers_tab(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            52, 211, 153,
-                                                        )),
+                                                    egui::RichText::new("Play").size(10.5).color(
+                                                        egui::Color32::from_rgb(52, 211, 153),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -1483,9 +1507,15 @@ fn draw_layers_tab(
                                 }
 
                                 let tag_col = match sk {
-                                    ShootAnimKind::WaterCannon => egui::Color32::from_rgb(56, 189, 248),
-                                    ShootAnimKind::StoneThrow => egui::Color32::from_rgb(251, 191, 36),
-                                    ShootAnimKind::TearGas => egui::Color32::from_rgb(203, 213, 225),
+                                    ShootAnimKind::WaterCannon => {
+                                        egui::Color32::from_rgb(56, 189, 248)
+                                    }
+                                    ShootAnimKind::StoneThrow => {
+                                        egui::Color32::from_rgb(251, 191, 36)
+                                    }
+                                    ShootAnimKind::TearGas => {
+                                        egui::Color32::from_rgb(203, 213, 225)
+                                    }
                                     ShootAnimKind::Bullet => egui::Color32::from_rgb(248, 113, 113),
                                     ShootAnimKind::Apar => egui::Color32::from_rgb(52, 211, 153),
                                 };
@@ -1512,9 +1542,12 @@ fn draw_layers_tab(
                                 let range_m = shoot_anim_range_m(a);
                                 let resp = ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(format!("{} ({:.0}m)", a.name, range_m))
-                                            .size(11.5)
-                                            .color(name_col),
+                                        egui::RichText::new(format!(
+                                            "{} ({:.0}m)",
+                                            a.name, range_m
+                                        ))
+                                        .size(11.5)
+                                        .color(name_col),
                                     )
                                     .truncate()
                                     .sense(egui::Sense::click()),
@@ -1567,11 +1600,9 @@ fn draw_layers_tab(
                                             .add_enabled(
                                                 anim_is_playable(a, &state.markers),
                                                 egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            56, 189, 248,
-                                                        )),
+                                                    egui::RichText::new("Play").size(10.5).color(
+                                                        egui::Color32::from_rgb(56, 189, 248),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -1660,9 +1691,7 @@ fn draw_layers_tab(
                     };
                     let (tag, tag_col) = match cfg.kind {
                         ParticleAnimKind::Fire => ("API", egui::Color32::from_rgb(251, 146, 60)),
-                        ParticleAnimKind::Smoke => {
-                            ("ASAP", egui::Color32::from_rgb(203, 213, 225))
-                        }
+                        ParticleAnimKind::Smoke => ("ASAP", egui::Color32::from_rgb(203, 213, 225)),
                         ParticleAnimKind::Explosion => {
                             ("LED", egui::Color32::from_rgb(248, 113, 113))
                         }
@@ -1755,18 +1784,14 @@ fn draw_layers_tab(
                                             .add_enabled(
                                                 anim_is_playable(a, &state.markers),
                                                 egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            251, 146, 60,
-                                                        )),
+                                                    egui::RichText::new("Play").size(10.5).color(
+                                                        egui::Color32::from_rgb(251, 146, 60),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
                                             )
-                                            .on_hover_text(
-                                                "Play animasi partikel di Play Skenario",
-                                            )
+                                            .on_hover_text("Play animasi partikel di Play Skenario")
                                             .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
@@ -1863,16 +1888,13 @@ fn draw_layers_tab(
                                 if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
                                     toggle_locked_id = Some(a.id);
                                 }
-                                ui.label(
-                                    egui::RichText::new("[PANAH]")
-                                        .size(8.5)
-                                        .strong()
-                                        .color(if !vis {
-                                            egui::Color32::from_rgb(100, 116, 139)
-                                        } else {
-                                            egui::Color32::from_rgb(250, 204, 21)
-                                        }),
-                                );
+                                ui.label(egui::RichText::new("[PANAH]").size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        egui::Color32::from_rgb(250, 204, 21)
+                                    },
+                                ));
                                 let name_col = if sel {
                                     egui::Color32::WHITE
                                 } else if !vis {
@@ -1935,11 +1957,9 @@ fn draw_layers_tab(
                                             .add_enabled(
                                                 anim_is_playable(a, &state.markers),
                                                 egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(
-                                                            250, 204, 21,
-                                                        )),
+                                                    egui::RichText::new("Play").size(10.5).color(
+                                                        egui::Color32::from_rgb(250, 204, 21),
+                                                    ),
                                                 )
                                                 .small()
                                                 .frame(false),
@@ -2045,25 +2065,20 @@ fn draw_layers_tab(
                                     toggle_locked_id = Some(a.id);
                                 }
                                 let (tag_txt, tag_col) = match act {
-                                    SpawnHideAction::Spawn => (
-                                        "[SPAWN]",
-                                        egui::Color32::from_rgb(52, 211, 153),
-                                    ),
-                                    SpawnHideAction::Hide => (
-                                        "[HIDE]",
-                                        egui::Color32::from_rgb(251, 113, 133),
-                                    ),
+                                    SpawnHideAction::Spawn => {
+                                        ("[SPAWN]", egui::Color32::from_rgb(52, 211, 153))
+                                    }
+                                    SpawnHideAction::Hide => {
+                                        ("[HIDE]", egui::Color32::from_rgb(251, 113, 133))
+                                    }
                                 };
-                                ui.label(
-                                    egui::RichText::new(tag_txt)
-                                        .size(8.5)
-                                        .strong()
-                                        .color(if !vis {
-                                            egui::Color32::from_rgb(100, 116, 139)
-                                        } else {
-                                            tag_col
-                                        }),
-                                );
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        tag_col
+                                    },
+                                ));
                                 let name_col = if sel {
                                     egui::Color32::WHITE
                                 } else if !vis {
@@ -2133,7 +2148,9 @@ fn draw_layers_tab(
                                                 .small()
                                                 .frame(false),
                                             )
-                                            .on_hover_text("Play animasi Spawn / Hide di Play Skenario")
+                                            .on_hover_text(
+                                                "Play animasi Spawn / Hide di Play Skenario",
+                                            )
                                             .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
@@ -2230,25 +2247,20 @@ fn draw_layers_tab(
                                     toggle_locked_id = Some(a.id);
                                 }
                                 let (tag_txt, tag_col) = match mode {
-                                    GroupAnimMode::Combine => (
-                                        "[COMBINE]",
-                                        egui::Color32::from_rgb(96, 165, 250),
-                                    ),
-                                    GroupAnimMode::Sequence => (
-                                        "[SEQ]",
-                                        egui::Color32::from_rgb(192, 132, 252),
-                                    ),
+                                    GroupAnimMode::Combine => {
+                                        ("[COMBINE]", egui::Color32::from_rgb(96, 165, 250))
+                                    }
+                                    GroupAnimMode::Sequence => {
+                                        ("[SEQ]", egui::Color32::from_rgb(192, 132, 252))
+                                    }
                                 };
-                                ui.label(
-                                    egui::RichText::new(tag_txt)
-                                        .size(8.5)
-                                        .strong()
-                                        .color(if !vis {
-                                            egui::Color32::from_rgb(100, 116, 139)
-                                        } else {
-                                            tag_col
-                                        }),
-                                );
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        tag_col
+                                    },
+                                ));
                                 let name_col = if sel {
                                     egui::Color32::WHITE
                                 } else if !vis {
@@ -2473,10 +2485,7 @@ fn draw_catalog_tab(
         .id_salt("godot_catalog_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let dragging_id = state
-                .dragging_catalog_entry
-                .as_ref()
-                .map(|e| e.id.clone());
+            let dragging_id = state.dragging_catalog_entry.as_ref().map(|e| e.id.clone());
 
             for entry in &state.catalog {
                 if ready_only && !entry.ready {
@@ -2600,14 +2609,13 @@ fn draw_catalog_tab(
 
                             // Right area: prominent + Tambah button
                             let add_btn = egui::Button::new(
-                                egui::RichText::new("+ Tambah")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(if editable {
+                                egui::RichText::new("+ Tambah").size(10.5).strong().color(
+                                    if editable {
                                         egui::Color32::WHITE
                                     } else {
                                         egui::Color32::from_rgb(100, 116, 139)
-                                    }),
+                                    },
+                                ),
                             )
                             .fill(if editable {
                                 egui::Color32::from_rgb(5, 150, 105)
@@ -2973,9 +2981,11 @@ fn draw_animations_tab(
             .color(egui::Color32::WHITE),
     );
     ui.label(
-        egui::RichText::new("Buat animasi berdasarkan kategori, lalu atur urutannya di daftar bawah.")
-            .size(10.5)
-            .color(egui::Color32::from_rgb(110, 231, 183)),
+        egui::RichText::new(
+            "Buat animasi berdasarkan kategori, lalu atur urutannya di daftar bawah.",
+        )
+        .size(10.5)
+        .color(egui::Color32::from_rgb(110, 231, 183)),
     );
     ui.add_space(5.0);
 
@@ -2987,29 +2997,27 @@ fn draw_animations_tab(
         .show(ui, |ui| {
             let draw_cat_btn = |col_ui: &mut egui::Ui, state: &mut AppState, cat: AnimCategory| {
                 let active = state.anim_category_filter == cat;
-                let btn = egui::Button::new(
-                    egui::RichText::new(cat.label())
-                        .size(10.5)
-                        .strong()
-                        .color(if active {
+                let btn =
+                    egui::Button::new(egui::RichText::new(cat.label()).size(10.5).strong().color(
+                        if active {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(148, 163, 184)
-                        }),
-                )
-                .fill(if active {
-                    match cat {
-                        AnimCategory::Route => egui::Color32::from_rgb(5, 150, 105),
-                        AnimCategory::Shoot => egui::Color32::from_rgb(185, 28, 28),
-                        AnimCategory::Particle => egui::Color32::from_rgb(234, 88, 12),
-                        AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
-                        AnimCategory::Group => egui::Color32::from_rgb(79, 70, 229),
-                        AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
-                    }
-                } else {
-                    egui::Color32::from_rgb(22, 30, 45)
-                })
-                .min_size(egui::vec2(col_ui.available_width(), 22.0));
+                        },
+                    ))
+                    .fill(if active {
+                        match cat {
+                            AnimCategory::Route => egui::Color32::from_rgb(5, 150, 105),
+                            AnimCategory::Shoot => egui::Color32::from_rgb(185, 28, 28),
+                            AnimCategory::Particle => egui::Color32::from_rgb(234, 88, 12),
+                            AnimCategory::SpawnHide => egui::Color32::from_rgb(109, 40, 217),
+                            AnimCategory::Group => egui::Color32::from_rgb(79, 70, 229),
+                            AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
+                        }
+                    } else {
+                        egui::Color32::from_rgb(22, 30, 45)
+                    })
+                    .min_size(egui::vec2(col_ui.available_width(), 22.0));
                 if col_ui.add(btn).clicked() {
                     state.anim_category_filter = cat;
                 }
@@ -4739,8 +4747,7 @@ fn draw_ordered_animation_list(
         state.selected = SelectedEntity::Anim(a.id);
         state.anim_edit = Some(a);
         if is_p {
-            state.particle_preview_reset_nonce =
-                state.particle_preview_reset_nonce.wrapping_add(1);
+            state.particle_preview_reset_nonce = state.particle_preview_reset_nonce.wrapping_add(1);
         }
         if is_s {
             state.shoot_preview_reset_nonce = state.shoot_preview_reset_nonce.wrapping_add(1);

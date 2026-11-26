@@ -65,13 +65,13 @@ pub fn draw_password_input(
 
         paint_eye_icon(painter, btn_rect.center(), *show, icon_col, bg_fill);
 
-        let btn_resp = btn_resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(
-            if *show {
+        let btn_resp = btn_resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if *show {
                 "Sembunyikan password"
             } else {
                 "Tampilkan password"
-            },
-        );
+            });
         if btn_resp.clicked() {
             *show = !*show;
         }

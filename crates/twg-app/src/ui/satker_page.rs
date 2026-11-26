@@ -13,7 +13,9 @@ use crate::{
     scene::markers::current_auth,
     state::{AppState, PlaybackState, SatkerModalMode},
     ui::{
-        nav_bar::{draw_global_top_bar, draw_modal_backdrop, format_timestamp, trigger_load_satkers},
+        nav_bar::{
+            draw_global_top_bar, draw_modal_backdrop, format_timestamp, trigger_load_satkers,
+        },
         table::{
             TABLE_COL_GAP, TABLE_PAD_LEFT, TABLE_PAD_RIGHT, TABLE_SCROLLBAR_RESERVE,
             draw_aligned_row, draw_header_label, table_content_width,
@@ -421,7 +423,10 @@ fn draw_satker_modal(ctx: &egui::Context, state: &mut AppState, api: &ApiClientB
                 .frame(
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgb(17, 24, 39))
-                        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)))
+                        .stroke(egui::Stroke::new(
+                            1.5,
+                            egui::Color32::from_rgb(56, 189, 248),
+                        ))
                         .corner_radius(8.0)
                         .inner_margin(egui::Margin::same(18)),
                 )
@@ -594,9 +599,7 @@ fn draw_satker_modal(ctx: &egui::Context, state: &mut AppState, api: &ApiClientB
 
             if close {
                 state.satker_table.close_modal();
-            } else if confirm
-                && let Some(auth) = current_auth(state)
-            {
+            } else if confirm && let Some(auth) = current_auth(state) {
                 state.satker_table.submitting = true;
                 state.satker_table.form_error = None;
                 api.send(ApiCommand::DeleteSatker {

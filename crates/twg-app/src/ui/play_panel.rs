@@ -14,9 +14,7 @@ use twg_shared::{
         parse_stone_throw_config, parse_tear_gas_config, parse_water_cannon_config,
         shoot_anim_is_continuous, shoot_anim_kind,
     },
-    spawn_hide_anim::{
-        SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config,
-    },
+    spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
 };
 use uuid::Uuid;
 
@@ -26,9 +24,7 @@ use crate::{
         client::ApiClientBridge,
         ws_client::{WsClientBridge, WsOutCommand},
     },
-    scene::{
-        anim_primary_focus_lnglat, play_rts::PlayRtsState, playback::route_total_length_m,
-    },
+    scene::{anim_primary_focus_lnglat, play_rts::PlayRtsState, playback::route_total_length_m},
     state::{
         AnimCategory, AnimRunStatus, AppScreen, AppState, PlayPanelTab, PlaySessionMode,
         PlaybackState,
@@ -1962,7 +1958,12 @@ mod tests {
         }
     }
 
-    fn dummy_anim(name: &str, anim_type: &str, marker_id: Option<Uuid>, data: serde_json::Value) -> Anim {
+    fn dummy_anim(
+        name: &str,
+        anim_type: &str,
+        marker_id: Option<Uuid>,
+        data: serde_json::Value,
+    ) -> Anim {
         let now = Utc::now();
         Anim {
             id: Uuid::new_v4(),
@@ -2006,15 +2007,55 @@ mod tests {
         );
 
         let all_anims = vec![shoot_anim.clone(), pointer_anim.clone()];
-        assert!(anim_matches_play_search(&shoot_anim, &all_anims, &markers, ""));
-        assert!(anim_matches_play_search(&shoot_anim, &all_anims, &markers, "gerbang"));
-        assert!(anim_matches_play_search(&shoot_anim, &all_anims, &markers, "awc 01"));
-        assert!(anim_matches_play_search(&shoot_anim, &all_anims, &markers, "water gerbang"));
-        assert!(!anim_matches_play_search(&shoot_anim, &all_anims, &markers, "patwal"));
+        assert!(anim_matches_play_search(
+            &shoot_anim,
+            &all_anims,
+            &markers,
+            ""
+        ));
+        assert!(anim_matches_play_search(
+            &shoot_anim,
+            &all_anims,
+            &markers,
+            "gerbang"
+        ));
+        assert!(anim_matches_play_search(
+            &shoot_anim,
+            &all_anims,
+            &markers,
+            "awc 01"
+        ));
+        assert!(anim_matches_play_search(
+            &shoot_anim,
+            &all_anims,
+            &markers,
+            "water gerbang"
+        ));
+        assert!(!anim_matches_play_search(
+            &shoot_anim,
+            &all_anims,
+            &markers,
+            "patwal"
+        ));
 
-        assert!(anim_matches_play_search(&pointer_anim, &all_anims, &markers, "titik kumpul"));
-        assert!(anim_matches_play_search(&pointer_anim, &all_anims, &markers, "panah sedan"));
-        assert!(!anim_matches_play_search(&pointer_anim, &all_anims, &markers, "gerbang"));
+        assert!(anim_matches_play_search(
+            &pointer_anim,
+            &all_anims,
+            &markers,
+            "titik kumpul"
+        ));
+        assert!(anim_matches_play_search(
+            &pointer_anim,
+            &all_anims,
+            &markers,
+            "panah sedan"
+        ));
+        assert!(!anim_matches_play_search(
+            &pointer_anim,
+            &all_anims,
+            &markers,
+            "gerbang"
+        ));
     }
 
     #[test]

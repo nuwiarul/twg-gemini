@@ -1,8 +1,4 @@
-use bevy::{
-    ecs::system::NonSendMarker,
-    prelude::*,
-    winit::WINIT_WINDOWS,
-};
+use bevy::{ecs::system::NonSendMarker, prelude::*, winit::WINIT_WINDOWS};
 use bevy_egui::egui;
 
 const APP_ICON_64_PNG: &[u8] = include_bytes!("../../../../packaging/icons/twg-app-64.png");
@@ -15,10 +11,7 @@ fn decode_winit_icon(png_bytes: &[u8]) -> Option<winit::window::Icon> {
 }
 
 /// Applies the embedded TWG-3D icon to the OS window titlebar & taskbar and maximizes the window once created.
-pub fn set_winit_window_icon_system(
-    _main_thread: NonSendMarker,
-    mut applied: Local<bool>,
-) {
+pub fn set_winit_window_icon_system(_main_thread: NonSendMarker, mut applied: Local<bool>) {
     if *applied {
         return;
     }
@@ -54,8 +47,9 @@ pub fn set_winit_window_icon_system(
 /// Lazily uploads the embedded 64x64 TWG-3D PNG into egui's texture cache and draws it at `size x size`.
 pub fn draw_app_brand_icon(ui: &mut egui::Ui, size: f32) {
     let tex_id = egui::Id::new("twg_app_brand_icon_texture");
-    let handle = if let Some(existing) =
-        ui.ctx().data(|data| data.get_temp::<egui::TextureHandle>(tex_id))
+    let handle = if let Some(existing) = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(tex_id))
     {
         Some(existing)
     } else if let Ok(img) = image::load_from_memory(APP_ICON_64_PNG) {
@@ -107,6 +101,9 @@ mod tests {
             d.get_temp::<egui::TextureHandle>(egui::Id::new("twg_app_brand_icon_texture"))
                 .is_some()
         });
-        assert!(cached, "brand icon texture should be cached in egui context");
+        assert!(
+            cached,
+            "brand icon texture should be cached in egui context"
+        );
     }
 }

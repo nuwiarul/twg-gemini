@@ -790,8 +790,7 @@ fn draw_user_modal(ctx: &egui::Context, state: &mut AppState, api: &ApiClientBri
                     && !password.trim().is_empty()
                     && password.trim().len() < 6
                 {
-                    state.user_table.form_error =
-                        Some("Password baru minimal 6 karakter.".into());
+                    state.user_table.form_error = Some("Password baru minimal 6 karakter.".into());
                 } else if role.is_satker_role() && satker_id.is_none() {
                     state.user_table.form_error =
                         Some("Satker wajib dipilih untuk role Admin Satker / User Satker.".into());
@@ -904,9 +903,7 @@ fn draw_user_modal(ctx: &egui::Context, state: &mut AppState, api: &ApiClientBri
 
             if close {
                 state.user_table.close_modal();
-            } else if confirm
-                && let Some(auth) = current_auth(state)
-            {
+            } else if confirm && let Some(auth) = current_auth(state) {
                 state.user_table.submitting = true;
                 state.user_table.form_error = None;
                 api.send(ApiCommand::DeleteUser { auth, id: user.id });

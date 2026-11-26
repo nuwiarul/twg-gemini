@@ -4,12 +4,8 @@ use bevy_egui::egui;
 use crate::{
     map::camera::TacticalCamera,
     scene::{
-        basic_mesh::BasicMeshShape,
-        markers::MarkerWorldBounds,
-        parse_hex_color,
-        play_rts::PlayRtsState,
-        playback::PlaybackOverrides,
-        pointer_arrow::PointerArrowVisualPool,
+        basic_mesh::BasicMeshShape, markers::MarkerWorldBounds, parse_hex_color,
+        play_rts::PlayRtsState, playback::PlaybackOverrides, pointer_arrow::PointerArrowVisualPool,
     },
     state::{AnimRunStatus, AppState, PlaybackState, ToolMode},
 };
@@ -74,11 +70,7 @@ pub fn draw_projected_labels(
                 } else {
                     (m.lng, m.lat, m.altitude)
                 };
-                Vec3::from_array(
-                    state
-                        .geo_anchor
-                        .lng_lat_alt_to_local(lng, lat, alt + 10.0),
-                )
+                Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt + 10.0))
             };
             if let Ok(screen) = camera.world_to_viewport(cam_gtf, world_pos) {
                 let pos = egui::pos2(screen.x, screen.y);
@@ -193,21 +185,30 @@ pub fn draw_projected_labels(
         // Editor active tool hint overlay in top-left of viewport
         let has_selected_marker = matches!(state.selected, crate::state::SelectedEntity::Marker(_));
         let hint = match state.tool_mode {
-            ToolMode::MoveMarker => if has_selected_marker {
-                "Mode Move (2): Drag panah X / Y (Alt) / Z atau lingkaran tengah untuk Free Move".to_string()
-            } else {
-                "Mode Move (2): Klik objek 3D di peta untuk menampilkan Gizmo Move".to_string()
-            },
-            ToolMode::RotateMarker => if has_selected_marker {
-                "Mode Rotate (3): Drag cincin X / Y / Z atau bola tengah untuk Free Rotate".to_string()
-            } else {
-                "Mode Rotate (3): Klik objek 3D di peta untuk menampilkan Gizmo Rotate".to_string()
-            },
-            ToolMode::ScaleMarker => if has_selected_marker {
-                "Mode Scale (4): Drag kubus X / Y / Z atau kubus tengah untuk Free Scale (X, Y, Z)".to_string()
-            } else {
-                "Mode Scale (4): Klik objek 3D di peta untuk menampilkan Gizmo Scale".to_string()
-            },
+            ToolMode::MoveMarker => {
+                if has_selected_marker {
+                    "Mode Move (2): Drag panah X / Y (Alt) / Z atau lingkaran tengah untuk Free Move".to_string()
+                } else {
+                    "Mode Move (2): Klik objek 3D di peta untuk menampilkan Gizmo Move".to_string()
+                }
+            }
+            ToolMode::RotateMarker => {
+                if has_selected_marker {
+                    "Mode Rotate (3): Drag cincin X / Y / Z atau bola tengah untuk Free Rotate"
+                        .to_string()
+                } else {
+                    "Mode Rotate (3): Klik objek 3D di peta untuk menampilkan Gizmo Rotate"
+                        .to_string()
+                }
+            }
+            ToolMode::ScaleMarker => {
+                if has_selected_marker {
+                    "Mode Scale (4): Drag kubus X / Y / Z atau kubus tengah untuk Free Scale (X, Y, Z)".to_string()
+                } else {
+                    "Mode Scale (4): Klik objek 3D di peta untuk menampilkan Gizmo Scale"
+                        .to_string()
+                }
+            }
             ToolMode::DrawLine => format!(
                 "Mode Draw Line: {} titik — Klik peta untuk tambah, Enter selesai, Esc batal",
                 state.draft_points_lnglat.len()
@@ -257,10 +258,17 @@ pub fn draw_projected_labels(
             painter.rect_stroke(
                 rect,
                 6.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(56, 189, 248, 160)),
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(56, 189, 248, 160),
+                ),
                 egui::StrokeKind::Inside,
             );
-            painter.galley(rect.min + pad, galley, egui::Color32::from_rgb(186, 230, 253));
+            painter.galley(
+                rect.min + pad,
+                galley,
+                egui::Color32::from_rgb(186, 230, 253),
+            );
         }
     }
 }
@@ -284,7 +292,10 @@ fn draw_badge(
     painter.rect_stroke(
         rect,
         4.0,
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(56, 189, 248, 120)),
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(56, 189, 248, 120),
+        ),
         egui::StrokeKind::Inside,
     );
     painter.galley(rect.min + pad, galley, text_color);
@@ -301,7 +312,10 @@ fn draw_pointer_label(
 ) {
     let font = egui::FontId::proportional(font_size.clamp(8.0, 56.0));
     let galley = painter.layout_no_wrap(text.to_string(), font.clone(), text_color);
-    let pad = egui::vec2((font_size * 0.42).clamp(6.0, 16.0), (font_size * 0.20).clamp(3.0, 9.0));
+    let pad = egui::vec2(
+        (font_size * 0.42).clamp(6.0, 16.0),
+        (font_size * 0.20).clamp(3.0, 9.0),
+    );
     let rect = egui::Rect::from_center_size(center, galley.size() + pad * 2.0);
     if show_bg {
         painter.rect_filled(
@@ -365,7 +379,8 @@ pub fn draw_catalog_drag_ghost(
     let pad = egui::vec2(10.0, 7.0);
     let width = title_galley.size().x.max(sub_galley.size().x) + pad.x * 2.0;
     let height = title_galley.size().y + 3.0 + sub_galley.size().y + pad.y * 2.0;
-    let rect = egui::Rect::from_min_size(pointer + egui::vec2(16.0, 14.0), egui::vec2(width, height));
+    let rect =
+        egui::Rect::from_min_size(pointer + egui::vec2(16.0, 14.0), egui::vec2(width, height));
 
     let border = if drop_lnglat.is_some() {
         egui::Color32::from_rgb(16, 185, 129)
@@ -423,7 +438,8 @@ pub fn draw_basic_mesh_drag_ghost(
     let pad = egui::vec2(10.0, 7.0);
     let width = title_galley.size().x.max(sub_galley.size().x) + pad.x * 2.0;
     let height = title_galley.size().y + 3.0 + sub_galley.size().y + pad.y * 2.0;
-    let rect = egui::Rect::from_min_size(pointer + egui::vec2(16.0, 14.0), egui::vec2(width, height));
+    let rect =
+        egui::Rect::from_min_size(pointer + egui::vec2(16.0, 14.0), egui::vec2(width, height));
 
     let border = if drop_lnglat.is_some() {
         egui::Color32::from_rgb(16, 185, 129)
