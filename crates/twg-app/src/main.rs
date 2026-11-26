@@ -49,6 +49,7 @@ use crate::{
         playback::{PlaybackOverrides, playback_system},
         pointer_arrow::{PointerArrowVisualPool, pointer_arrow_visual_system},
         polygon_edit::PolygonEditState,
+        plot_line_edit::PlotLineEditState,
         route_edit::RouteEditState,
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
@@ -131,6 +132,7 @@ fn main() {
         .init_resource::<PlayRtsState>()
         .init_resource::<TransformGizmoState>()
         .init_resource::<PolygonEditState>()
+        .init_resource::<PlotLineEditState>()
         .init_resource::<RouteEditState>()
         .init_resource::<WaterCannonVisualPool>()
         .init_resource::<ShootFxVisualPool>()

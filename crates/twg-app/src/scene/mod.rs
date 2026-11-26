@@ -8,6 +8,7 @@ pub mod media_preview;
 pub mod particle_fx;
 pub mod play_rts;
 pub mod playback;
+pub mod plot_line_edit;
 pub mod pointer_arrow;
 pub mod polygon_edit;
 pub mod route_edit;

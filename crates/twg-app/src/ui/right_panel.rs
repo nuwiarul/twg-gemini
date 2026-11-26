@@ -2384,6 +2384,13 @@ fn draw_line_inspector(
                     .size(11.0)
                     .color(egui::Color32::from_rgb(148, 163, 184)),
             );
+            ui.label(
+                egui::RichText::new(
+                    "Edit di peta: pilih titik untuk Gizmo 2D X/Z atau gerak bebas. Klik (+) untuk menyisipkan titik.",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(125, 211, 252)),
+            );
         });
     });
 

@@ -56,6 +56,11 @@ use crate::{
         },
         play_rts::PlayRtsState,
         playback::{PlaybackOverrides, route_estimated_duration_sec},
+        plot_line_edit::{
+            PlotLineEditState, PlotLineGizmoHandle, PlotLineHoverTarget, begin_plot_line_drag,
+            hit_test_any_plot_line, hit_test_plot_line_editor, insert_plot_line_midpoint,
+            remove_plot_line_point, update_plot_line_drag,
+        },
         polygon_edit::{
             PolygonEditState, PolygonHoverTarget, PolygonVertexGizmoHandle, begin_vertex_drag,
             ensure_editable_polygon_points, hit_test_polygon_editor, insert_midpoint_after,
@@ -2025,6 +2030,7 @@ pub fn map_interaction_system(
     marker_bounds: Res<MarkerWorldBounds>,
     mut gizmo_state: ResMut<TransformGizmoState>,
     mut poly_edit: ResMut<PolygonEditState>,
+    mut plot_line_edit: ResMut<PlotLineEditState>,
     mut route_edit: ResMut<RouteEditState>,
     api: Res<ApiClientBridge>,
     ws: Res<WsClientBridge>,
@@ -2037,6 +2043,7 @@ pub fn map_interaction_system(
     if state.screen != AppScreen::PlotSkenario {
         gizmo_state.cancel();
         poly_edit.clear();
+        plot_line_edit.clear();
         route_edit.clear();
         state.dragging_catalog_entry = None;
         state.dragging_basic_mesh = None;
@@ -2048,6 +2055,7 @@ pub fn map_interaction_system(
         // Editor gizmos, polygon/route editing, and catalog placement are inactive in Play Skenario;
         // Play Skenario RTS selection & `tools` 3D Move Gizmo are owned by `play_rts_interaction_system`.
         poly_edit.clear();
+        plot_line_edit.clear();
         route_edit.clear();
         state.picking_marker_for_anim_id = None;
         state.picking_shoot_for_anim_id = None;
@@ -2103,6 +2111,26 @@ pub fn map_interaction_system(
         }
     }
 
+    // Selecting a Plot Line opens its waypoint editor directly on the map.
+    if let SelectedEntity::Line(line_id) = state.selected
+        && state.tool_mode.is_transform_tool()
+        && !state.locked_entity_ids.contains(&line_id)
+        && state
+            .lines
+            .iter()
+            .find(|line| line.id == line_id)
+            .is_some_and(|line| line.geom.len() >= 2)
+    {
+        if plot_line_edit.editing_line_id != Some(line_id) {
+            plot_line_edit.editing_line_id = Some(line_id);
+            plot_line_edit.selected_point = None;
+            plot_line_edit.hovered = None;
+            plot_line_edit.active_drag = None;
+        }
+    } else {
+        plot_line_edit.clear();
+    }
+
     // Keep PolygonEditState synchronized with current selection, lock status & shape
     if let Some(edit_id) = poly_edit.editing_marker_id {
         let valid = matches!(state.selected, SelectedEntity::Marker(sid) if sid == edit_id)
@@ -2147,6 +2175,16 @@ pub fn map_interaction_system(
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         if ctrl && keys.just_pressed(KeyCode::KeyS) && !playback.play_test_mode {
             save_all_scenario_changes(&mut state, &api, &ws);
+            return;
+        }
+        if !playback.play_test_mode
+            && let Some(line_id) = plot_line_edit.editing_line_id
+            && let Some(point_index) = plot_line_edit.selected_point
+            && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
+        {
+            if remove_plot_line_point(&mut state, line_id, point_index) {
+                plot_line_edit.selected_point = None;
+            }
             return;
         }
         // Delete / Backspace removes the currently selected route waypoint directly on the map!
@@ -2353,6 +2391,31 @@ pub fn map_interaction_system(
         return;
     };
 
+    // Release an active Plot Line point drag. A click without moving is only a selection.
+    if (mouse_buttons.just_released(MouseButton::Left) || !mouse_buttons.pressed(MouseButton::Left))
+        && let Some(finished) = plot_line_edit.active_drag.take()
+    {
+        gizmo_state.suppress_camera_pan = false;
+        gizmo_state.empty_click_start_px = None;
+        if finished.moved {
+            state.status_banner = Some(format!(
+                "Titik Plot Line dipindahkan — {} perubahan belum disimpan (Simpan / Ctrl+S)",
+                state.unsaved_change_count()
+            ));
+        }
+        return;
+    }
+
+    // Continue Plot Line drags from the original click, matching route waypoint behavior.
+    if plot_line_edit.active_drag.is_some() && mouse_buttons.pressed(MouseButton::Left) {
+        if let Some(cursor_px) = window.cursor_position() {
+            let mut drag = plot_line_edit.active_drag.take().unwrap();
+            update_plot_line_drag(&mut drag, cursor_px, &mut state, camera, cam_gtf);
+            plot_line_edit.active_drag = Some(drag);
+        }
+        return;
+    }
+
     // Release active route waypoint gizmo drag
     if (mouse_buttons.just_released(MouseButton::Left) || !mouse_buttons.pressed(MouseButton::Left))
         && let Some(finished) = route_edit.active_drag.take()
@@ -2462,6 +2525,7 @@ pub fn map_interaction_system(
         gizmo_state.hovered_handle = None;
         gizmo_state.hovered_entity = None;
         poly_edit.hovered = None;
+        plot_line_edit.hovered = None;
         route_edit.hovered = None;
         return;
     }
@@ -2470,12 +2534,28 @@ pub fn map_interaction_system(
         gizmo_state.hovered_handle = None;
         gizmo_state.hovered_entity = None;
         poly_edit.hovered = None;
+        plot_line_edit.hovered = None;
         route_edit.hovered = None;
         return;
     };
 
-    // Continuous hover hit-testing: Route Edit -> Polygon Edit -> Object Transform Gizmo
+    // Continuous hover hit-testing: Plot Line -> Route -> Polygon -> Object Transform Gizmo
     if !playback.play_test_mode
+        && let Some(line_id) = plot_line_edit.editing_line_id
+    {
+        plot_line_edit.hovered = hit_test_plot_line_editor(
+            cursor_px,
+            &state,
+            line_id,
+            plot_line_edit.selected_point,
+            camera,
+            cam_gtf,
+        );
+        route_edit.hovered = None;
+        poly_edit.hovered = None;
+        gizmo_state.hovered_handle = None;
+        gizmo_state.hovered_entity = None;
+    } else if !playback.play_test_mode
         && let Some(edit_id) = route_edit.editing_anim_id
     {
         route_edit.hovered = state.anims.iter().find(|a| a.id == edit_id).and_then(|a| {
@@ -2510,6 +2590,7 @@ pub fn map_interaction_system(
         gizmo_state.hovered_handle = None;
         gizmo_state.hovered_entity = None;
     } else {
+        plot_line_edit.hovered = None;
         route_edit.hovered = None;
         poly_edit.hovered = None;
 
@@ -2571,6 +2652,7 @@ pub fn map_interaction_system(
 
     // Continuous 3D body / label / route-line hover detection in transform modes & Pick modes
     gizmo_state.hovered_entity = if !poly_edit.is_active()
+        && plot_line_edit.editing_line_id.is_none()
         && route_edit.hovered.is_none()
         && !route_edit.add_point_on_map_mode
         && (state.tool_mode.is_transform_tool()
@@ -2614,6 +2696,87 @@ pub fn map_interaction_system(
 
     if !mouse_buttons.just_pressed(MouseButton::Left) {
         return;
+    }
+
+    // Priority 0a: Interactive Plot Line point editing.
+    if !playback.play_test_mode
+        && let Some(line_id) = plot_line_edit.editing_line_id
+    {
+        match plot_line_edit.hovered {
+            Some(PlotLineHoverTarget::GizmoHandle(handle)) => {
+                if let Some(index) = plot_line_edit.selected_point
+                    && let Some(drag) = begin_plot_line_drag(
+                        &state, line_id, index, handle, cursor_px, camera, cam_gtf,
+                    )
+                {
+                    plot_line_edit.active_drag = Some(drag);
+                    gizmo_state.suppress_camera_pan = true;
+                    gizmo_state.empty_click_start_px = None;
+                }
+                return;
+            }
+            Some(PlotLineHoverTarget::Point(index)) => {
+                plot_line_edit.selected_point = Some(index);
+                plot_line_edit.active_drag = begin_plot_line_drag(
+                    &state,
+                    line_id,
+                    index,
+                    PlotLineGizmoHandle::Free,
+                    cursor_px,
+                    camera,
+                    cam_gtf,
+                );
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                state.status_banner = Some(format!(
+                    "Titik #{} Plot Line dipilih — tarik untuk memindahkan titik.",
+                    index + 1
+                ));
+                return;
+            }
+            Some(PlotLineHoverTarget::Midpoint(segment_index)) => {
+                if let Some(index) = insert_plot_line_midpoint(&mut state, line_id, segment_index)
+                {
+                    plot_line_edit.selected_point = Some(index);
+                    plot_line_edit.active_drag = begin_plot_line_drag(
+                        &state,
+                        line_id,
+                        index,
+                        PlotLineGizmoHandle::Free,
+                        cursor_px,
+                        camera,
+                        cam_gtf,
+                    );
+                    gizmo_state.suppress_camera_pan = true;
+                    gizmo_state.empty_click_start_px = None;
+                    state.status_banner = Some(format!(
+                        "Titik #{} disisipkan pada Plot Line — tarik untuk membentuk belokan.",
+                        index + 1
+                    ));
+                }
+                return;
+            }
+            Some(PlotLineHoverTarget::DeletePoint(index)) => {
+                if remove_plot_line_point(&mut state, line_id, index) {
+                    let count = state
+                        .lines
+                        .iter()
+                        .find(|line| line.id == line_id)
+                        .map(|line| line.geom.len())
+                        .unwrap_or(0);
+                    plot_line_edit.selected_point = (count > 0).then_some(index.min(count - 1));
+                    state.status_banner = Some(
+                        "Titik Plot Line dihapus — klik Simpan (Ctrl+S) untuk menyimpan.".into(),
+                    );
+                }
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                return;
+            }
+            None => {
+                plot_line_edit.selected_point = None;
+            }
+        }
     }
 
     // Priority 0a: Interactive Route Waypoint Editing (direct drag-on-dot, Move Gizmo, Midpoint '+' insert, Map Click Append)
@@ -2927,6 +3090,26 @@ pub fn map_interaction_system(
                     state.anim_edit = None;
                     gizmo_state.suppress_camera_pan = true;
                     gizmo_state.empty_click_start_px = None;
+                }
+                Some(SelectedEntity::Line(id)) => {
+                    state.selected = SelectedEntity::Line(id);
+                    state.line_edit = state.lines.iter().find(|line| line.id == id).cloned();
+                    state.marker_edit = None;
+                    state.building_edit = None;
+                    state.text_edit = None;
+                    state.anim_edit = None;
+                    route_edit.clear();
+                    poly_edit.clear();
+                    plot_line_edit.editing_line_id = Some(id);
+                    plot_line_edit.selected_point = None;
+                    plot_line_edit.hovered = None;
+                    plot_line_edit.active_drag = None;
+                    gizmo_state.suppress_camera_pan = true;
+                    gizmo_state.empty_click_start_px = None;
+                    state.status_banner = Some(
+                        "Plot Line dipilih — klik titik untuk edit atau tombol (+) untuk menyisipkan titik."
+                            .into(),
+                    );
                 }
                 Some(SelectedEntity::TextMarker(id)) => {
                     state.selected = SelectedEntity::TextMarker(id);
@@ -4386,6 +4569,13 @@ fn pick_scene_entity(
     }
 
     // Priority 2d: Direct click on any visible, unlocked Route Animation polyline or waypoint
+    if !playback.play_test_mode
+        && let Some(line_id) = hit_test_any_plot_line(cursor_px, state, camera, cam_gtf)
+    {
+        return Some(SelectedEntity::Line(line_id));
+    }
+
+    // Priority 2e: Direct click on any visible, unlocked Route Animation polyline or waypoint
     if !playback.play_test_mode
         && state.show_gizmos
         && let Some(aid) = hit_test_any_route_line(cursor_px, state, camera, cam_gtf)

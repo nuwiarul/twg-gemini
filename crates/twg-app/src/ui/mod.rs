@@ -39,6 +39,7 @@ use crate::{
         media_preview::MediaPreviewPlayer,
         play_rts::PlayRtsState,
         playback::PlaybackOverrides,
+        plot_line_edit::{PlotLineEditState, draw_plot_line_overlay},
         pointer_arrow::PointerArrowVisualPool,
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
         route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
@@ -58,8 +59,11 @@ pub fn egui_root_system(
         Res<PointerArrowVisualPool>,
     ),
     gizmo_state: Res<TransformGizmoState>,
-    mut poly_edit: ResMut<PolygonEditState>,
-    mut route_edit: ResMut<RouteEditState>,
+    (mut poly_edit, plot_line_edit, mut route_edit): (
+        ResMut<PolygonEditState>,
+        Res<PlotLineEditState>,
+        ResMut<RouteEditState>,
+    ),
     mut preview_stage: ResMut<AssetPreviewStage>,
     mut media_player: ResMut<MediaPreviewPlayer>,
     mut ui_state: ResMut<UiPointerState>,
@@ -421,6 +425,15 @@ pub fn egui_root_system(
         &route_edit,
         &gizmo_state,
         &marker_bounds,
+        &camera,
+        cam_gtf,
+    );
+    draw_plot_line_overlay(
+        ctx,
+        center_rect,
+        &state,
+        &playback,
+        &plot_line_edit,
         &camera,
         cam_gtf,
     );

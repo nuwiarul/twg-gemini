@@ -36,32 +36,6 @@ pub fn draw_lines_and_routes_system(
         return;
     }
 
-    // Saved tactical plot lines
-    for line in &state.lines {
-        if state.hidden_entity_ids.contains(&line.id) || line.geom.len() < 2 {
-            continue;
-        }
-        let is_selected = matches!(state.selected, SelectedEntity::Line(id) if id == line.id);
-        let color = if is_selected {
-            Color::srgb(0.15, 0.98, 0.65)
-        } else {
-            parse_hex_color(&line.color, line.alpha as f32)
-        };
-
-        let pts: Vec<Vec3> = line
-            .geom
-            .iter()
-            .map(|p| Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(p[0], p[1], 0.35)))
-            .collect();
-        for w in pts.windows(2) {
-            gizmos.line(w[0], w[1], color);
-            // Draw slightly offset companion lines to suggest width in 3D view
-            if line.width > 2.5 {
-                gizmos.line(w[0] + Vec3::Y * 0.12, w[1] + Vec3::Y * 0.12, color);
-            }
-        }
-    }
-
     // Route animation paths: always hidden during Play Skenario for a clean tactical view
     let show_route_gizmos = state.show_gizmos && !playback.play_test_mode;
     if show_route_gizmos {
