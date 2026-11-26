@@ -406,7 +406,7 @@ impl TrafficAnimConfig {
 }
 
 pub fn is_traffic_anim(anim: &Anim) -> bool {
-    anim.anim_type == ANIM_TYPE_TRAFFIC_FLOW || anim.anim_type.starts_with("traffic_")
+    anim.anim_type.eq_ignore_ascii_case(ANIM_TYPE_TRAFFIC_FLOW)
 }
 
 pub fn parse_traffic_anim_config(anim: &Anim) -> TrafficAnimConfig {

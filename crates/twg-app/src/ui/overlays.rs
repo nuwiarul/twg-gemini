@@ -249,6 +249,15 @@ pub fn draw_projected_labels(
                 },
                 state.draft_points_lnglat.len()
             ),
+            ToolMode::DrawTrafficQueueLane => format!(
+                "Gambar {} ({} titik) — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
+                match state.drawing_traffic_queue_target {
+                    Some((_, Some(_))) => "Jalur Lancar (Urai Simpang)",
+                    Some((_, None)) => "Jalur Antre Baru (Urai Simpang)",
+                    None => "Jalur Antre A (Urai Simpang)",
+                },
+                state.draft_points_lnglat.len()
+            ),
             ToolMode::PickRouteMarker
             | ToolMode::PickShootMarker
             | ToolMode::PickPointerMarker

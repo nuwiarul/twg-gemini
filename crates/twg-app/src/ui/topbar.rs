@@ -415,6 +415,7 @@ pub fn draw_top_bar(
                         | ToolMode::DrawBasicPolygon
                         | ToolMode::DrawRoute
                         | ToolMode::DrawTrafficLane
+                        | ToolMode::DrawTrafficQueueLane
                 ) && !state.draft_points_lnglat.is_empty()
                 {
                     let finish_btn = egui::Button::new(
@@ -429,6 +430,7 @@ pub fn draw_top_bar(
                     if ui.button("Batal").clicked() {
                         state.draft_points_lnglat.clear();
                         state.drawing_traffic_lane_for_anim_id = None;
+                        state.drawing_traffic_queue_target = None;
                         state.tool_mode = ToolMode::Select;
                     }
                 }
@@ -589,6 +591,31 @@ pub fn broadcast_tactical_anim_cmd(
             "anim_id": anim_id,
             "play_all": play_all,
             "speed_multiplier": speed_multiplier,
+        }),
+        save_history: false,
+    }));
+}
+
+pub fn broadcast_tactical_queue_clear_cmd(
+    state: &AppState,
+    ws: &WsClientBridge,
+    anim_id: uuid::Uuid,
+    trigger_elapsed_sec: f64,
+) {
+    if state.offline_preview || !state.is_tactical_live() {
+        return;
+    }
+    let Some(sk) = &state.active_skenario else {
+        return;
+    };
+    ws.send(WsOutCommand::SendCommand(TacticalCommand {
+        operasi_id: sk.operasi_id,
+        skenario_id: sk.id,
+        marker_id: None,
+        command: "traffic_queue_clear".into(),
+        payload: serde_json::json!({
+            "anim_id": anim_id,
+            "trigger_elapsed_sec": trigger_elapsed_sec,
         }),
         save_history: false,
     }));

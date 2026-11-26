@@ -371,6 +371,9 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::traffic_anim::is_traffic_anim(anim) {
         return crate::traffic_anim::parse_traffic_anim_config(anim).continuous;
     }
+    if crate::traffic_queue::is_traffic_queue_anim(anim) {
+        return true;
+    }
     false
 }
 

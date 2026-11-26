@@ -10,6 +10,9 @@ use twg_shared::{
         parse_multi_route_config, sample_multi_route_poses,
     },
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
+    traffic_queue::{
+        is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
+    },
 };
 use uuid::Uuid;
 
@@ -93,8 +96,10 @@ impl RouteEditState {
     }
 }
 
-/// Returns the waypoint polyline currently being edited for `anim` (either `anim.geom`
-/// for regular routes, or `cfg.lanes[lane_idx].geom` for a Traffic animation).
+/// Returns the waypoint polyline currently being edited for `anim`:
+/// - `traffic_flow`: `cfg.lanes[lane_idx].geom`
+/// - `traffic_queue`: even `lane_idx = c*2` -> `corridors[c].queue_geom`, odd `lane_idx = c*2+1` -> `corridors[c].clear_geom`
+/// - regular routes: `anim.geom`
 pub fn editable_anim_geom(anim: &Anim, traffic_lane_idx: Option<usize>) -> Vec<[f64; 3]> {
     if is_traffic_anim(anim) {
         let cfg = parse_traffic_anim_config(anim);
@@ -103,13 +108,27 @@ pub fn editable_anim_geom(anim: &Anim, traffic_lane_idx: Option<usize>) -> Vec<[
             .get(idx)
             .map(|l| l.geom.clone())
             .unwrap_or_default()
+    } else if is_traffic_queue_anim(anim) {
+        let cfg = parse_traffic_queue_config(anim);
+        let encoded = traffic_lane_idx.unwrap_or(0);
+        let cor_idx = encoded / 2;
+        let is_clear = encoded % 2 == 1;
+        cfg.corridors
+            .get(cor_idx)
+            .map(|c| {
+                if is_clear {
+                    c.clear_geom.clone()
+                } else {
+                    c.queue_geom.clone()
+                }
+            })
+            .unwrap_or_default()
     } else {
         anim.geom.clone()
     }
 }
 
-/// Writes an edited waypoint polyline back into `anim` (syncing `cfg.lanes[lane_idx]` for Traffic
-/// or `anim.geom` + `duration_sec` for regular routes).
+/// Writes an edited waypoint polyline back into `anim`.
 pub fn write_editable_anim_geom(
     anim: &mut Anim,
     traffic_lane_idx: Option<usize>,
@@ -122,13 +141,26 @@ pub fn write_editable_anim_geom(
             lane.geom = geom;
             write_traffic_anim_config(anim, &cfg);
         }
+    } else if is_traffic_queue_anim(anim) {
+        let mut cfg = parse_traffic_queue_config(anim);
+        let encoded = traffic_lane_idx.unwrap_or(0);
+        let cor_idx = encoded / 2;
+        let is_clear = encoded % 2 == 1;
+        if let Some(cor) = cfg.corridors.get_mut(cor_idx) {
+            if is_clear {
+                cor.clear_geom = geom;
+            } else {
+                cor.queue_geom = geom;
+            }
+            write_traffic_queue_config(anim, &cfg);
+        }
     } else {
         anim.geom = geom;
         anim.duration_sec = route_estimated_duration_sec(&anim.geom, anim.speed);
     }
 }
 
-/// Finds which Traffic lane (if any) was clicked on the 3D map for a given Traffic animation.
+/// Finds which Traffic lane (or `traffic_queue` encoded corridor/clear lane) was clicked on the 3D map.
 pub fn hit_test_traffic_lane_index(
     cursor_px: Vec2,
     state: &AppState,
@@ -136,33 +168,61 @@ pub fn hit_test_traffic_lane_index(
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> Option<usize> {
-    if !is_traffic_anim(anim) {
-        return None;
-    }
-    let cfg = parse_traffic_anim_config(anim);
-    let mut best: Option<(usize, f32)> = None;
-    for (idx, lane) in cfg.lanes.iter().enumerate() {
-        if lane.geom.len() < 2 {
-            continue;
-        }
-        let projected: Vec<Option<Vec2>> = lane
-            .geom
-            .iter()
-            .map(|&pt| {
-                let w = waypoint_world_pos(state, pt);
-                camera.world_to_viewport(cam_gtf, w).ok()
-            })
-            .collect();
-        for pair in projected.windows(2) {
-            if let (Some(a), Some(b)) = (pair[0], pair[1]) {
-                let d = point_to_segment_dist(cursor_px, a, b);
-                if d <= 14.0 && best.is_none_or(|cur| d < cur.1) {
-                    best = Some((idx, d));
+    if is_traffic_anim(anim) {
+        let cfg = parse_traffic_anim_config(anim);
+        let mut best: Option<(usize, f32)> = None;
+        for (idx, lane) in cfg.lanes.iter().enumerate() {
+            if lane.geom.len() < 2 {
+                continue;
+            }
+            let projected: Vec<Option<Vec2>> = lane
+                .geom
+                .iter()
+                .map(|&pt| {
+                    let w = waypoint_world_pos(state, pt);
+                    camera.world_to_viewport(cam_gtf, w).ok()
+                })
+                .collect();
+            for pair in projected.windows(2) {
+                if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                    let d = point_to_segment_dist(cursor_px, a, b);
+                    if d <= 14.0 && best.is_none_or(|cur| d < cur.1) {
+                        best = Some((idx, d));
+                    }
                 }
             }
         }
+        return best.map(|(idx, _)| idx);
     }
-    best.map(|(idx, _)| idx)
+    if is_traffic_queue_anim(anim) {
+        let cfg = parse_traffic_queue_config(anim);
+        let mut best: Option<(usize, f32)> = None;
+        for (c_idx, cor) in cfg.corridors.iter().enumerate() {
+            for (is_clear, geom) in [(false, &cor.queue_geom), (true, &cor.clear_geom)] {
+                if geom.len() < 2 {
+                    continue;
+                }
+                let encoded = c_idx * 2 + usize::from(is_clear);
+                let projected: Vec<Option<Vec2>> = geom
+                    .iter()
+                    .map(|&pt| {
+                        let w = waypoint_world_pos(state, pt);
+                        camera.world_to_viewport(cam_gtf, w).ok()
+                    })
+                    .collect();
+                for pair in projected.windows(2) {
+                    if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                        let d = point_to_segment_dist(cursor_px, a, b);
+                        if d <= 14.0 && best.is_none_or(|cur| d < cur.1) {
+                            best = Some((encoded, d));
+                        }
+                    }
+                }
+            }
+        }
+        return best.map(|(idx, _)| idx);
+    }
+    None
 }
 
 /// Inserts a midpoint waypoint halfway between `geom[seg_idx]` and `geom[seg_idx + 1]`.
@@ -237,6 +297,32 @@ pub fn hit_test_any_route_line(
                         let d = point_to_segment_dist(cursor_px, a, b);
                         if d <= 10.5 && best.is_none_or(|cur| d < cur.1) {
                             best = Some((anim.id, d));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if is_traffic_queue_anim(anim) {
+            let cfg = parse_traffic_queue_config(anim);
+            for cor in &cfg.corridors {
+                for geom in [&cor.queue_geom, &cor.clear_geom] {
+                    if geom.len() < 2 {
+                        continue;
+                    }
+                    let projected: Vec<Option<Vec2>> = geom
+                        .iter()
+                        .map(|&pt| {
+                            let w = waypoint_world_pos(state, pt);
+                            camera.world_to_viewport(cam_gtf, w).ok()
+                        })
+                        .collect();
+                    for pair in projected.windows(2) {
+                        if let (Some(a), Some(b)) = (pair[0], pair[1]) {
+                            let d = point_to_segment_dist(cursor_px, a, b);
+                            if d <= 10.5 && best.is_none_or(|cur| d < cur.1) {
+                                best = Some((anim.id, d));
+                            }
                         }
                     }
                 }
@@ -614,7 +700,7 @@ pub fn draw_route_editor_overlay(
     // 1. Live numbered waypoints & rubber-band while drawing a new route or traffic lane
     if matches!(
         state.tool_mode,
-        ToolMode::DrawRoute | ToolMode::DrawTrafficLane
+        ToolMode::DrawRoute | ToolMode::DrawTrafficLane | ToolMode::DrawTrafficQueueLane
     ) {
         draw_route_draft_overlay(&painter, clip_rect, state, camera, cam_gtf);
         return;

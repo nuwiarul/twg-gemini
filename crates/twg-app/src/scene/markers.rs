@@ -36,6 +36,10 @@ use twg_shared::{
         ANIM_TYPE_TRAFFIC_FLOW, TrafficAnimConfig, TrafficLane, TrafficVehicleEntry,
         is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config,
     },
+    traffic_queue::{
+        TRAFFIC_QUEUE_ANIM_TYPE, TrafficQueueConfig, TrafficQueueCorridor,
+        is_traffic_queue_anim, parse_traffic_queue_config, write_traffic_queue_config,
+    },
 };
 use uuid::Uuid;
 
@@ -2099,7 +2103,7 @@ pub fn map_interaction_system(
             .anims
             .iter()
             .find(|a| a.id == sel_id)
-            .is_some_and(|a| !is_traffic_anim(a) && a.geom.len() >= 2)
+            .is_some_and(|a| !is_traffic_anim(a) && !is_traffic_queue_anim(a) && a.geom.len() >= 2)
         && route_edit.editing_anim_id != Some(sel_id)
     {
         route_edit.editing_anim_id = Some(sel_id);
@@ -2240,6 +2244,7 @@ pub fn map_interaction_system(
                     | ToolMode::DrawBasicPolygon
                     | ToolMode::DrawRoute
                     | ToolMode::DrawTrafficLane
+                    | ToolMode::DrawTrafficQueueLane
             )
             && !state.draft_points_lnglat.is_empty()
         {
@@ -2252,6 +2257,14 @@ pub fn map_interaction_system(
                 state.drawing_traffic_lane_for_anim_id = None;
                 state.tool_mode = ToolMode::Select;
                 state.status_banner = Some("Penggambaran Jalur Traffic dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::DrawTrafficQueueLane {
+                state.draft_points_lnglat.clear();
+                state.drawing_traffic_queue_target = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner =
+                    Some("Penggambaran Jalur Antrean & Urai Simpang dibatalkan.".into());
                 return;
             }
             if state.tool_mode == ToolMode::PickShootMarker {
@@ -3258,9 +3271,9 @@ pub fn map_interaction_system(
                     let clicked_anim = state.anims.iter().find(|a| a.id == id).cloned();
                     let is_route_poly = clicked_anim
                         .as_ref()
-                        .is_some_and(|a| !is_traffic_anim(a) && a.geom.len() >= 2);
+                        .is_some_and(|a| !is_traffic_anim(a) && !is_traffic_queue_anim(a) && a.geom.len() >= 2);
                     let clicked_traffic_lane = clicked_anim.as_ref().and_then(|a| {
-                        if is_traffic_anim(a) {
+                        if is_traffic_anim(a) || is_traffic_queue_anim(a) {
                             hit_test_traffic_lane_index(cursor_px, &state, a, camera, cam_gtf)
                                 .or(Some(0))
                         } else {
@@ -3312,7 +3325,8 @@ pub fn map_interaction_system(
         | ToolMode::DrawBuilding
         | ToolMode::DrawBasicPolygon
         | ToolMode::DrawRoute
-        | ToolMode::DrawTrafficLane => {
+        | ToolMode::DrawTrafficLane
+        | ToolMode::DrawTrafficQueueLane => {
             if playback.play_test_mode {
                 return;
             }
@@ -4411,6 +4425,169 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
             state.tool_mode = ToolMode::Select;
             state.new_traffic_name = format!("Traffic Lalu Lintas {}", traffic_cnt + 1);
+        }
+        ToolMode::DrawTrafficQueueLane => {
+            if pts.len() < 2 {
+                state.status_banner =
+                    Some("Jalur Antrean/Lancar butuh minimal 2 titik waypoint.".into());
+                return;
+            }
+            let geom: Vec<[f64; 3]> = pts.into_iter().map(|[lng, lat]| [lng, lat, 0.0]).collect();
+
+            if let Some((target_aid, clear_for_idx)) = state.drawing_traffic_queue_target.take() {
+                if let Some(existing) = state
+                    .anims
+                    .iter_mut()
+                    .find(|a| a.id == target_aid && is_traffic_queue_anim(a))
+                {
+                    let mut cfg = parse_traffic_queue_config(existing);
+                    if let Some(c_idx) = clear_for_idx {
+                        if let Some(cor) = cfg.corridors.get_mut(c_idx) {
+                            let cname = cor.name.clone();
+                            cor.clear_geom = geom;
+                            write_traffic_queue_config(existing, &cfg);
+                            let updated = existing.clone();
+                            state.selected = SelectedEntity::Anim(target_aid);
+                            state.anim_edit = Some(updated);
+                            state.dirty_anim_ids.insert(target_aid);
+                            state.status_banner = Some(format!(
+                                "Jalur Lancar untuk '{cname}' selesai digambar! Tambah jalur lain atau klik Preview untuk uji coba."
+                            ));
+                        }
+                    } else {
+                        let c_label =
+                            TrafficQueueCorridor::default_label_for_index(cfg.corridors.len());
+                        let new_idx = cfg.corridors.len();
+                        let end_pt = geom.last().copied();
+                        cfg.corridors
+                            .push(TrafficQueueCorridor::new(c_label.clone(), geom));
+                        write_traffic_queue_config(existing, &cfg);
+                        let updated = existing.clone();
+                        state.selected = SelectedEntity::Anim(target_aid);
+                        state.anim_edit = Some(updated);
+                        state.dirty_anim_ids.insert(target_aid);
+                        // Immediately guide user to draw the mandatory Jalur Lancar starting from the end of this queue lane!
+                        if let Some(ep) = end_pt {
+                            state.draft_points_lnglat = vec![[ep[0], ep[1]]];
+                            state.drawing_traffic_queue_target = Some((target_aid, Some(new_idx)));
+                            state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                            state.status_banner = Some(format!(
+                                "{c_label} ditambahkan! Sekarang klik peta untuk menggambar Jalur Lancar wajib dari ujung {c_label} (Enter selesai)."
+                            ));
+                            return;
+                        }
+                    }
+                }
+                state.tool_mode = ToolMode::Select;
+                return;
+            }
+
+            let queue_cnt = state
+                .anims
+                .iter()
+                .filter(|a| is_traffic_queue_anim(a))
+                .count()
+                + 1;
+            let name = if state.new_traffic_queue_name.trim().is_empty() {
+                format!("Urai Simpang {queue_cnt}")
+            } else {
+                state.new_traffic_queue_name.trim().to_string()
+            };
+
+            let mut auto_pool: Vec<TrafficVehicleEntry> = state
+                .catalog
+                .iter()
+                .filter(|m| {
+                    let cat = m.category.to_lowercase();
+                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                })
+                .take(4)
+                .map(|m| TrafficVehicleEntry {
+                    model_path: m.model_path.clone(),
+                    name: m.name.clone(),
+                    scale: 1.0,
+                    length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                    weight: 1.0,
+                    rot_y_offset_deg: m.default_rotation_deg[1],
+                })
+                .collect();
+            if auto_pool.is_empty() {
+                auto_pool = state
+                    .catalog
+                    .iter()
+                    .filter(|m| m.ready)
+                    .take(2)
+                    .map(|m| TrafficVehicleEntry {
+                        model_path: m.model_path.clone(),
+                        name: m.name.clone(),
+                        scale: 1.0,
+                        length_m: TrafficVehicleEntry::estimate_length_m(&m.name, &m.model_path),
+                        weight: 1.0,
+                        rot_y_offset_deg: m.default_rotation_deg[1],
+                    })
+                    .collect();
+            }
+
+            let cfg = TrafficQueueConfig {
+                corridors: vec![TrafficQueueCorridor::new("Jalur A", geom.clone())],
+                vehicle_pool: auto_pool,
+                seed: 20_261_127_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
+                ..Default::default()
+            };
+            let data = serde_json::json!({ "traffic_queue": cfg });
+            let sort_order = (state.anims.len() + 1) as i32;
+
+            if state.offline_preview {
+                let now = chrono::Utc::now();
+                let a = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: TRAFFIC_QUEUE_ANIM_TYPE.to_string(),
+                    sort_order,
+                    speed: 8.0,
+                    duration_sec: 0.0,
+                    replay: false,
+                    autoplay: false,
+                    geom,
+                    data,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let aid = a.id;
+                state.selected = SelectedEntity::Anim(aid);
+                state.anim_edit = Some(a.clone());
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.anims.push(a);
+                state.status_banner = Some(format!(
+                    "Antrean & Urai Simpang '{name}' dibuat! Sekarang klik '+ Gambar Jalur Lancar' untuk Jalur A di Inspector."
+                ));
+            } else if let Some(auth) = current_auth(state) {
+                api.send(ApiCommand::CreateAnim {
+                    auth,
+                    req: CreateAnimRequest {
+                        operasi_id: sk.operasi_id,
+                        skenario_id: sk.id,
+                        marker_id: None,
+                        name,
+                        anim_type: TRAFFIC_QUEUE_ANIM_TYPE.to_string(),
+                        sort_order,
+                        speed: 8.0,
+                        duration_sec: 0.0,
+                        replay: false,
+                        autoplay: false,
+                        geom,
+                        data,
+                    },
+                });
+            }
+            state.tool_mode = ToolMode::Select;
+            state.new_traffic_queue_name = format!("Urai Simpang {}", queue_cnt + 1);
         }
         _ => {}
     }

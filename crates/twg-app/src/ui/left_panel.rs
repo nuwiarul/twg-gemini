@@ -23,6 +23,7 @@ use twg_shared::{
         spawn_hide_action,
     },
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
 use uuid::Uuid;
 
@@ -3981,6 +3982,7 @@ fn draw_particle_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: 
 fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: bool) {
     let is_drawing_route = state.tool_mode == ToolMode::DrawRoute;
     let is_drawing_traffic = state.tool_mode == ToolMode::DrawTrafficLane;
+    let is_drawing_traffic_queue = state.tool_mode == ToolMode::DrawTrafficQueueLane;
     let is_picking_unit = state.tool_mode == ToolMode::PickRouteMarker;
     let picking_is_multi = is_picking_unit
         && state
@@ -3989,14 +3991,24 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
             .is_some_and(is_multi_route_anim);
 
     egui::Frame::new()
-        .fill(if is_drawing_route || is_drawing_traffic || is_picking_unit {
-            egui::Color32::from_rgb(6, 56, 46)
-        } else {
-            egui::Color32::from_rgb(22, 30, 45)
-        })
+        .fill(
+            if is_drawing_route
+                || is_drawing_traffic
+                || is_drawing_traffic_queue
+                || is_picking_unit
+            {
+                egui::Color32::from_rgb(6, 56, 46)
+            } else {
+                egui::Color32::from_rgb(22, 30, 45)
+            },
+        )
         .stroke(egui::Stroke::new(
             1.2,
-            if is_drawing_route || is_drawing_traffic || is_picking_unit {
+            if is_drawing_route
+                || is_drawing_traffic
+                || is_drawing_traffic_queue
+                || is_picking_unit
+            {
                 egui::Color32::from_rgb(16, 185, 129)
             } else {
                 egui::Color32::from_rgb(42, 60, 86)
@@ -4246,6 +4258,40 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                             .into(),
                     );
                 }
+
+                ui.add_space(4.0);
+                let queue_btn = egui::Button::new(
+                    egui::RichText::new("+ Antrean & Urai Simpang")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(13, 148, 136))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, queue_btn)
+                    .on_hover_text(
+                        "Simulasi antrean simpang & urai kemacetan: setiap Jalur Antre berpasangan dengan Jalur Lancar wajib, bergantian per durasi, plus tombol 'Lancar' untuk mengurai seluruh kendaraan sampai habis",
+                    )
+                    .clicked()
+                {
+                    let q_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_traffic_queue_anim(a))
+                        .count()
+                        + 1;
+                    state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                    state.drawing_traffic_queue_target = None;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_queue_name = format!("Urai Simpang {q_idx}");
+                    state.status_banner = Some(
+                        "Antrean & Urai Simpang: Klik titik Jalur Antre A di peta (min 2 titik), tekan Enter / Finish. Lalu gambar Jalur Lancar wajibnya di Inspector."
+                            .into(),
+                    );
+                }
             }
         });
 }
@@ -4375,6 +4421,9 @@ fn draw_ordered_animation_list(
                 let (cat_tag, cat_col) = match cat {
                     AnimCategory::Route if is_traffic_anim(a) => {
                         ("TRAFFIC", egui::Color32::from_rgb(217, 119, 6))
+                    }
+                    AnimCategory::Route if is_traffic_queue_anim(a) => {
+                        ("URAI SIMPANG", egui::Color32::from_rgb(13, 148, 136))
                     }
                     AnimCategory::Route if is_multi => {
                         if parse_multi_route_config(a).formation == RouteFormationKind::Patwal {
@@ -4629,6 +4678,15 @@ fn draw_ordered_animation_list(
                                 cfg.min_speed_mps,
                                 cfg.max_speed_mps,
                                 if cfg.allow_overtaking { "  •  Salip" } else { "" }
+                            )
+                        } else if is_traffic_queue_anim(a) {
+                            let cfg = parse_traffic_queue_config(a);
+                            let complete = cfg.corridors.iter().filter(|c| c.enabled && c.is_complete()).count();
+                            let total = cfg.corridors.iter().filter(|c| c.enabled).count();
+                            format!(
+                                "{complete}/{total} Jalur Lengkap  •  {} Model  •  {:.0}s giliran",
+                                cfg.vehicle_pool.len(),
+                                cfg.turn_duration_sec
                             )
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);

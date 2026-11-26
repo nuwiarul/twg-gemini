@@ -35,6 +35,10 @@ use twg_shared::{
         OvertakeSide, TrafficVehicleEntry, build_reverse_lane, is_traffic_anim,
         parse_traffic_anim_config, write_traffic_anim_config,
     },
+    traffic_queue::{
+        QueueClearanceMode, TrafficQueueCorridor, is_traffic_queue_anim,
+        parse_traffic_queue_config, write_traffic_queue_config,
+    },
     ws::TacticalCommand,
 };
 use uuid::Uuid;
@@ -128,12 +132,10 @@ pub fn draw_right_panel(
                             ("TEXT LABEL", egui::Color32::from_rgb(109, 40, 217))
                         }
                         SelectedEntity::Anim(id) => {
-                            let is_traffic = state
-                                .anims
-                                .iter()
-                                .find(|a| a.id == id)
-                                .is_some_and(is_traffic_anim);
-                            if is_traffic {
+                            let anim_ref = state.anims.iter().find(|a| a.id == id);
+                            if anim_ref.is_some_and(is_traffic_queue_anim) {
+                                ("URAI SIMPANG", egui::Color32::from_rgb(13, 148, 136))
+                            } else if anim_ref.is_some_and(is_traffic_anim) {
                                 ("TRAFFIC ANIM", egui::Color32::from_rgb(217, 119, 6))
                             } else {
                                 ("ROUTE ANIM", egui::Color32::from_rgb(16, 185, 129))
@@ -539,6 +541,71 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                     if ui.button("Batal (Esc)").clicked() {
                         state.draft_points_lnglat.clear();
                         state.drawing_traffic_lane_for_anim_id = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                });
+            });
+        }
+        ToolMode::DrawTrafficQueueLane => {
+            let (title, show_name_input, hint_extra) = match state.drawing_traffic_queue_target {
+                None => (
+                    "Buat Antrean & Urai Simpang (Jalur Antre A)",
+                    true,
+                    "Gambar jalur tempat mobil/motor muncul dan berhenti antre di ujung jalur.",
+                ),
+                Some((_, None)) => (
+                    "Tambah Jalur Antre Baru",
+                    false,
+                    "Gambar Jalur Antre baru; setelah selesai Anda akan langsung diarahkan menggambar Jalur Lancar wajibnya.",
+                ),
+                Some((_, Some(_))) => (
+                    "Gambar Jalur Lancar (Wajib)",
+                    false,
+                    "Titik awal sudah menempel di ujung Jalur Antre. Klik lanjutan jalur ke arah keluar simpang lalu tekan Enter.",
+                ),
+            };
+            inspector_card(ui, title, true, |ui| {
+                if show_name_input {
+                    ui.label("Nama Animasi:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_traffic_queue_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.label(
+                    egui::RichText::new(hint_extra)
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(153, 246, 228)),
+                );
+                ui.add_space(3.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Titik jalur: {} (min 2 titik).\nKlik kiri di peta untuk tambah titik, Backspace undo, Enter / Finish selesai.",
+                        state.draft_points_lnglat.len()
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(253, 230, 138)),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            state.draft_points_lnglat.len() >= 2,
+                            egui::Button::new(
+                                egui::RichText::new("Finish (Enter)")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105)),
+                        )
+                        .clicked()
+                    {
+                        finish_active_draft(state, api);
+                    }
+                    if ui.button("Batal (Esc)").clicked() {
+                        state.draft_points_lnglat.clear();
+                        state.drawing_traffic_queue_target = None;
                         state.tool_mode = ToolMode::Select;
                     }
                 });
@@ -2689,17 +2756,31 @@ fn draw_editor_preview_card(
     }
 
     let is_group = is_group_anim(a);
+    let is_queue = is_traffic_queue_anim(a);
     let can_preview = if is_group {
         !parse_group_anim_config(a).items.is_empty()
     } else {
         anim_is_playable(a, &state.markers)
     };
-    let disabled_tip = if is_group {
-        "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview"
+    let disabled_tip: String = if is_group {
+        "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
     } else if is_traffic_anim(a) {
-        "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
+        "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool".into()
+    } else if is_queue {
+        let qcfg = parse_traffic_queue_config(a);
+        let inc = qcfg.incomplete_corridor_names();
+        if !inc.is_empty() {
+            format!(
+                "Setiap jalur wajib punya Jalur Lancar: lengkapi {} terlebih dahulu",
+                inc.join(", ")
+            )
+        } else if qcfg.vehicle_pool.is_empty() {
+            "Tambahkan minimal 1 model kendaraan di Pool Model 3D".into()
+        } else {
+            "Tambahkan minimal 1 pasangan Jalur Antre + Jalur Lancar".into()
+        }
     } else {
-        "Pilih minimal 1 Unit / Model 3D dan 2 titik rute terlebih dahulu"
+        "Pilih minimal 1 Unit / Model 3D dan 2 titik rute terlebih dahulu".into()
     };
 
     let is_previewing = playback.is_previewing_anim(a.id);
@@ -2799,6 +2880,44 @@ fn draw_editor_preview_card(
                     );
                 }
                 AnimRunStatus::Playing => {
+                    if is_queue {
+                        let is_clearing = playback
+                            .tracks
+                            .get(&a.id)
+                            .and_then(|t| t.queue_clearance_at_sec)
+                            .is_some();
+                        let rem = state
+                            .traffic_queue_live_status
+                            .get(&a.id)
+                            .map(|s| s.total_vehicles)
+                            .unwrap_or(0);
+                        let clear_btn = egui::Button::new(
+                            egui::RichText::new(if is_clearing {
+                                format!("Mode Lancar Aktif (Sisa {rem} kendaraan...)")
+                            } else {
+                                "LANCAR (Urai Sampai Habis)".to_string()
+                            })
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                        )
+                        .fill(if is_clearing {
+                            egui::Color32::from_rgb(6, 78, 59)
+                        } else {
+                            egui::Color32::from_rgb(5, 150, 105)
+                        })
+                        .min_size(egui::vec2(ui.available_width(), 26.0));
+                        if ui
+                            .add_enabled(!is_clearing, clear_btn)
+                            .on_hover_text(
+                                "Stop generate kendaraan baru & percepat seluruh kendaraan yang tersisa bergantian sampai habis (0 kendaraan)",
+                            )
+                            .clicked()
+                        {
+                            playback.trigger_queue_clearance(a.id, None);
+                        }
+                        ui.add_space(4.0);
+                    }
                     ui.columns(2, |cols| {
                         let pause_btn = egui::Button::new(
                             egui::RichText::new("Pause")
@@ -2915,6 +3034,48 @@ fn draw_editor_preview_card(
                             .color(egui::Color32::from_rgb(186, 230, 253)),
                         );
                     }
+                } else if is_queue {
+                    let elapsed = track.distance_m;
+                    let status_line = if let Some(live) = state.traffic_queue_live_status.get(&a.id)
+                    {
+                        if live.clearance_active {
+                            format!(
+                                "MODE LANCAR  •  Sisa {} kendaraan ({} antre, {} keluar)  •  t = {elapsed:.1}s",
+                                live.total_vehicles, live.queued_vehicles, live.clearing_vehicles
+                            )
+                        } else if live.is_switch_pause {
+                            format!(
+                                "Jeda pindah -> {} ({:.1}s)  •  {} kendaraan  •  t = {elapsed:.1}s",
+                                live.active_corridor_name.as_deref().unwrap_or("-"),
+                                live.remaining_turn_sec,
+                                live.total_vehicles
+                            )
+                        } else {
+                            format!(
+                                "Giliran: {} ({:.0}s)  •  {} antre / {} lancar  •  t = {elapsed:.1}s",
+                                live.active_corridor_name.as_deref().unwrap_or("-"),
+                                live.remaining_turn_sec,
+                                live.queued_vehicles,
+                                live.clearing_vehicles
+                            )
+                        }
+                    } else {
+                        format!("Antrean & Urai Simpang berjalan  •  t = {elapsed:.1} dtk")
+                    };
+                    ui.label(
+                        egui::RichText::new(status_line)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(153, 246, 228)),
+                    );
+                } else if is_traffic_anim(a) {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Simulasi Traffic berjalan  •  t = {:.1} dtk",
+                            track.distance_m
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(253, 230, 138)),
+                    );
                 } else {
                     let total_len = route_total_length_m(&a.geom).max(0.01);
                     let dist = track.distance_m.clamp(0.0, total_len);
@@ -2988,6 +3149,9 @@ fn draw_anim_inspector(
     } else if is_traffic_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         draw_traffic_inspector_cards(ui, state, tcam, playback, route_edit, &mut a, editable);
+    } else if is_traffic_queue_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        draw_traffic_queue_inspector_cards(ui, state, tcam, playback, route_edit, &mut a, editable);
     } else if is_group_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         draw_group_anim_inspector_cards(ui, state, tcam, &mut a, editable);
@@ -4212,6 +4376,8 @@ fn draw_anim_inspector(
             "Tentukan posisi partikel di peta terlebih dahulu"
         } else if is_traffic_anim(&a) {
             "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
+        } else if is_traffic_queue_anim(&a) {
+            "Setiap jalur aktif wajib punya Jalur Antre + Jalur Lancar (>= 2 titik) dan minimal 1 model kendaraan"
         } else if is_group_anim(&a) {
             "Tambahkan minimal 1 animasi anggota ke dalam grup terlebih dahulu"
         } else if is_spawn_hide_anim(&a) {
@@ -7927,6 +8093,8 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         sk.short_tag()
     } else if is_traffic_anim(a) {
         "TRAFFIC"
+    } else if is_traffic_queue_anim(a) {
+        "URAI SIMPANG"
     } else if is_multi_route_anim(a) {
         if parse_multi_route_config(a).formation == RouteFormationKind::Patwal {
             "PATWAL"
@@ -9271,6 +9439,1323 @@ fn draw_traffic_inspector_cards(
     if cfg_changed {
         write_traffic_anim_config(a, &cfg);
     }
+}
+
+fn draw_traffic_queue_inspector_cards(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    tcam: &mut TacticalCamera,
+    playback: &mut PlaybackState,
+    route_edit: &mut RouteEditState,
+    a: &mut twg_shared::models::Anim,
+    editable: bool,
+) {
+    let mut cfg = parse_traffic_queue_config(a);
+    let mut cfg_changed = false;
+
+    // 1. General Info & Validation Summary
+    inspector_card(ui, "Antrean & Urai Simpang", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.label("Nama Animasi:");
+            ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
+        });
+        ui.add_space(4.0);
+        let incomplete = cfg.incomplete_corridor_names();
+        if !incomplete.is_empty() {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(76, 29, 29))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(248, 113, 113)))
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Wajib Jalur Lancar: {} belum punya Jalur Lancar! Klik '+ Gambar Jalur Lancar' di bawah.",
+                            incomplete.join(", ")
+                        ))
+                        .size(10.5)
+                        .strong()
+                        .color(egui::Color32::from_rgb(254, 202, 202)),
+                    );
+                });
+        } else if cfg.has_playable_setup() {
+            ui.label(
+                egui::RichText::new(
+                    "Siap dijalankan! Kendaraan bergerak konvoi bergantian per durasi; klik 'Lancar' saat Play/Preview untuk mengurai seluruh kendaraan sampai habis.",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(153, 246, 228)),
+            );
+        }
+    });
+
+    // 2. Paired Corridors (Jalur Antre + Mandatory Jalur Lancar)
+    let complete_cnt = cfg.corridors.iter().filter(|c| c.is_complete()).count();
+    inspector_card(
+        ui,
+        &format!(
+            "Pasangan Jalur Antre & Lancar ({complete_cnt}/{})",
+            cfg.corridors.len()
+        ),
+        true,
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Setiap Jalur Antre (oranye) wajib memiliki 1 Jalur Lancar (hijau). Garis merah di ujung Jalur Antre adalah batas berhenti saat giliran jalur lain.",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(4.0);
+
+            if editable {
+                let add_btn = egui::Button::new(
+                    egui::RichText::new("+ Tambah Jalur Antre Baru di Peta")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(217, 119, 6))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui.add(add_btn).clicked() {
+                    let next_label =
+                        TrafficQueueCorridor::default_label_for_index(cfg.corridors.len());
+                    route_edit.clear();
+                    state.traffic_scale_preview = None;
+                    state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                    state.drawing_traffic_queue_target = Some((a.id, None));
+                    state.draft_points_lnglat.clear();
+                    state.status_banner = Some(format!(
+                        "Klik titik-titik Jalur Antre '{next_label}' di peta (min 2 titik), tekan Enter / Finish."
+                    ));
+                }
+                ui.add_space(5.0);
+            }
+
+            let mut delete_cor_idx: Option<usize> = None;
+            let mut reverse_queue_idx: Option<usize> = None;
+            let mut reverse_clear_idx: Option<usize> = None;
+            let mut draw_clear_for_idx: Option<usize> = None;
+            let mut toggle_edit_encoded: Option<usize> = None;
+
+            for idx in 0..cfg.corridors.len() {
+                let is_complete = cfg.corridors[idx].is_complete();
+                let q_len_m = route_total_length_m(&cfg.corridors[idx].queue_geom);
+                let q_pts = cfg.corridors[idx].queue_geom.len();
+                let cl_len_m = route_total_length_m(&cfg.corridors[idx].clear_geom);
+                let cl_pts = cfg.corridors[idx].clear_geom.len();
+                let q_encoded = idx * 2;
+                let cl_encoded = idx * 2 + 1;
+                let editing_q = route_edit.is_editing(a.id)
+                    && route_edit.traffic_lane_idx == Some(q_encoded);
+                let editing_cl = route_edit.is_editing(a.id)
+                    && route_edit.traffic_lane_idx == Some(cl_encoded);
+
+                egui::Frame::new()
+                    .fill(if editing_q || editing_cl {
+                        egui::Color32::from_rgb(10, 44, 48)
+                    } else {
+                        egui::Color32::from_rgb(15, 23, 42)
+                    })
+                    .stroke(egui::Stroke::new(
+                        if editing_q || editing_cl || !is_complete {
+                            1.25
+                        } else {
+                            1.0
+                        },
+                        if editing_q || editing_cl {
+                            egui::Color32::from_rgb(34, 211, 238)
+                        } else if !is_complete {
+                            egui::Color32::from_rgb(245, 158, 11)
+                        } else {
+                            egui::Color32::from_rgb(44, 62, 92)
+                        },
+                    ))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        // Header row: checkbox + name + status badge
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut cfg.corridors[idx].enabled, "").changed() {
+                                cfg_changed = true;
+                            }
+                            let name_w = (ui.available_width() - 96.0).clamp(64.0, 150.0);
+                            if ui
+                                .add_enabled(
+                                    editable,
+                                    egui::TextEdit::singleline(&mut cfg.corridors[idx].name)
+                                        .desired_width(name_w),
+                                )
+                                .changed()
+                            {
+                                cfg_changed = true;
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let (tag, bg, fg) = if is_complete {
+                                        (
+                                            "Lengkap",
+                                            egui::Color32::from_rgb(6, 78, 59),
+                                            egui::Color32::from_rgb(110, 231, 183),
+                                        )
+                                    } else {
+                                        (
+                                            "Belum Lancar",
+                                            egui::Color32::from_rgb(120, 53, 15),
+                                            egui::Color32::from_rgb(253, 230, 138),
+                                        )
+                                    };
+                                    egui::Frame::new()
+                                        .fill(bg)
+                                        .corner_radius(3.0)
+                                        .inner_margin(egui::Margin::symmetric(5, 1))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(tag)
+                                                    .size(9.0)
+                                                    .strong()
+                                                    .color(fg),
+                                            );
+                                        });
+                                },
+                            );
+                        });
+
+                        ui.add_space(3.0);
+                        // Sub-row 1: Jalur Antre
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Jalur Antre (Oranye): {q_len_m:.0}m ({q_pts} pt)"
+                            ))
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(253, 186, 116)),
+                        );
+                        if editable {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let edit_q_btn = egui::Button::new(
+                                    egui::RichText::new(if editing_q {
+                                        "Selesai Edit"
+                                    } else {
+                                        "Edit Antre"
+                                    })
+                                    .size(9.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                                )
+                                .fill(if editing_q {
+                                    egui::Color32::from_rgb(5, 150, 105)
+                                } else {
+                                    egui::Color32::from_rgb(37, 99, 235)
+                                })
+                                .small();
+                                if ui.add(edit_q_btn).clicked() {
+                                    toggle_edit_encoded = Some(q_encoded);
+                                }
+                                if ui
+                                    .small_button("Putar")
+                                    .on_hover_text("Balik arah Jalur Antre")
+                                    .clicked()
+                                {
+                                    reverse_queue_idx = Some(idx);
+                                }
+                                if cfg.corridors.len() > 1
+                                    && ui
+                                        .small_button(
+                                            egui::RichText::new("Hapus")
+                                                .color(egui::Color32::from_rgb(248, 113, 113)),
+                                        )
+                                        .clicked()
+                                {
+                                    delete_cor_idx = Some(idx);
+                                }
+                            });
+                        }
+
+                        ui.add_space(4.0);
+                        // Sub-row 2: Jalur Lancar (Mandatory!)
+                        if cl_pts >= 2 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Jalur Lancar (Hijau): {cl_len_m:.0}m ({cl_pts} pt)"
+                                ))
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(110, 231, 183)),
+                            );
+                            if editable {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let edit_cl_btn = egui::Button::new(
+                                        egui::RichText::new(if editing_cl {
+                                            "Selesai Edit"
+                                        } else {
+                                            "Edit Lancar"
+                                        })
+                                        .size(9.5)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(if editing_cl {
+                                        egui::Color32::from_rgb(5, 150, 105)
+                                    } else {
+                                        egui::Color32::from_rgb(13, 148, 136)
+                                    })
+                                    .small();
+                                    if ui.add(edit_cl_btn).clicked() {
+                                        toggle_edit_encoded = Some(cl_encoded);
+                                    }
+                                    if ui
+                                        .small_button("Gambar Ulang")
+                                        .on_hover_text(
+                                            "Gambar ulang Jalur Lancar dari ujung Jalur Antre",
+                                        )
+                                        .clicked()
+                                    {
+                                        draw_clear_for_idx = Some(idx);
+                                    }
+                                    if ui
+                                        .small_button("Putar")
+                                        .on_hover_text("Balik arah Jalur Lancar")
+                                        .clicked()
+                                    {
+                                        reverse_clear_idx = Some(idx);
+                                    }
+                                });
+                            }
+                        } else if editable {
+                            let draw_cl_btn = egui::Button::new(
+                                egui::RichText::new("+ Gambar Jalur Lancar (Wajib)")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105))
+                            .min_size(egui::vec2(ui.available_width(), 24.0));
+                            if ui.add(draw_cl_btn).clicked() {
+                                draw_clear_for_idx = Some(idx);
+                            }
+                        }
+                    });
+                ui.add_space(3.0);
+            }
+
+            if let Some(enc) = toggle_edit_encoded {
+                if route_edit.is_editing(a.id) && route_edit.traffic_lane_idx == Some(enc) {
+                    route_edit.clear();
+                    state.status_banner = Some("Mode Edit Jalur selesai.".into());
+                } else {
+                    state.traffic_scale_preview = None;
+                    playback.stop_editor_preview();
+                    state.tool_mode = ToolMode::Select;
+                    route_edit.editing_anim_id = Some(a.id);
+                    route_edit.traffic_lane_idx = Some(enc);
+                    route_edit.selected_waypoint = None;
+                    route_edit.add_point_on_map_mode = false;
+                    route_edit.active_drag = None;
+                    let c_idx = enc / 2;
+                    let kind = if enc % 2 == 1 {
+                        "Jalur Lancar"
+                    } else {
+                        "Jalur Antre"
+                    };
+                    let cname = cfg
+                        .corridors
+                        .get(c_idx)
+                        .map(|c| c.name.as_str())
+                        .unwrap_or("Jalur");
+                    state.status_banner = Some(format!(
+                        "Edit {kind} '{cname}' aktif — geser titik di peta, klik (+) untuk tambah titik, Delete untuk hapus titik."
+                    ));
+                }
+            }
+            if let Some(c_idx) = draw_clear_for_idx
+                && let Some(cor) = cfg.corridors.get(c_idx)
+            {
+                let cname = cor.name.clone();
+                route_edit.clear();
+                state.traffic_scale_preview = None;
+                playback.stop_editor_preview();
+                state.tool_mode = ToolMode::DrawTrafficQueueLane;
+                state.drawing_traffic_queue_target = Some((a.id, Some(c_idx)));
+                state.draft_points_lnglat.clear();
+                if let Some(&end_pt) = cor.queue_geom.last() {
+                    state.draft_points_lnglat.push([end_pt[0], end_pt[1]]);
+                }
+                state.status_banner = Some(format!(
+                    "Gambar Jalur Lancar untuk '{cname}': titik awal sudah menempel di ujung Jalur Antre — klik lanjutan arah keluar di peta lalu Enter / Finish."
+                ));
+            }
+            if let Some(idx) = reverse_queue_idx {
+                cfg.corridors[idx].queue_geom.reverse();
+                cfg_changed = true;
+            }
+            if let Some(idx) = reverse_clear_idx {
+                cfg.corridors[idx].clear_geom.reverse();
+                cfg_changed = true;
+            }
+            if let Some(idx) = delete_cor_idx {
+                cfg.corridors.remove(idx);
+                if route_edit.editing_anim_id == Some(a.id) {
+                    route_edit.clear();
+                }
+                cfg_changed = true;
+            }
+        },
+    );
+
+    // 3. Shared Vehicle 3D Pool Picker (All 3D Catalog + Category Filter + 2-Model Preview & Scale Gizmo!)
+    let preview_lane_geom: Option<Vec<[f64; 3]>> = cfg
+        .corridors
+        .iter()
+        .find(|c| c.enabled && c.queue_geom.len() >= 2)
+        .or_else(|| cfg.corridors.iter().find(|c| c.queue_geom.len() >= 2))
+        .map(|c| c.queue_geom.clone());
+    if draw_traffic_queue_vehicle_pool_card(
+        ui,
+        state,
+        tcam,
+        playback,
+        route_edit,
+        a.id,
+        &mut cfg.vehicle_pool,
+        preview_lane_geom.as_deref(),
+        editable,
+    ) {
+        cfg_changed = true;
+    }
+
+    // 4. Convoy Speed, Turn Duration & Live "Lancar" Speed Settings
+    inspector_card(ui, "Pengaturan Konvoi, Giliran & Mode Lancar", true, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Kecepatan Konvoi:");
+                let prev = cfg.convoy_speed_mps;
+                numeric_spinner(
+                    ui,
+                    ("tq_convoy_spd", a.id),
+                    &mut cfg.convoy_speed_mps,
+                    SpinnerConfig {
+                        min: 1.5,
+                        max: 40.0,
+                        step: 0.5,
+                        drag_speed: 0.2,
+                        decimals: 1,
+                        suffix: " m/s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.convoy_speed_mps - prev).abs() > 1e-6 {
+                    if cfg.clear_speed_mps < cfg.convoy_speed_mps {
+                        cfg.clear_speed_mps = cfg.convoy_speed_mps;
+                    }
+                    cfg_changed = true;
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "Konstan tanpa menyalip (~{:.0} km/jam)",
+                    cfg.convoy_speed_mps * 3.6
+                ))
+                .size(9.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(3.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Kecepatan Lancar:");
+                let prev = cfg.clear_speed_mps;
+                numeric_spinner(
+                    ui,
+                    ("tq_clear_spd", a.id),
+                    &mut cfg.clear_speed_mps,
+                    SpinnerConfig {
+                        min: 2.0,
+                        max: 60.0,
+                        step: 0.5,
+                        drag_speed: 0.25,
+                        decimals: 1,
+                        suffix: " m/s",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.clear_speed_mps - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "Kecepatan saat tombol 'Lancar' diklik (~{:.0} km/jam)",
+                    cfg.clear_speed_mps * 3.6
+                ))
+                .size(9.5)
+                .color(egui::Color32::from_rgb(110, 231, 183)),
+            );
+            ui.add_space(4.0);
+
+            ui.label(
+                egui::RichText::new("Mode Urai (Saat Tombol Lancar Diklik):")
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(186, 230, 253)),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if ui
+                    .selectable_value(
+                        &mut cfg.clearance_mode,
+                        QueueClearanceMode::DrainCorridor,
+                        egui::RichText::new(QueueClearanceMode::DrainCorridor.label()).size(10.0),
+                    )
+                    .on_hover_text(
+                        "Kuras habis seluruh sisa antrean jalur aktif dulu sampai kosong, baru pindah ke jalur berikutnya",
+                    )
+                    .changed()
+                {
+                    cfg_changed = true;
+                }
+                if ui
+                    .selectable_value(
+                        &mut cfg.clearance_mode,
+                        QueueClearanceMode::AlternatingTimed,
+                        egui::RichText::new(QueueClearanceMode::AlternatingTimed.label()).size(10.0),
+                    )
+                    .on_hover_text(
+                        "Tetap bergantian antar jalur sesuai Durasi Giliran dengan kecepatan Lancar (langsung pindah jika jalur sudah habis) sampai semua jalur 0 kendaraan",
+                    )
+                    .changed()
+                {
+                    cfg_changed = true;
+                }
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Durasi Giliran:");
+                let prev = cfg.turn_duration_sec;
+                numeric_spinner(
+                    ui,
+                    ("tq_turn_dur", a.id),
+                    &mut cfg.turn_duration_sec,
+                    SpinnerConfig {
+                        min: 2.0,
+                        max: 180.0,
+                        step: 1.0,
+                        drag_speed: 0.5,
+                        decimals: 1,
+                        suffix: " dtk",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.turn_duration_sec - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Jeda Pindah:");
+                let prev = cfg.switch_pause_sec;
+                numeric_spinner(
+                    ui,
+                    ("tq_sw_pause", a.id),
+                    &mut cfg.switch_pause_sec,
+                    SpinnerConfig {
+                        min: 0.0,
+                        max: 15.0,
+                        step: 0.5,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " dtk",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.switch_pause_sec - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max Antre/Jalur:");
+                let mut v = cfg.max_vehicles_per_corridor as f64;
+                numeric_spinner(
+                    ui,
+                    ("tq_max_v", a.id),
+                    &mut v,
+                    SpinnerConfig {
+                        min: 1.0,
+                        max: 80.0,
+                        step: 1.0,
+                        drag_speed: 0.25,
+                        decimals: 0,
+                        suffix: " unit",
+                        wrap_around: false,
+                    },
+                );
+                let new_v = v.round().clamp(1.0, 80.0) as u32;
+                if new_v != cfg.max_vehicles_per_corridor {
+                    cfg.max_vehicles_per_corridor = new_v;
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Jarak Aman:");
+                let prev = cfg.min_safe_gap_m;
+                numeric_spinner(
+                    ui,
+                    ("tq_gap", a.id),
+                    &mut cfg.min_safe_gap_m,
+                    SpinnerConfig {
+                        min: 0.8,
+                        max: 25.0,
+                        step: 0.5,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " m",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.min_safe_gap_m - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Jeda Spawn:");
+                let prev = cfg.spawn_interval_sec;
+                numeric_spinner(
+                    ui,
+                    ("tq_spw", a.id),
+                    &mut cfg.spawn_interval_sec,
+                    SpinnerConfig {
+                        min: 0.3,
+                        max: 20.0,
+                        step: 0.2,
+                        drag_speed: 0.1,
+                        decimals: 1,
+                        suffix: " dtk",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.spawn_interval_sec - prev).abs() > 1e-6 {
+                    cfg_changed = true;
+                }
+            });
+
+            ui.add_space(4.0);
+            if ui
+                .checkbox(
+                    &mut cfg.prefill_initial_queue,
+                    "Mulai penuh antrean (Pre-fill)",
+                )
+                .on_hover_text(
+                    "Jika aktif, seluruh Jalur Antre langsung terisi penuh dari garis akhir sampai garis awal saat Play ditekan, dan terus diisi penuh selama fase normal",
+                )
+                .changed()
+            {
+                cfg_changed = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Seed Sync: #{}", cfg.seed % 100_000))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                if ui
+                    .small_button("Acak Pola")
+                    .on_hover_text(
+                        "Ubah seed acak deterministik (tetap sinkron identik dengan Layar Besar)",
+                    )
+                    .clicked()
+                {
+                    cfg.seed = cfg
+                        .seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    cfg_changed = true;
+                }
+            });
+        });
+    });
+
+    if cfg_changed {
+        write_traffic_queue_config(a, &cfg);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_traffic_queue_vehicle_pool_card(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    tcam: &mut TacticalCamera,
+    playback: &mut PlaybackState,
+    route_edit: &mut RouteEditState,
+    anim_id: Uuid,
+    vehicle_pool: &mut Vec<TrafficVehicleEntry>,
+    preview_lane_geom: Option<&[[f64; 3]]>,
+    editable: bool,
+) -> bool {
+    let mut changed = false;
+    inspector_card(
+        ui,
+        &format!("Pool Model 3D Kendaraan ({})", vehicle_pool.len()),
+        true,
+        |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Bisa preview maks. 2 model sekaligus di jalur untuk membandingkan skala antar mobil/motor langsung di peta.",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            ui.add_space(4.0);
+
+            let active_preview_count = state
+                .traffic_scale_preview
+                .as_ref()
+                .filter(|p| p.anim_id == anim_id)
+                .map(|p| p.pool_indices.len())
+                .unwrap_or(0);
+            if active_preview_count > 0 {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(12, 46, 62))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Preview aktif: {active_preview_count}/2 model"
+                                ))
+                                .size(10.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(125, 211, 252)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("Tutup Semua")
+                                                .size(9.5)
+                                                .color(egui::Color32::from_rgb(253, 230, 138)),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.traffic_scale_preview = None;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(
+                                egui::RichText::new("Posisi:")
+                                    .size(9.5)
+                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            ui.selectable_value(
+                                &mut state.traffic_preview_layout,
+                                TrafficPreviewLayout::FrontBack,
+                                egui::RichText::new("Depan-Belakang").size(9.5),
+                            );
+                            ui.selectable_value(
+                                &mut state.traffic_preview_layout,
+                                TrafficPreviewLayout::SideBySide,
+                                egui::RichText::new("Berdampingan").size(9.5),
+                            );
+                        });
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Jarak Preview:")
+                                    .size(9.5)
+                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            let spin_w = (ui.available_width() - 2.0).max(70.0);
+                            numeric_spinner_w(
+                                ui,
+                                ("tq_prev_gap", anim_id),
+                                &mut state.traffic_preview_gap_m,
+                                spin_w,
+                                SpinnerConfig {
+                                    min: 0.0,
+                                    max: 50.0,
+                                    step: 0.5,
+                                    drag_speed: 0.2,
+                                    decimals: 1,
+                                    suffix: " m",
+                                    wrap_around: false,
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+
+            let mut remove_pool_idx: Option<usize> = None;
+            let mut toggle_preview_idx: Option<usize> = None;
+            let mut focus_gizmo_idx: Option<usize> = None;
+            let has_any_lane = preview_lane_geom.is_some_and(|g| g.len() >= 2);
+
+            for idx in 0..vehicle_pool.len() {
+                let preview_slot = state
+                    .traffic_scale_preview
+                    .as_ref()
+                    .filter(|p| p.anim_id == anim_id)
+                    .and_then(|p| p.pool_indices.iter().position(|&pi| pi == idx));
+                let is_in_preview = preview_slot.is_some();
+                let is_active_gizmo = state.traffic_scale_preview.as_ref().is_some_and(|p| {
+                    p.anim_id == anim_id && p.active_gizmo_pool_idx == idx && is_in_preview
+                });
+
+                egui::Frame::new()
+                    .fill(if is_active_gizmo {
+                        egui::Color32::from_rgb(12, 46, 62)
+                    } else if is_in_preview {
+                        egui::Color32::from_rgb(42, 34, 16)
+                    } else {
+                        egui::Color32::from_rgb(15, 23, 42)
+                    })
+                    .stroke(egui::Stroke::new(
+                        if is_in_preview { 1.3 } else { 1.0 },
+                        if is_active_gizmo {
+                            egui::Color32::from_rgb(56, 189, 248)
+                        } else if is_in_preview {
+                            egui::Color32::from_rgb(245, 158, 11)
+                        } else {
+                            egui::Color32::from_rgb(44, 62, 92)
+                        },
+                    ))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if editable {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(
+                                                egui::RichText::new("Hapus")
+                                                    .size(9.5)
+                                                    .color(egui::Color32::from_rgb(248, 113, 113)),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove_pool_idx = Some(idx);
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                let slot_tag =
+                                                    match (preview_slot, state.traffic_preview_layout)
+                                                    {
+                                                        (
+                                                            Some(0),
+                                                            TrafficPreviewLayout::FrontBack,
+                                                        ) => "[Depan] ",
+                                                        (
+                                                            Some(1),
+                                                            TrafficPreviewLayout::FrontBack,
+                                                        ) => "[Belakang] ",
+                                                        (
+                                                            Some(0),
+                                                            TrafficPreviewLayout::SideBySide,
+                                                        ) => "[Sisi 1] ",
+                                                        (
+                                                            Some(1),
+                                                            TrafficPreviewLayout::SideBySide,
+                                                        ) => "[Sisi 2] ",
+                                                        _ => "",
+                                                    };
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format!(
+                                                            "{slot_tag}{}",
+                                                            vehicle_pool[idx].name
+                                                        ))
+                                                        .size(11.0)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
+                            } else {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&vehicle_pool[idx].name)
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+
+                        if editable {
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                if is_in_preview {
+                                    if is_active_gizmo {
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(8, 145, 178))
+                                            .corner_radius(3.0)
+                                            .inner_margin(egui::Margin::symmetric(6, 2))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Scale Gizmo Aktif")
+                                                        .size(9.5)
+                                                        .strong()
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            });
+                                    } else {
+                                        let pick_gizmo = egui::Button::new(
+                                            egui::RichText::new("Pindah Scale Gizmo")
+                                                .size(9.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(37, 99, 235))
+                                        .small();
+                                        if ui.add(pick_gizmo).clicked() {
+                                            focus_gizmo_idx = Some(idx);
+                                        }
+                                    }
+                                    let close_btn = egui::Button::new(
+                                        egui::RichText::new("Tutup Preview")
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(180, 83, 9))
+                                    .small();
+                                    if ui.add(close_btn).clicked() {
+                                        toggle_preview_idx = Some(idx);
+                                    }
+                                } else {
+                                    let lbl = if active_preview_count == 1 {
+                                        "Preview Bandingkan (2/2)"
+                                    } else {
+                                        "Preview & Scale di Peta"
+                                    };
+                                    let prev_btn = egui::Button::new(
+                                        egui::RichText::new(lbl)
+                                            .size(9.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(14, 116, 144))
+                                    .small();
+                                    if ui.add_enabled(has_any_lane, prev_btn).clicked() {
+                                        toggle_preview_idx = Some(idx);
+                                    }
+                                }
+                            });
+                        }
+
+                        ui.add_space(3.0);
+                        ui.add_enabled_ui(editable, |ui| {
+                            let lbl_w = 50.0_f32;
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Skala:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let prev_s = vehicle_pool[idx].scale;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tq_v_scale", anim_id, idx),
+                                    &mut vehicle_pool[idx].scale,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.05,
+                                        max: 20.0,
+                                        step: 0.05,
+                                        drag_speed: 0.02,
+                                        decimals: 2,
+                                        suffix: "x",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (vehicle_pool[idx].scale - prev_s).abs() > 1e-6 {
+                                    changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Panjang:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let prev_l = vehicle_pool[idx].length_m;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tq_v_len", anim_id, idx),
+                                    &mut vehicle_pool[idx].length_m,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 1.5,
+                                        max: 24.0,
+                                        step: 0.5,
+                                        drag_speed: 0.2,
+                                        decimals: 1,
+                                        suffix: " m",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (vehicle_pool[idx].length_m - prev_l).abs() > 1e-6 {
+                                    changed = true;
+                                }
+                            });
+                            if let Some([mw, mh, ml]) = measured_vehicle_scaled_dims(
+                                state,
+                                &vehicle_pool[idx].model_path,
+                                vehicle_pool[idx].scale as f32,
+                                vehicle_pool[idx].rot_y_offset_deg,
+                            ) {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "3D asli: P {ml:.1}m x L {mw:.1}m x T {mh:.1}m"
+                                        ))
+                                        .size(9.5)
+                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                    );
+                                    if (ml - vehicle_pool[idx].length_m as f32).abs() > 0.35
+                                        && ui
+                                            .small_button(format!("Sync P ({ml:.1}m)"))
+                                            .clicked()
+                                    {
+                                        vehicle_pool[idx].length_m =
+                                            ((ml as f64).clamp(1.2, 24.0) * 10.0).round() / 10.0;
+                                        changed = true;
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Rot Y:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 44.0).max(66.0);
+                                let prev_r = vehicle_pool[idx].rot_y_offset_deg;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tq_v_roty", anim_id, idx),
+                                    &mut vehicle_pool[idx].rot_y_offset_deg,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.0,
+                                        max: 360.0,
+                                        step: 90.0,
+                                        drag_speed: 1.0,
+                                        decimals: 0,
+                                        suffix: "°",
+                                        wrap_around: true,
+                                    },
+                                );
+                                if (vehicle_pool[idx].rot_y_offset_deg - prev_r).abs() > 1e-6 {
+                                    changed = true;
+                                }
+                                if ui.small_button("+90°").clicked() {
+                                    vehicle_pool[idx].rot_y_offset_deg =
+                                        (vehicle_pool[idx].rot_y_offset_deg + 90.0) % 360.0;
+                                    changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    egui::vec2(lbl_w, 20.0),
+                                    egui::Label::new(egui::RichText::new("Bobot:").size(10.0)),
+                                );
+                                let spin_w = (ui.available_width() - 2.0).max(66.0);
+                                let mut w_f64 = vehicle_pool[idx].weight as f64;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("tq_v_w", anim_id, idx),
+                                    &mut w_f64,
+                                    spin_w,
+                                    SpinnerConfig {
+                                        min: 0.1,
+                                        max: 20.0,
+                                        step: 0.5,
+                                        drag_speed: 0.1,
+                                        decimals: 1,
+                                        suffix: "",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (w_f64 as f32 - vehicle_pool[idx].weight).abs() > 1e-4 {
+                                    vehicle_pool[idx].weight = w_f64 as f32;
+                                    changed = true;
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(3.0);
+            }
+
+            if let Some(idx) = focus_gizmo_idx
+                && let Some(ref mut preview) = state.traffic_scale_preview
+                && preview.anim_id == anim_id
+            {
+                preview.active_gizmo_pool_idx = idx;
+            }
+
+            if let Some(idx) = toggle_preview_idx {
+                let already_present = state
+                    .traffic_scale_preview
+                    .as_ref()
+                    .filter(|p| p.anim_id == anim_id)
+                    .is_some_and(|p| p.pool_indices.contains(&idx));
+                if already_present {
+                    if let Some(ref mut preview) = state.traffic_scale_preview {
+                        preview.pool_indices.retain(|&i| i != idx);
+                        if preview.pool_indices.is_empty() {
+                            state.traffic_scale_preview = None;
+                        } else if preview.active_gizmo_pool_idx == idx {
+                            preview.active_gizmo_pool_idx = preview.pool_indices[0];
+                        }
+                    }
+                } else {
+                    route_edit.clear();
+                    playback.stop_editor_preview();
+                    state.tool_mode = ToolMode::Select;
+                    let mut indices = state
+                        .traffic_scale_preview
+                        .as_ref()
+                        .filter(|p| p.anim_id == anim_id)
+                        .map(|p| p.pool_indices.clone())
+                        .unwrap_or_default();
+                    if indices.len() >= 2 {
+                        indices.remove(0);
+                    }
+                    indices.push(idx);
+                    state.traffic_scale_preview = Some(TrafficScalePreviewState {
+                        anim_id,
+                        pool_indices: indices,
+                        active_gizmo_pool_idx: idx,
+                    });
+                    if let Some(geom) = preview_lane_geom
+                        && geom.len() >= 2
+                    {
+                        let p0 = state
+                            .geo_anchor
+                            .lng_lat_alt_to_local(geom[0][0], geom[0][1], 0.0);
+                        let p1 = state
+                            .geo_anchor
+                            .lng_lat_alt_to_local(geom[1][0], geom[1][1], 0.0);
+                        let v0 = bevy::math::Vec2::new(p0[0], p0[2]);
+                        let v1 = bevy::math::Vec2::new(p1[0], p1[2]);
+                        let seg = v1 - v0;
+                        let seg_len = seg.length().max(0.01);
+                        let t = (10.0_f32.min(seg_len * 0.45) / seg_len).clamp(0.0, 1.0);
+                        tcam.target_local = v0.lerp(v1, t);
+                    }
+                }
+            }
+
+            if let Some(idx) = remove_pool_idx {
+                vehicle_pool.remove(idx);
+                if let Some(ref mut preview) = state.traffic_scale_preview
+                    && preview.anim_id == anim_id
+                {
+                    preview.pool_indices.retain(|&i| i != idx);
+                    for pi in &mut preview.pool_indices {
+                        if *pi > idx {
+                            *pi -= 1;
+                        }
+                    }
+                    if preview.pool_indices.is_empty() {
+                        state.traffic_scale_preview = None;
+                    } else if preview.active_gizmo_pool_idx == idx {
+                        preview.active_gizmo_pool_idx = preview.pool_indices[0];
+                    } else if preview.active_gizmo_pool_idx > idx {
+                        preview.active_gizmo_pool_idx -= 1;
+                    }
+                }
+                changed = true;
+            }
+
+            if editable {
+                ui.add_space(5.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tambah dari Semua Katalog 3D ({} total):",
+                        state.catalog.len()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                );
+                ui.add_space(3.0);
+
+                let mut cat_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for m in &state.catalog {
+                    *cat_counts.entry(m.category.clone()).or_insert(0) += 1;
+                }
+                let selected_cat_label = match &state.traffic_pool_category_filter {
+                    None => format!("Semua Kategori ({})", state.catalog.len()),
+                    Some(c) => {
+                        let cnt = cat_counts.get(c).copied().unwrap_or(0);
+                        format!("{c} ({cnt})")
+                    }
+                };
+                egui::ComboBox::from_id_salt(("tq_cat_filter", anim_id))
+                    .width((ui.available_width() - 4.0).max(120.0))
+                    .selected_text(selected_cat_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.traffic_pool_category_filter,
+                            None,
+                            format!("Semua Kategori ({})", state.catalog.len()),
+                        );
+                        for (cat, cnt) in &cat_counts {
+                            ui.selectable_value(
+                                &mut state.traffic_pool_category_filter,
+                                Some(cat.clone()),
+                                format!("{cat} ({cnt})"),
+                            );
+                        }
+                    });
+                ui.add_space(3.0);
+
+                ui.horizontal(|ui| {
+                    let has_q = !state.traffic_pool_search.is_empty();
+                    let search_w =
+                        (ui.available_width() - if has_q { 52.0 } else { 4.0 }).max(80.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.traffic_pool_search)
+                            .hint_text("Cari nama / kategori model 3D...")
+                            .desired_width(search_w),
+                    );
+                    if has_q && ui.small_button("Reset").clicked() {
+                        state.traffic_pool_search.clear();
+                    }
+                });
+                ui.add_space(3.0);
+
+                let q = state.traffic_pool_search.trim().to_lowercase();
+                let cat_filter = state.traffic_pool_category_filter.clone();
+                let candidates: Vec<_> = state
+                    .catalog
+                    .iter()
+                    .filter(|m| {
+                        if vehicle_pool.iter().any(|v| v.model_path == m.model_path) {
+                            return false;
+                        }
+                        if let Some(ref cf) = cat_filter
+                            && m.category != *cf
+                        {
+                            return false;
+                        }
+                        if q.is_empty() {
+                            true
+                        } else {
+                            m.name.to_lowercase().contains(&q)
+                                || m.category.to_lowercase().contains(&q)
+                                || m.model_path.to_lowercase().contains(&q)
+                        }
+                    })
+                    .cloned()
+                    .collect();
+
+                if cat_filter.is_some() && !candidates.is_empty() && candidates.len() <= 25 {
+                    let add_all_btn = egui::Button::new(
+                        egui::RichText::new(format!(
+                            "+ Tambah Semua ({} model)",
+                            candidates.len()
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105))
+                    .small();
+                    if ui.add(add_all_btn).clicked() {
+                        for m in &candidates {
+                            vehicle_pool.push(TrafficVehicleEntry {
+                                model_path: m.model_path.clone(),
+                                name: m.name.clone(),
+                                scale: 1.0,
+                                length_m: TrafficVehicleEntry::estimate_length_m(
+                                    &m.name,
+                                    &m.model_path,
+                                ),
+                                weight: 1.0,
+                                rot_y_offset_deg: m.default_rotation_deg[1],
+                            });
+                        }
+                        changed = true;
+                    }
+                    ui.add_space(3.0);
+                }
+
+                egui::ScrollArea::vertical()
+                    .id_salt(("tq_cat_scroll", anim_id))
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        if candidates.is_empty() {
+                            ui.label(
+                                egui::RichText::new("Tidak ada model tambahan yang cocok.")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                        } else {
+                            for m in &candidates {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button(
+                                            egui::RichText::new("+")
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(110, 231, 183)),
+                                        )
+                                        .clicked()
+                                    {
+                                        vehicle_pool.push(TrafficVehicleEntry {
+                                            model_path: m.model_path.clone(),
+                                            name: m.name.clone(),
+                                            scale: 1.0,
+                                            length_m: TrafficVehicleEntry::estimate_length_m(
+                                                &m.name,
+                                                &m.model_path,
+                                            ),
+                                            weight: 1.0,
+                                            rot_y_offset_deg: m.default_rotation_deg[1],
+                                        });
+                                        changed = true;
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "{} ({})",
+                                                m.name, m.category
+                                            ))
+                                            .size(10.5)
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                            }
+                        }
+                    });
+            }
+        },
+    );
+    changed
 }
 
 fn draw_group_anim_inspector_cards(

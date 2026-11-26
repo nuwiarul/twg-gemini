@@ -150,6 +150,16 @@ pub fn anim_primary_focus_lnglat(
             return Some((p[0], p[1]));
         }
     }
+    if twg_shared::traffic_queue::is_traffic_queue_anim(anim) {
+        let cfg = twg_shared::traffic_queue::parse_traffic_queue_config(anim);
+        if let Some(p) = cfg
+            .corridors
+            .iter()
+            .find_map(|c| c.queue_geom.first().or_else(|| c.clear_geom.first()))
+        {
+            return Some((p[0], p[1]));
+        }
+    }
     if let Some(p) = anim.geom.first() {
         return Some((p[0], p[1]));
     }

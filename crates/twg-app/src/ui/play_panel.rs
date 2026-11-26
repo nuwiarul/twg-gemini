@@ -16,6 +16,7 @@ use twg_shared::{
     },
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
     traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
 use uuid::Uuid;
 
@@ -33,7 +34,7 @@ use crate::{
     ui::{
         nav_bar::{open_tactical_skenario, trigger_load_tactical_operasis},
         spinner::{SpinnerConfig, numeric_spinner_f32_w},
-        topbar::broadcast_tactical_anim_cmd,
+        topbar::{broadcast_tactical_anim_cmd, broadcast_tactical_queue_clear_cmd},
     },
 };
 use twg_shared::ws::{TacticalCommand, WsClientMode};
@@ -459,6 +460,7 @@ pub fn draw_play_animation_panel(
             let mut action_pause: Option<Uuid> = None;
             let mut action_resume: Option<Uuid> = None;
             let mut action_stop: Option<Uuid> = None;
+            let mut action_queue_clear: Option<Uuid> = None;
 
             let selected_cat = playback.play_panel_category;
             let search_query = playback.play_panel_search.trim().to_lowercase();
@@ -627,6 +629,7 @@ pub fn draw_play_animation_panel(
                         let is_shoot = shoot_kind.is_some();
                         let is_particle = is_particle_anim(anim);
                         let is_traffic = is_traffic_anim(anim);
+                        let is_traffic_queue = is_traffic_queue_anim(anim);
                         let is_pointer = is_pointer_arrow_anim(anim);
                         let is_spawn_hide = is_spawn_hide_anim(anim);
                         let is_group = is_group_anim(anim);
@@ -638,6 +641,16 @@ pub fn draw_play_animation_panel(
                         };
                         let tr_cfg = if is_traffic {
                             Some(parse_traffic_anim_config(anim))
+                        } else {
+                            None
+                        };
+                        let tq_cfg = if is_traffic_queue {
+                            Some(parse_traffic_queue_config(anim))
+                        } else {
+                            None
+                        };
+                        let tq_live = if is_traffic_queue {
+                            state.traffic_queue_live_status.get(&anim.id).cloned()
                         } else {
                             None
                         };
@@ -681,6 +694,16 @@ pub fn draw_play_animation_panel(
                                 let dur = anim.duration_sec.max(10.0);
                                 (elapsed.clamp(0.0, dur), dur, (elapsed / dur).clamp(0.0, 1.0) as f32)
                             }
+                        } else if tq_cfg.is_some() {
+                            let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
+                            let p = if status == AnimRunStatus::Finished {
+                                1.0
+                            } else if status == AnimRunStatus::Playing {
+                                1.0
+                            } else {
+                                0.0
+                            };
+                            (elapsed, 0.0, p)
                         } else if let Some(ref pcfg) = p_cfg {
                             let elapsed = track.map(|t| t.distance_m).unwrap_or(0.0);
                             if pcfg.continuous {
@@ -849,6 +872,25 @@ pub fn draw_play_animation_panel(
                                         egui::Color32::from_rgb(253, 230, 138),
                                         egui::Color32::from_rgb(245, 158, 11),
                                     )
+                                } else if is_traffic_queue {
+                                    let is_clearing = track
+                                        .and_then(|t| t.queue_clearance_at_sec)
+                                        .is_some();
+                                    if is_clearing {
+                                        (
+                                            "MODE LANCAR",
+                                            egui::Color32::from_rgb(6, 78, 59),
+                                            egui::Color32::from_rgb(110, 231, 183),
+                                            egui::Color32::from_rgb(16, 185, 129),
+                                        )
+                                    } else {
+                                        (
+                                            "URAI SIMPANG",
+                                            egui::Color32::from_rgb(17, 94, 89),
+                                            egui::Color32::from_rgb(153, 246, 228),
+                                            egui::Color32::from_rgb(20, 184, 166),
+                                        )
+                                    }
                                 } else if is_pointer {
                                     (
                                         "MENUNJUK",
@@ -1025,6 +1067,8 @@ pub fn draw_play_animation_panel(
                                         }
                                     } else if is_traffic {
                                         ("[TRAFFIC]", egui::Color32::from_rgb(251, 191, 36))
+                                    } else if is_traffic_queue {
+                                        ("[URAI SIMPANG]", egui::Color32::from_rgb(45, 212, 191))
                                     } else if is_multi {
                                         if parse_multi_route_config(anim).formation
                                             == RouteFormationKind::Patwal
@@ -1178,6 +1222,74 @@ pub fn draw_play_animation_panel(
                                             egui::RichText::new(info_line)
                                                 .size(11.0)
                                                 .color(egui::Color32::from_rgb(253, 230, 138)),
+                                        )
+                                        .truncate(),
+                                    );
+                                } else if let Some(ref tqc) = tq_cfg {
+                                    let incomplete = tqc.incomplete_corridor_names();
+                                    let (info_line, info_col) = if let Some(ref live) = tq_live
+                                        && matches!(status, AnimRunStatus::Playing | AnimRunStatus::Paused)
+                                    {
+                                        if live.clearance_active {
+                                            (
+                                                format!(
+                                                    "MODE LANCAR  •  Sisa {} kendaraan ({} antre, {} keluar)",
+                                                    live.total_vehicles,
+                                                    live.queued_vehicles,
+                                                    live.clearing_vehicles
+                                                ),
+                                                egui::Color32::from_rgb(110, 231, 183),
+                                            )
+                                        } else if live.is_switch_pause {
+                                            (
+                                                format!(
+                                                    "Jeda pindah -> {} ({:.1}s)  •  {} kendaraan",
+                                                    live.active_corridor_name.as_deref().unwrap_or("-"),
+                                                    live.remaining_turn_sec,
+                                                    live.total_vehicles
+                                                ),
+                                                egui::Color32::from_rgb(253, 230, 138),
+                                            )
+                                        } else {
+                                            (
+                                                format!(
+                                                    "Giliran: {} ({:.0}s)  •  {} antre / {} lancar",
+                                                    live.active_corridor_name.as_deref().unwrap_or("-"),
+                                                    live.remaining_turn_sec,
+                                                    live.queued_vehicles,
+                                                    live.clearing_vehicles
+                                                ),
+                                                egui::Color32::from_rgb(153, 246, 228),
+                                            )
+                                        }
+                                    } else if !incomplete.is_empty() {
+                                        (
+                                            format!(
+                                                "Belum lengkap: {} belum punya Jalur Lancar!",
+                                                incomplete.join(", ")
+                                            ),
+                                            egui::Color32::from_rgb(248, 113, 113),
+                                        )
+                                    } else {
+                                        let active_cor = tqc
+                                            .corridors
+                                            .iter()
+                                            .filter(|c| c.enabled && c.is_complete())
+                                            .count();
+                                        (
+                                            format!(
+                                                "{active_cor} Jalur Berpasangan  •  {} Model  •  {:.0}s/giliran",
+                                                tqc.vehicle_pool.len(),
+                                                tqc.turn_duration_sec
+                                            ),
+                                            egui::Color32::from_rgb(153, 246, 228),
+                                        )
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(info_line)
+                                                .size(11.0)
+                                                .color(info_col),
                                         )
                                         .truncate(),
                                     );
@@ -1408,6 +1520,11 @@ pub fn draw_play_animation_panel(
                                             )
                                         }
                                     }
+                                } else if let Some(ref tqc) = tq_cfg {
+                                    format!(
+                                        "Konvoi: {:.1} m/s  •  Lancar: {:.1} m/s  •  t = {:.1} dtk",
+                                        tqc.convoy_speed_mps, tqc.clear_speed_mps, dist_m
+                                    )
                                 } else {
                                     format!(
                                         "Speed: {:.1} m/s  •  Jarak: {:.1} / {:.1} m  •  Repeat: {}",
@@ -1484,6 +1601,43 @@ pub fn draw_play_animation_panel(
                                         }
                                     }
                                     AnimRunStatus::Playing => {
+                                        if is_traffic_queue {
+                                            let is_clearing = track
+                                                .and_then(|t| t.queue_clearance_at_sec)
+                                                .is_some();
+                                            let rem = tq_live
+                                                .as_ref()
+                                                .map(|s| s.total_vehicles)
+                                                .unwrap_or(0);
+                                            let clear_btn = egui::Button::new(
+                                                egui::RichText::new(if is_clearing {
+                                                    format!(
+                                                        "Mode Lancar Aktif (Sisa {rem} kendaraan...)"
+                                                    )
+                                                } else {
+                                                    "LANCAR (Urai Sampai Habis)".to_string()
+                                                })
+                                                .size(11.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                            )
+                                            .fill(if is_clearing {
+                                                egui::Color32::from_rgb(6, 78, 59)
+                                            } else {
+                                                egui::Color32::from_rgb(5, 150, 105)
+                                            })
+                                            .min_size(egui::vec2(ui.available_width(), 28.0));
+                                            if ui
+                                                .add_enabled(!is_clearing, clear_btn)
+                                                .on_hover_text(
+                                                    "Stop spawn mobil baru & percepat seluruh kendaraan yang tersisa bergantian sampai habis (0 kendaraan)",
+                                                )
+                                                .clicked()
+                                            {
+                                                action_queue_clear = Some(anim.id);
+                                            }
+                                            ui.add_space(4.0);
+                                        }
                                         ui.columns(2, |cols| {
                                             let pause_btn = egui::Button::new(
                                                 egui::RichText::new("Pause")
@@ -1645,6 +1799,10 @@ pub fn draw_play_animation_panel(
                     false,
                     playback.speed_multiplier,
                 );
+            } else if let Some(aid) = action_queue_clear {
+                if let Some(trig_sec) = playback.trigger_queue_clearance(aid, None) {
+                    broadcast_tactical_queue_clear_cmd(state, ws, aid, trig_sec);
+                }
             }
 
             if let Some((lng, lat)) = fly_to {
@@ -1972,6 +2130,17 @@ fn anim_matches_play_search(
         for l in &cfg.lanes {
             haystack.push(' ');
             haystack.push_str(&l.name);
+        }
+        for v in &cfg.vehicle_pool {
+            haystack.push(' ');
+            haystack.push_str(&v.name);
+        }
+    } else if is_traffic_queue_anim(anim) {
+        let cfg = parse_traffic_queue_config(anim);
+        haystack.push_str(" urai simpang antrean lancar buka tutup konvoi traffic ");
+        for c in &cfg.corridors {
+            haystack.push(' ');
+            haystack.push_str(&c.name);
         }
         for v in &cfg.vehicle_pool {
             haystack.push(' ');

@@ -1109,6 +1109,7 @@ fn process_net_events_system(
                 let anim_name = a.name.clone();
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
+                let is_traffic_queue = twg_shared::traffic_queue::is_traffic_queue_anim(&a);
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
@@ -1119,6 +1120,7 @@ fn process_net_events_system(
                 let bound_empty = twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
                 let needs_marker_pick = !is_particle
                     && !is_traffic
+                    && !is_traffic_queue
                     && !is_shoot
                     && !is_pointer
                     && !is_spawn_hide
@@ -1142,6 +1144,10 @@ fn process_net_events_system(
                 } else if is_traffic {
                     state.status_banner = Some(format!(
                         "Simulasi Traffic '{anim_name}' dibuat — tambah jalur balik / atur pool kendaraan di Inspector lalu klik Preview!"
+                    ));
+                } else if is_traffic_queue {
+                    state.status_banner = Some(format!(
+                        "Antrean & Urai Simpang '{anim_name}' dibuat — sekarang gambar Jalur Lancar untuk Jalur A di Inspector!"
                     ));
                 } else if is_shoot {
                     let kind_label = twg_shared::shoot_anim::shoot_anim_kind(
@@ -1672,6 +1678,20 @@ fn process_net_events_system(
                     }
                     "stop_all_anim" => {
                         playback.stop_all_routes(&state.anims);
+                    }
+                    "traffic_queue_clear" => {
+                        if let Some(aid) = msg
+                            .payload
+                            .get("anim_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                        {
+                            let trig = msg
+                                .payload
+                                .get("trigger_elapsed_sec")
+                                .and_then(|v| v.as_f64());
+                            playback.trigger_queue_clearance(aid, trig);
+                        }
                     }
                     "set_speed" => {
                         if let Some(spd) = msg

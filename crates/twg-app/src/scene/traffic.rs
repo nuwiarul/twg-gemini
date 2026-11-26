@@ -6,6 +6,9 @@ use twg_shared::{
     traffic_anim::{
         TrafficSimEngine, TrafficVehiclePose, is_traffic_anim, parse_traffic_anim_config,
     },
+    traffic_queue::{
+        TrafficQueueSimEngine, is_traffic_queue_anim, parse_traffic_queue_config,
+    },
 };
 use uuid::Uuid;
 
@@ -114,25 +117,49 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
     let Some(anim) = state
         .anims
         .iter()
-        .find(|a| a.id == preview.anim_id && is_traffic_anim(a))
+        .find(|a| a.id == preview.anim_id && (is_traffic_anim(a) || is_traffic_queue_anim(a)))
     else {
         return Vec::new();
     };
-    let cfg = parse_traffic_anim_config(anim);
-    let Some(lane) = cfg
-        .lanes
-        .iter()
-        .find(|l| l.enabled && l.geom.len() >= 2)
-        .or_else(|| cfg.lanes.iter().find(|l| l.geom.len() >= 2))
-    else {
-        return Vec::new();
+    let (lane_geom, vehicle_pool, lane_w, side_sign): (
+        Vec<[f64; 3]>,
+        Vec<twg_shared::traffic_anim::TrafficVehicleEntry>,
+        f32,
+        f32,
+    ) = if is_traffic_queue_anim(anim) {
+        let cfg = parse_traffic_queue_config(anim);
+        let Some(cor) = cfg
+            .corridors
+            .iter()
+            .find(|c| c.enabled && c.queue_geom.len() >= 2)
+            .or_else(|| cfg.corridors.iter().find(|c| c.queue_geom.len() >= 2))
+        else {
+            return Vec::new();
+        };
+        (cor.queue_geom.clone(), cfg.vehicle_pool, 3.6_f32, 1.0_f32)
+    } else {
+        let cfg = parse_traffic_anim_config(anim);
+        let Some(lane) = cfg
+            .lanes
+            .iter()
+            .find(|l| l.enabled && l.geom.len() >= 2)
+            .or_else(|| cfg.lanes.iter().find(|l| l.geom.len() >= 2))
+        else {
+            return Vec::new();
+        };
+        (
+            lane.geom.clone(),
+            cfg.vehicle_pool,
+            cfg.lane_width_m as f32,
+            cfg.overtake_side.lateral_sign() as f32,
+        )
     };
 
     let valid_indices: Vec<usize> = preview
         .pool_indices
         .iter()
         .copied()
-        .filter(|&i| i < cfg.vehicle_pool.len())
+        .filter(|&i| i < vehicle_pool.len())
         .take(2)
         .collect();
     if valid_indices.is_empty() {
@@ -140,13 +167,12 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
     }
 
     let gap_m = (state.traffic_preview_gap_m as f32).clamp(0.0, 50.0);
-    let lane_w = cfg.lane_width_m as f32;
 
     // Resolve actual 3D width & length for each preview slot (fallback to configured length if still loading)
     let dims: Vec<(f32, f32)> = valid_indices
         .iter()
         .map(|&pi| {
-            let e = &cfg.vehicle_pool[pi];
+            let e = &vehicle_pool[pi];
             if let Some([mw, _mh, ml]) =
                 measured_vehicle_scaled_dims(state, &e.model_path, e.scale as f32, e.rot_y_offset_deg)
             {
@@ -175,7 +201,6 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
                 // Both aligned longitudinally at the same `s`, separated cleanly left/right by `gap_m`!
                 let s = (0.5 * l0.max(l1) + 4.0).max(8.0);
                 let lat_spacing = 0.5 * (w0 + w1) + gap_m;
-                let side_sign = cfg.overtake_side.lateral_sign() as f32;
                 vec![(s, 0.0), (s, side_sign * lat_spacing)]
             }
         }
@@ -183,10 +208,10 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
 
     let mut out = Vec::with_capacity(valid_indices.len());
     for (slot_i, &pool_idx) in valid_indices.iter().enumerate() {
-        let entry = &cfg.vehicle_pool[pool_idx];
+        let entry = &vehicle_pool[pool_idx];
         let (dist_s, lat_off) = placements[slot_i];
         let Some((base_pos, road_yaw_deg)) =
-            sample_lane_local_at_distance(state, &lane.geom, dist_s)
+            sample_lane_local_at_distance(state, &lane_geom, dist_s)
         else {
             continue;
         };
@@ -245,12 +270,18 @@ struct ActiveTrafficSim {
     engine: TrafficSimEngine,
 }
 
-/// Reusable Bevy entity & scene-handle pool for all active Traffic simulations.
+struct ActiveTrafficQueueSim {
+    config_sig: u64,
+    engine: TrafficQueueSimEngine,
+}
+
+/// Reusable Bevy entity & scene-handle pool for all active Traffic simulations (`traffic_flow` & `traffic_queue`).
 /// Vehicles recycle idle `Entity` slots (`Visibility::Hidden` <-> `Visible`) instead of
 /// spawning/despawning glTF hierarchies every cycle, keeping frame times smooth.
 #[derive(Resource, Default)]
 pub struct TrafficVisualPool {
     sims: HashMap<Uuid, ActiveTrafficSim>,
+    queue_sims: HashMap<Uuid, ActiveTrafficQueueSim>,
     scene_handles: HashMap<String, Handle<WorldAsset>>,
     fallback_body_mesh: Option<Handle<Mesh>>,
     fallback_cabin_mesh: Option<Handle<Mesh>>,
@@ -363,7 +394,7 @@ impl TrafficVisualPool {
 pub fn traffic_visual_system(
     mut commands: Commands,
     mut state: ResMut<AppState>,
-    playback: Res<PlaybackState>,
+    mut playback: ResMut<PlaybackState>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -431,6 +462,8 @@ pub fn traffic_visual_system(
 
     if !state.is_3d_map_screen() {
         pool.sims.clear();
+        pool.queue_sims.clear();
+        state.traffic_queue_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
@@ -450,6 +483,8 @@ pub fn traffic_visual_system(
 
     if !playback.play_test_mode && !is_editor_preview && scale_preview_poses.is_empty() {
         pool.sims.clear();
+        pool.queue_sims.clear();
+        state.traffic_queue_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
@@ -472,6 +507,10 @@ pub fn traffic_visual_system(
     };
 
     let mut active_anim_ids: HashSet<Uuid> = HashSet::new();
+    let mut active_queue_anim_ids: HashSet<Uuid> = HashSet::new();
+    let mut completed_queue_anim_ids: Vec<Uuid> = Vec::new();
+    let mut live_queue_statuses: HashMap<Uuid, twg_shared::traffic_queue::TrafficQueueLiveStatus> =
+        HashMap::new();
     let mut active_poses: Vec<(Uuid, TrafficVehiclePose)> = Vec::new();
 
     for sp in scale_preview_poses {
@@ -494,7 +533,9 @@ pub fn traffic_visual_system(
     }
 
     for anim in &state.anims {
-        if !is_traffic_anim(anim) || state.hidden_entity_ids.contains(&anim.id) {
+        let is_flow = is_traffic_anim(anim);
+        let is_queue = is_traffic_queue_anim(anim);
+        if (!is_flow && !is_queue) || state.hidden_entity_ids.contains(&anim.id) {
             continue;
         }
         if let Some(ref scope) = preview_scope
@@ -513,33 +554,83 @@ pub fn traffic_visual_system(
             continue;
         }
 
-        let cfg = parse_traffic_anim_config(anim);
-        if !cfg.has_playable_setup() {
-            continue;
-        }
+        if is_flow {
+            let cfg = parse_traffic_anim_config(anim);
+            if !cfg.has_playable_setup() {
+                continue;
+            }
 
-        active_anim_ids.insert(anim.id);
-        let sig = cfg.config_signature(state.geo_anchor);
-        let sim = pool
-            .sims
-            .entry(anim.id)
-            .or_insert_with(|| ActiveTrafficSim {
-                config_sig: sig,
-                engine: TrafficSimEngine::new(&cfg, state.geo_anchor),
-            });
-        if sim.config_sig != sig {
-            sim.config_sig = sig;
-            sim.engine = TrafficSimEngine::new(&cfg, state.geo_anchor);
-        }
+            active_anim_ids.insert(anim.id);
+            let sig = cfg.config_signature(state.geo_anchor);
+            let sim = pool
+                .sims
+                .entry(anim.id)
+                .or_insert_with(|| ActiveTrafficSim {
+                    config_sig: sig,
+                    engine: TrafficSimEngine::new(&cfg, state.geo_anchor),
+                });
+            if sim.config_sig != sig {
+                sim.config_sig = sig;
+                sim.engine = TrafficSimEngine::new(&cfg, state.geo_anchor);
+            }
 
-        sim.engine.advance_to(track.distance_m);
-        for pose in sim.engine.active_poses() {
-            active_poses.push((anim.id, pose));
+            sim.engine.advance_to(track.distance_m);
+            for pose in sim.engine.active_poses() {
+                active_poses.push((anim.id, pose));
+            }
+        } else if is_queue {
+            let cfg = parse_traffic_queue_config(anim);
+            if !cfg.has_playable_setup() {
+                continue;
+            }
+
+            active_queue_anim_ids.insert(anim.id);
+            let sig = cfg.config_signature(state.geo_anchor);
+            let sim = pool
+                .queue_sims
+                .entry(anim.id)
+                .or_insert_with(|| ActiveTrafficQueueSim {
+                    config_sig: sig,
+                    engine: TrafficQueueSimEngine::new(&cfg, state.geo_anchor),
+                });
+            if sim.config_sig != sig {
+                sim.config_sig = sig;
+                sim.engine = TrafficQueueSimEngine::new(&cfg, state.geo_anchor);
+            }
+
+            sim.engine
+                .advance_to(track.distance_m, track.queue_clearance_at_sec);
+            let status = sim.engine.live_status();
+            if status.is_completed && track.status == AnimRunStatus::Playing {
+                completed_queue_anim_ids.push(anim.id);
+            }
+            live_queue_statuses.insert(anim.id, status);
+            for pose in sim.engine.active_poses() {
+                active_poses.push((anim.id, pose));
+            }
         }
     }
 
+    // Mark any `traffic_queue` animation whose Mode Lancar drained all vehicles to 0 as Finished
+    if !completed_queue_anim_ids.is_empty() {
+        for aid in completed_queue_anim_ids {
+            if let Some(tr) = playback.tracks.get_mut(&aid) {
+                tr.status = AnimRunStatus::Finished;
+                tr.completed_cycles = tr.completed_cycles.saturating_add(1);
+            }
+        }
+        playback.playing = playback
+            .tracks
+            .values()
+            .any(|t| t.status == AnimRunStatus::Playing);
+    }
+
+    state.traffic_queue_live_status = live_queue_statuses;
+
     // Drop simulation state for stopped/removed animations
     pool.sims.retain(|id, _| active_anim_ids.contains(id));
+    pool.queue_sims
+        .retain(|id, _| active_queue_anim_ids.contains(id));
 
     let wanted_keys: HashMap<(Uuid, u64), &str> = active_poses
         .iter()
@@ -613,7 +704,7 @@ pub fn traffic_visual_system(
     }
 
     // Step 3: Gently cap oversized idle pools after switching scenarios/models
-    const MAX_POOLED_SLOTS: usize = 160;
+    const MAX_POOLED_SLOTS: usize = 260;
     if pool.slots.len() > MAX_POOLED_SLOTS {
         let mut to_remove = pool.slots.len() - MAX_POOLED_SLOTS;
         pool.slots.retain(|slot| {

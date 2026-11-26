@@ -987,6 +987,7 @@ pub enum ToolMode {
     PlaceText,
     DrawRoute,
     DrawTrafficLane,
+    DrawTrafficQueueLane,
     PickRouteMarker,
     PickShootMarker,
     PickPointerMarker,
@@ -1008,6 +1009,7 @@ impl ToolMode {
             Self::PlaceText => "Add Label",
             Self::DrawRoute => "Draw Route",
             Self::DrawTrafficLane => "Draw Traffic",
+            Self::DrawTrafficQueueLane => "Draw Urai Simpang",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
             Self::PickPointerMarker => "Pilih Target Panah",
@@ -1163,6 +1165,8 @@ pub struct AnimRuntimeTrack {
     pub group_prev_done_at_sec: Option<f64>,
     /// Snapshot of child IDs launched by this group run for synchronized Pause / Resume / Stop.
     pub group_owned_children: Vec<Uuid>,
+    /// Exact elapsed seconds when live **"Lancar"** clearance mode was triggered on a `traffic_queue` animation.
+    pub queue_clearance_at_sec: Option<f64>,
 }
 
 #[derive(Resource)]
@@ -1269,6 +1273,7 @@ impl PlaybackState {
         entry.group_last_step_start_sec = 0.0;
         entry.group_prev_done_at_sec = None;
         entry.group_owned_children.clear();
+        entry.queue_clearance_at_sec = None;
         self.active_anim_id = Some(anim_id);
         self.playing = true;
     }
@@ -1326,6 +1331,7 @@ impl PlaybackState {
         entry.group_last_step_start_sec = 0.0;
         entry.group_prev_done_at_sec = None;
         entry.group_owned_children.clear();
+        entry.queue_clearance_at_sec = None;
         self.playing = self
             .tracks
             .values()
@@ -1351,6 +1357,28 @@ impl PlaybackState {
         }
     }
 
+    /// Triggers live **"Lancar"** clearance mode on a running/paused `traffic_queue` animation.
+    /// Returns the deterministic `trigger_elapsed_sec` used so it can be broadcast to Layar Besar.
+    pub fn trigger_queue_clearance(
+        &mut self,
+        anim_id: Uuid,
+        explicit_elapsed_sec: Option<f64>,
+    ) -> Option<f64> {
+        let entry = self.tracks.get_mut(&anim_id)?;
+        if !matches!(entry.status, AnimRunStatus::Playing | AnimRunStatus::Paused) {
+            return None;
+        }
+        let trig = explicit_elapsed_sec.unwrap_or(entry.distance_m).max(0.0);
+        if entry.queue_clearance_at_sec.is_none() || explicit_elapsed_sec.is_some() {
+            entry.queue_clearance_at_sec = Some(trig);
+        }
+        if entry.status == AnimRunStatus::Paused {
+            entry.status = AnimRunStatus::Playing;
+            self.playing = true;
+        }
+        entry.queue_clearance_at_sec
+    }
+
     pub fn play_all_routes(&mut self, anims: &[Anim]) {
         self.play_test_mode = true;
         for a in anims {
@@ -1358,6 +1386,8 @@ impl PlaybackState {
                 !a.geom.is_empty()
             } else if twg_shared::traffic_anim::is_traffic_anim(a) {
                 twg_shared::traffic_anim::parse_traffic_anim_config(a).has_playable_setup()
+            } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
+                twg_shared::traffic_queue::parse_traffic_queue_config(a).has_playable_setup()
             } else if twg_shared::shoot_anim::is_shoot_anim(a)
                 || twg_shared::pointer_anim::is_pointer_arrow_anim(a)
             {
@@ -1566,6 +1596,14 @@ pub struct AppState {
     pub new_route_loop: bool,
     pub drawing_traffic_lane_for_anim_id: Option<Uuid>,
     pub new_traffic_name: String,
+    /// Target for `ToolMode::DrawTrafficQueueLane`:
+    /// - `None`: create a new `Antrean & Urai Simpang` animation (drawing first `Jalur Antre`)
+    /// - `Some((anim_id, None))`: add a new `Jalur Antre` to existing `anim_id`
+    /// - `Some((anim_id, Some(corridor_idx)))`: draw/replace the mandatory `Jalur Lancar` of `corridors[corridor_idx]`
+    pub drawing_traffic_queue_target: Option<(Uuid, Option<usize>)>,
+    pub new_traffic_queue_name: String,
+    /// Live runtime status snapshots for active `traffic_queue` animations (for Play Panel & Preview UI).
+    pub traffic_queue_live_status: HashMap<Uuid, twg_shared::traffic_queue::TrafficQueueLiveStatus>,
     pub traffic_pool_search: String,
     pub traffic_pool_category_filter: Option<String>,
     pub traffic_reverse_offset_m: f64,
@@ -1804,6 +1842,9 @@ impl AppState {
             traffic_preview_layout: TrafficPreviewLayout::FrontBack,
             traffic_preview_gap_m: 4.0,
             traffic_model_unit_dims: HashMap::new(),
+            drawing_traffic_queue_target: None,
+            new_traffic_queue_name: "Urai Simpang 1".to_string(),
+            traffic_queue_live_status: HashMap::new(),
             new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind::WaterCannon,
             new_shoot_name: "Water Cannon 1".to_string(),
             shoot_preview_reset_nonce: 0,
@@ -2048,6 +2089,8 @@ impl AppState {
                         "Shoot Animation"
                     } else if twg_shared::traffic_anim::is_traffic_anim(a) {
                         "Simulasi Traffic"
+                    } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
+                        "Antrean & Urai Simpang"
                     } else if twg_shared::particle_anim::is_particle_anim(a) {
                         "Particle Animation"
                     } else if twg_shared::pointer_anim::is_pointer_arrow_anim(a) {
