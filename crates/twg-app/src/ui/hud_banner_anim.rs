@@ -82,6 +82,8 @@ pub fn create_hud_banner_anim(state: &mut AppState, api: &ApiClientBridge) {
         autoplay: false,
         geom: vec![],
         data: serde_json::json!({}),
+        created_by: state.current_user_id(),
+        allowed_user_ids: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -117,6 +119,7 @@ pub fn create_hud_banner_anim(state: &mut AppState, api: &ApiClientBridge) {
                 autoplay: false,
                 geom: vec![],
                 data: anim.data,
+                allowed_user_ids: Vec::new(),
             },
         });
     }

@@ -372,7 +372,10 @@ fn pick_play_selectable_marker(
             let Some(marker) = state.markers.iter().find(|m| m.id == marker_comp.id) else {
                 continue;
             };
-            if !overrides.is_marker_visible(marker, true) {
+            if !overrides.is_marker_visible(marker, true)
+                || state.hidden_entity_ids.contains(&marker.id)
+                || !state.can_edit_marker(marker)
+            {
                 continue;
             }
             let behavior = state.marker_play_behavior(marker);
@@ -421,7 +424,10 @@ fn pick_play_selectable_marker(
     // Priority 2: Ground footprint / screen-pivot fallback for small or distant selectable markers
     let mut best_fallback: Option<(Uuid, CategoryPlayBehavior, f32)> = None;
     for m in &state.markers {
-        if !overrides.is_marker_visible(m, true) {
+        if !overrides.is_marker_visible(m, true)
+            || state.hidden_entity_ids.contains(&m.id)
+            || !state.can_edit_marker(m)
+        {
             continue;
         }
         let behavior = state.marker_play_behavior(m);
@@ -501,11 +507,13 @@ pub fn play_rts_interaction_system(
         gizmo_state.cancel();
     }
 
-    // Prune stale or newly hidden selections
+    // Prune stale, hidden, or unauthorized selections
     play_rts.selected_unit_ids.retain(|uid| {
         state.markers.iter().any(|m| {
             m.id == *uid
                 && overrides.is_marker_visible(m, true)
+                && !state.hidden_entity_ids.contains(&m.id)
+                && state.can_edit_marker(m)
                 && state.marker_play_behavior(m) == CategoryPlayBehavior::RtsUnit
         })
     });
@@ -513,6 +521,8 @@ pub fn play_rts_interaction_system(
         let valid = state.markers.iter().any(|m| {
             m.id == gid
                 && overrides.is_marker_visible(m, true)
+                && !state.hidden_entity_ids.contains(&m.id)
+                && state.can_edit_marker(m)
                 && state.marker_play_behavior(m) == CategoryPlayBehavior::GizmoMove
         });
         if !valid {
@@ -718,7 +728,10 @@ pub fn play_rts_interaction_system(
 
                 let mut boxed: Vec<Uuid> = Vec::new();
                 for m in &state.markers {
-                    if !overrides.is_marker_visible(m, true) {
+                    if !overrides.is_marker_visible(m, true)
+                        || state.hidden_entity_ids.contains(&m.id)
+                        || !state.can_edit_marker(m)
+                    {
                         continue;
                     }
                     if state.marker_play_behavior(m) != CategoryPlayBehavior::RtsUnit {

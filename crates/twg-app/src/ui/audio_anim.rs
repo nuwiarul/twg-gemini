@@ -63,6 +63,8 @@ pub fn draw_create(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBridg
                 autoplay: false,
                 geom: Vec::new(),
                 data: serde_json::json!({"audio": AudioAnimConfig::default()}),
+                created_by: state.current_user_id(),
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             };
@@ -98,6 +100,7 @@ pub fn draw_create(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBridg
                         autoplay: false,
                         geom: vec![],
                         data: anim.data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }

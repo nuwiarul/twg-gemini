@@ -545,8 +545,10 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for m in &unit_markers {
+                    let can_edit = state.can_edit_marker(m);
+                    let vis = state.is_marker_effectively_visible(m);
                     let locked = state.is_marker_locked(m);
-                    if !state.matches_layer_filters(m.is_spawn, locked) {
+                    if !state.matches_layer_filters(vis, locked) {
                         continue;
                     }
                     if !filter.is_empty()
@@ -569,30 +571,47 @@ fn draw_layers_tab(
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 3.0;
-                                if draw_eye_toggle_btn(ui, m.is_spawn, !is_play_mode).clicked() {
-                                    toggle_marker_vis = Some(m.id);
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    if can_edit {
+                                        toggle_marker_vis = Some(m.id);
+                                    } else {
+                                        toggle_hidden_id = Some(m.id);
+                                    }
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_marker_lock = Some((m.id, !locked));
                                 }
 
                                 let name_col = if sel {
                                     egui::Color32::WHITE
-                                } else if !m.is_spawn {
+                                } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let name_resp = ui.add(
+                                let mut name_resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&m.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if name_resp.clicked() {
+                                if !can_edit {
+                                    name_resp = name_resp.on_hover_text(
+                                        "Model 3D di luar daftar Assets Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && name_resp.clicked() {
                                     state.selected = SelectedEntity::Marker(m.id);
                                     state.marker_edit = Some(m.clone());
                                     state.building_edit = None;
@@ -607,7 +626,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -709,8 +728,10 @@ fn draw_layers_tab(
 
                 // 2a. Basic Mesh markers
                 for m in &mesh_markers {
+                    let can_edit = state.can_edit_marker(m);
+                    let vis = state.is_marker_effectively_visible(m);
                     let locked = state.is_marker_locked(m);
-                    if !state.matches_layer_filters(m.is_spawn, locked) {
+                    if !state.matches_layer_filters(vis, locked) {
                         continue;
                     }
                     let shape_tag = parse_basic_mesh_config(m)
@@ -737,10 +758,16 @@ fn draw_layers_tab(
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 3.0;
-                                if draw_eye_toggle_btn(ui, m.is_spawn, !is_play_mode).clicked() {
-                                    toggle_marker_vis = Some(m.id);
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    if can_edit {
+                                        toggle_marker_vis = Some(m.id);
+                                    } else {
+                                        toggle_hidden_id = Some(m.id);
+                                    }
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_marker_lock = Some((m.id, !locked));
                                 }
 
@@ -750,7 +777,7 @@ fn draw_layers_tab(
                                         .strong()
                                         .color(if sel {
                                             egui::Color32::from_rgb(233, 213, 255)
-                                        } else if !m.is_spawn {
+                                        } else if !vis {
                                             egui::Color32::from_rgb(100, 116, 139)
                                         } else {
                                             egui::Color32::from_rgb(196, 181, 253)
@@ -759,21 +786,32 @@ fn draw_layers_tab(
 
                                 let name_col = if sel {
                                     egui::Color32::WHITE
-                                } else if !m.is_spawn {
+                                } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&m.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Basic Mesh tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Marker(m.id);
                                     state.marker_edit = Some(m.clone());
                                     state.building_edit = None;
@@ -788,7 +826,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -836,6 +874,7 @@ fn draw_layers_tab(
 
                 // 2b. Extruded Buildings
                 for b in &bldgs {
+                    let can_edit = state.can_edit_building(b);
                     let vis = !state.hidden_entity_ids.contains(&b.id);
                     let locked = state.locked_entity_ids.contains(&b.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -864,7 +903,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(b.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(b.id);
                                 }
 
@@ -883,19 +924,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(label_txt).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Bangunan tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Building(b.id);
                                     state.building_edit = Some(b.clone());
                                     state.marker_edit = None;
@@ -912,7 +964,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1001,6 +1053,7 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for l in &lines {
+                    let can_edit = state.can_edit_line(l);
                     let vis = !state.hidden_entity_ids.contains(&l.id);
                     let locked = state.locked_entity_ids.contains(&l.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -1026,7 +1079,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(l.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(l.id);
                                 }
 
@@ -1034,12 +1089,14 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!(
                                             "{} ({} pt)",
@@ -1050,9 +1107,18 @@ fn draw_layers_tab(
                                         .color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Plot Line tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Line(l.id);
                                     state.line_edit = Some(l.clone());
                                     state.marker_edit = None;
@@ -1069,7 +1135,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1157,6 +1223,7 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for t in &tms {
+                    let can_edit = state.can_edit_text_marker(t);
                     let vis = !state.hidden_entity_ids.contains(&t.id);
                     let locked = state.locked_entity_ids.contains(&t.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -1183,7 +1250,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(t.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(t.id);
                                 }
 
@@ -1191,19 +1260,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&t.text).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Label Teks tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::TextMarker(t.id);
                                     state.text_edit = Some(t.clone());
                                     state.marker_edit = None;
@@ -1218,7 +1298,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1310,6 +1390,8 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for a in &route_anims {
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
                     let vis = !state.hidden_entity_ids.contains(&a.id);
                     let locked = state.locked_entity_ids.contains(&a.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -1335,7 +1417,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
 
@@ -1343,12 +1427,14 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!(
                                             "{} ({:.0}s)",
@@ -1358,9 +1444,18 @@ fn draw_layers_tab(
                                         .color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -1377,7 +1472,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1402,18 +1497,21 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play").size(10.5).color(
-                                                        egui::Color32::from_rgb(52, 211, 153),
-                                                    ),
+                                        if can_play
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(egui::Color32::from_rgb(
+                                                                52, 211, 153,
+                                                            )),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Test animasi ini sekarang")
-                                            .clicked()
+                                                .on_hover_text("Test animasi ini sekarang")
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -1474,6 +1572,8 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for a in &shoot_anims {
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
                     let vis = !state.hidden_entity_ids.contains(&a.id);
                     let locked = state.locked_entity_ids.contains(&a.id);
                     let sk = shoot_anim_kind(a).unwrap_or_default();
@@ -1508,7 +1608,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
 
@@ -1540,13 +1642,15 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
                                 let range_m = shoot_anim_range_m(a);
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!(
                                             "{} ({:.0}m)",
@@ -1556,9 +1660,18 @@ fn draw_layers_tab(
                                         .color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -1577,7 +1690,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1602,19 +1715,22 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play").size(10.5).color(
-                                                        egui::Color32::from_rgb(56, 189, 248),
-                                                    ),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(egui::Color32::from_rgb(
+                                                                56, 189, 248,
+                                                            )),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Play animasi shoot di Play Skenario")
-                                            .clicked()
+                                                .on_hover_text("Play animasi shoot di Play Skenario")
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -1675,6 +1791,8 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for a in &particle_anims {
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
                     let vis = !state.hidden_entity_ids.contains(&a.id);
                     let locked = state.locked_entity_ids.contains(&a.id);
                     let cfg = parse_particle_anim_config(a);
@@ -1712,7 +1830,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
 
@@ -1731,19 +1851,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -1761,7 +1892,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1786,19 +1917,24 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play").size(10.5).color(
-                                                        egui::Color32::from_rgb(251, 146, 60),
-                                                    ),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(egui::Color32::from_rgb(
+                                                                251, 146, 60,
+                                                            )),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Play animasi partikel di Play Skenario")
-                                            .clicked()
+                                                .on_hover_text(
+                                                    "Play animasi partikel di Play Skenario",
+                                                )
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -1870,6 +2006,8 @@ fn draw_layers_tab(
             .show(ui, |ui| {
                 let mut shown = 0;
                 for a in &other_anims {
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
                     let vis = !state.hidden_entity_ids.contains(&a.id);
                     let locked = state.locked_entity_ids.contains(&a.id);
                     if !state.matches_layer_filters(vis, locked) {
@@ -1915,7 +2053,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 let (tag_txt, tag_col) =
@@ -1943,19 +2083,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -1972,7 +2123,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -1997,21 +2148,24 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play").size(10.5).color(
-                                                        egui::Color32::from_rgb(250, 204, 21),
-                                                    ),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(egui::Color32::from_rgb(
+                                                                250, 204, 21,
+                                                            )),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text(
-                                                "Play panah penunjuk 3D di Play Skenario",
-                                            )
-                                            .clicked()
+                                                .on_hover_text(
+                                                    "Play panah penunjuk 3D di Play Skenario",
+                                                )
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -2084,7 +2238,10 @@ fn draw_layers_tab(
                         continue;
                     }
                     shown += 1;
-                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
+                    let sel =
+                        can_edit && matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
                     let row_bg = if sel {
                         egui::Color32::from_rgb(14, 116, 144)
                     } else {
@@ -2105,7 +2262,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 let (tag_txt, tag_col) = match act {
@@ -2127,19 +2286,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -2156,7 +2326,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -2181,21 +2351,22 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(tag_col),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(tag_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text(
-                                                "Play animasi Spawn / Hide di Play Skenario",
-                                            )
-                                            .clicked()
+                                                .on_hover_text(
+                                                    "Play animasi Spawn / Hide di Play Skenario",
+                                                )
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -2270,7 +2441,10 @@ fn draw_layers_tab(
                         continue;
                     }
                     shown += 1;
-                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
+                    let sel =
+                        can_edit && matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
                     let row_bg = if sel {
                         egui::Color32::from_rgb(14, 116, 144)
                     } else {
@@ -2297,7 +2471,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
@@ -2311,19 +2487,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.0).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -2339,7 +2526,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             if ui
                                                 .add_enabled(
                                                     !locked,
@@ -2367,7 +2554,8 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if anim_is_playable(a, &state.markers)
+                                        if can_play
+                                            && anim_is_playable(a, &state.markers)
                                             && ui
                                                 .add(
                                                     egui::Button::new(
@@ -2450,7 +2638,10 @@ fn draw_layers_tab(
                         continue;
                     }
                     shown += 1;
-                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
+                    let sel =
+                        can_edit && matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
                     let row_bg = if sel {
                         egui::Color32::from_rgb(14, 116, 144)
                     } else {
@@ -2471,7 +2662,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
@@ -2485,19 +2678,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.0).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -2513,7 +2717,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             if ui
                                                 .add_enabled(
                                                     !locked,
@@ -2541,19 +2745,22 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(tag_col),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(tag_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Play animasi Kamera di Play Skenario")
-                                            .clicked()
+                                                .on_hover_text(
+                                                    "Play animasi Kamera di Play Skenario",
+                                                )
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -2626,7 +2833,10 @@ fn draw_layers_tab(
                         continue;
                     }
                     shown += 1;
-                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
+                    let sel =
+                        can_edit && matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
                     let row_bg = if sel {
                         egui::Color32::from_rgb(14, 116, 144)
                     } else {
@@ -2662,7 +2872,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
@@ -2676,19 +2888,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.0).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -2704,7 +2927,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             if ui
                                                 .add_enabled(
                                                     !locked,
@@ -2732,19 +2955,22 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(tag_col),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(tag_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Play simulasi Lingkungan di Play Skenario")
-                                            .clicked()
+                                                .on_hover_text(
+                                                    "Play simulasi Lingkungan di Play Skenario",
+                                                )
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -2818,7 +3044,10 @@ fn draw_layers_tab(
                         continue;
                     }
                     shown += 1;
-                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let can_edit = state.can_edit_anim(a);
+                    let can_play = state.can_play_anim(a);
+                    let sel =
+                        can_edit && matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
                     let row_bg = if sel {
                         egui::Color32::from_rgb(14, 116, 144)
                     } else {
@@ -2835,7 +3064,9 @@ fn draw_layers_tab(
                                 if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
                                     toggle_hidden_id = Some(a.id);
                                 }
-                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode && can_edit)
+                                    .clicked()
+                                {
                                     toggle_locked_id = Some(a.id);
                                 }
                                 let (tag_txt, tag_col) = match mode {
@@ -2857,19 +3088,30 @@ fn draw_layers_tab(
                                     egui::Color32::WHITE
                                 } else if !vis {
                                     egui::Color32::from_rgb(100, 116, 139)
+                                } else if !can_edit {
+                                    egui::Color32::from_rgb(148, 163, 184)
                                 } else if locked {
                                     egui::Color32::from_rgb(253, 230, 138)
                                 } else {
                                     egui::Color32::from_rgb(226, 232, 240)
                                 };
-                                let resp = ui.add(
+                                let mut resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(&a.name).size(11.5).color(name_col),
                                     )
                                     .truncate()
-                                    .sense(egui::Sense::click()),
+                                    .sense(if can_edit {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::hover()
+                                    }),
                                 );
-                                if resp.clicked() {
+                                if !can_edit {
+                                    resp = resp.on_hover_text(
+                                        "Animasi tanpa persetujuan Anda — hanya bisa Hide/Unhide lokal di Layers",
+                                    );
+                                }
+                                if can_edit && resp.clicked() {
                                     state.selected = SelectedEntity::Anim(a.id);
                                     state.anim_edit = Some(a.clone());
                                     state.marker_edit = None;
@@ -2881,7 +3123,7 @@ fn draw_layers_tab(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if !is_play_mode {
+                                        if !is_play_mode && can_edit {
                                             let del_col = if locked {
                                                 egui::Color32::from_rgb(71, 85, 105)
                                             } else {
@@ -2906,19 +3148,20 @@ fn draw_layers_tab(
                                                 delete_anim_id = Some(a.id);
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                anim_is_playable(a, &state.markers),
-                                                egui::Button::new(
-                                                    egui::RichText::new("Play")
-                                                        .size(10.5)
-                                                        .color(tag_col),
+                                        if can_play
+                                            && ui
+                                                .add_enabled(
+                                                    anim_is_playable(a, &state.markers),
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(tag_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
                                                 )
-                                                .small()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Play grup animasi di Play Skenario")
-                                            .clicked()
+                                                .on_hover_text("Play grup animasi di Play Skenario")
+                                                .clicked()
                                         {
                                             quick_play_anim_id = Some(a.id);
                                         }
@@ -2943,35 +3186,45 @@ fn draw_layers_tab(
 
     // Deferred state mutations
     if let Some(id) = toggle_marker_vis
-        && let Some(m) = state.markers.iter_mut().find(|x| x.id == id)
+        && let Some(idx) = state.markers.iter().position(|x| x.id == id)
     {
-        m.is_spawn = !m.is_spawn;
-        let updated = m.clone();
-        if state.marker_edit.as_ref().is_some_and(|e| e.id == id) {
-            state.marker_edit = Some(updated.clone());
-        }
-        if !state.offline_preview
-            && let Some(auth) = current_auth(state)
-        {
-            api.send(ApiCommand::UpdateMarker {
-                auth,
-                id,
-                req: UpdateMarkerRequest {
-                    name: updated.name,
-                    lng: updated.lng,
-                    lat: updated.lat,
-                    altitude: updated.altitude,
-                    rot_x: updated.rot_x,
-                    rot_y: updated.rot_y,
-                    rot_z: updated.rot_z,
-                    scale_x: updated.scale_x,
-                    scale_y: updated.scale_y,
-                    scale_z: updated.scale_z,
-                    is_spawn: updated.is_spawn,
-                    description: updated.description,
-                    metadata: updated.metadata,
-                },
-            });
+        let can_edit = state.can_edit_marker(&state.markers[idx]);
+        if !can_edit {
+            // Read-only marker for this user: local-only Hide/Unhide (never mutates server `is_spawn`)
+            if !state.hidden_entity_ids.remove(&id) {
+                state.hidden_entity_ids.insert(id);
+            }
+        } else {
+            let m = &mut state.markers[idx];
+            m.is_spawn = !m.is_spawn;
+            let updated = m.clone();
+            if state.marker_edit.as_ref().is_some_and(|e| e.id == id) {
+                state.marker_edit = Some(updated.clone());
+            }
+            if !state.offline_preview
+                && let Some(auth) = current_auth(state)
+            {
+                api.send(ApiCommand::UpdateMarker {
+                    auth,
+                    id,
+                    req: UpdateMarkerRequest {
+                        name: updated.name,
+                        lng: updated.lng,
+                        lat: updated.lat,
+                        altitude: updated.altitude,
+                        rot_x: updated.rot_x,
+                        rot_y: updated.rot_y,
+                        rot_z: updated.rot_z,
+                        scale_x: updated.scale_x,
+                        scale_y: updated.scale_y,
+                        scale_z: updated.scale_z,
+                        is_spawn: updated.is_spawn,
+                        description: updated.description,
+                        metadata: updated.metadata,
+                        allowed_user_ids: None,
+                    },
+                });
+            }
         }
     }
 
@@ -3078,8 +3331,12 @@ fn draw_catalog_tab(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let dragging_id = state.dragging_catalog_entry.as_ref().map(|e| e.id.clone());
+            let mut shown_catalog_count = 0usize;
 
             for entry in &state.catalog {
+                if !state.is_model_path_allowed(&entry.model_path) {
+                    continue;
+                }
                 if ready_only && !entry.ready {
                     continue;
                 }
@@ -3092,6 +3349,7 @@ fn draw_catalog_tab(
                 {
                     continue;
                 }
+                shown_catalog_count += 1;
 
                 let is_dragging = dragging_id.as_deref() == Some(entry.id.as_str());
                 let selected = state.selected_catalog_id.as_deref() == Some(&entry.id);
@@ -3225,6 +3483,27 @@ fn draw_catalog_tab(
                         });
                     });
                 ui.add_space(4.0);
+            }
+
+            if shown_catalog_count == 0 {
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| {
+                    let msg = if state.is_standard_user()
+                        && state
+                            .current_user
+                            .as_ref()
+                            .is_none_or(|u| u.allowed_model_paths.is_empty())
+                    {
+                        "Belum ada Assets 3D yang diberikan oleh Admin untuk akun Anda."
+                    } else {
+                        "Tidak ada model 3D yang cocok dengan filter."
+                    };
+                    ui.label(
+                        egui::RichText::new(msg)
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                });
             }
         });
 
@@ -3936,6 +4215,8 @@ fn draw_group_create_card(
                         autoplay: false,
                         geom: Vec::new(),
                         data,
+                        created_by: state.current_user_id(),
+                        allowed_user_ids: Vec::new(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -3968,6 +4249,7 @@ fn draw_group_create_card(
                             autoplay: false,
                             geom: Vec::new(),
                             data,
+                            allowed_user_ids: Vec::new(),
                         },
                     });
                 }
@@ -4219,6 +4501,8 @@ fn draw_spawn_hide_create_card(
                             autoplay: false,
                             geom: Vec::new(),
                             data,
+                            created_by: state.current_user_id(),
+                            allowed_user_ids: Vec::new(),
                             created_at: now,
                             updated_at: now,
                         };
@@ -4253,6 +4537,7 @@ fn draw_spawn_hide_create_card(
                                 autoplay: false,
                                 geom: Vec::new(),
                                 data,
+                                allowed_user_ids: Vec::new(),
                             },
                         });
                     }
@@ -5230,7 +5515,8 @@ fn draw_ordered_animation_list(
         .iter()
         .enumerate()
         .filter(|(_, a)| {
-            list_filter.is_none_or(|cat| AnimCategory::from_anim_type(&a.anim_type) == cat)
+            state.can_edit_anim(a)
+                && list_filter.is_none_or(|cat| AnimCategory::from_anim_type(&a.anim_type) == cat)
         })
         .map(|(global_idx, a)| (global_idx, a.clone()))
         .collect();

@@ -84,6 +84,11 @@ impl UserRole {
         matches!(self, Self::UserSatker)
     }
 
+    /// Standard operator roles subject to per-user 3D Asset lists and entity ownership/approvals.
+    pub fn is_standard_user(&self) -> bool {
+        matches!(self, Self::User | Self::UserSatker)
+    }
+
     /// Dedicated read-only Layar Besar display accounts (`layar_besar` & `layar_besar_satker`).
     pub fn is_big_screen_only_role(&self) -> bool {
         matches!(self, Self::LayarBesar | Self::LayarBesarSatker)
@@ -345,6 +350,15 @@ pub struct Satker {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSummaryDto {
+    pub id: Uuid,
+    pub name: String,
+    pub username: String,
+    pub role: UserRole,
+    pub satker_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserDto {
     pub id: Uuid,
     pub name: String,
@@ -354,6 +368,10 @@ pub struct UserDto {
     pub satker_name: Option<String>,
     pub profile_img: Option<String>,
     pub units: serde_json::Value,
+    #[serde(default)]
+    pub allowed_model_asset_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub allowed_model_paths: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -489,6 +507,10 @@ pub struct Marker {
     pub is_spawn: bool,
     pub description: Option<String>,
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -504,6 +526,10 @@ pub struct Building {
     pub height: f64,
     /// Outer polygon ring in [lng, lat] pairs
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -519,6 +545,10 @@ pub struct PlotLine {
     pub alpha: f64,
     /// Polyline vertices in [lng, lat] pairs
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -536,6 +566,10 @@ pub struct TextMarker {
     pub lng: f64,
     pub lat: f64,
     pub altitude: f64,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -586,6 +620,10 @@ pub struct Anim {
     /// Optional route coordinates [lng, lat, alt]
     pub geom: Vec<[f64; 3]>,
     pub data: serde_json::Value,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -627,6 +665,12 @@ pub struct SkenarioBundle {
     pub alurs: Vec<Alur>,
     pub anims: Vec<Anim>,
     pub snapshot: Option<GameSessionSnapshot>,
+    #[serde(default)]
+    pub assignable_users: Vec<UserSummaryDto>,
+    #[serde(default)]
+    pub current_user_allowed_model_asset_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub current_user_allowed_model_paths: Vec<String>,
 }
 
 pub const MODEL_CATEGORIES: &[&str] = &[

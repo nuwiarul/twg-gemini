@@ -246,6 +246,98 @@ pub async fn get_skenario_bundle(
     let anims = entities::fetch_anims(&state.db, id).await?;
     let snapshot = snapshots::fetch_snapshot_optional(&state.db, id).await?;
 
+    let mut ref_user_ids: Vec<Uuid> = Vec::new();
+    for m in &markers {
+        if let Some(uid) = m.created_by {
+            ref_user_ids.push(uid);
+        }
+        ref_user_ids.extend_from_slice(&m.allowed_user_ids);
+    }
+    for b in &buildings {
+        if let Some(uid) = b.created_by {
+            ref_user_ids.push(uid);
+        }
+        ref_user_ids.extend_from_slice(&b.allowed_user_ids);
+    }
+    for l in &lines {
+        if let Some(uid) = l.created_by {
+            ref_user_ids.push(uid);
+        }
+        ref_user_ids.extend_from_slice(&l.allowed_user_ids);
+    }
+    for t in &text_markers {
+        if let Some(uid) = t.created_by {
+            ref_user_ids.push(uid);
+        }
+        ref_user_ids.extend_from_slice(&t.allowed_user_ids);
+    }
+    for a in &anims {
+        if let Some(uid) = a.created_by {
+            ref_user_ids.push(uid);
+        }
+        ref_user_ids.extend_from_slice(&a.allowed_user_ids);
+    }
+
+    let assignable_rows = if let Some(sk_satker) = skenario.satker_id {
+        sqlx::query(
+            r#"
+            SELECT id, name, username, role, satker_id
+            FROM users
+            WHERE (role = 'user_satker' AND satker_id = $1)
+               OR id = ANY($2)
+            ORDER BY name ASC, username ASC
+            "#,
+        )
+        .bind(sk_satker)
+        .bind(&ref_user_ids)
+        .fetch_all(&state.db)
+        .await?
+    } else if auth.role.is_admin_satker() {
+        sqlx::query(
+            r#"
+            SELECT id, name, username, role, satker_id
+            FROM users
+            WHERE (role = 'user_satker' AND satker_id = $1)
+               OR id = ANY($2)
+            ORDER BY name ASC, username ASC
+            "#,
+        )
+        .bind(auth.satker_id)
+        .bind(&ref_user_ids)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT id, name, username, role, satker_id
+            FROM users
+            WHERE (role = 'user' AND satker_id IS NULL)
+               OR id = ANY($1)
+            ORDER BY name ASC, username ASC
+            "#,
+        )
+        .bind(&ref_user_ids)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    let assignable_users: Vec<twg_shared::models::UserSummaryDto> = assignable_rows
+        .iter()
+        .map(|r| -> Result<twg_shared::models::UserSummaryDto, sqlx::Error> {
+            let role_s: String = r.try_get("role")?;
+            Ok(twg_shared::models::UserSummaryDto {
+                id: r.try_get("id")?,
+                name: r.try_get("name")?,
+                username: r.try_get("username")?,
+                role: twg_shared::models::UserRole::from_db(&role_s),
+                satker_id: r.try_get("satker_id")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let (current_user_allowed_model_asset_ids, current_user_allowed_model_paths) =
+        crate::routes::users::fetch_user_allowed_assets(&state.db, auth.user_id).await?;
+
     Ok(Json(ApiResponse {
         data: SkenarioBundle {
             skenario,
@@ -257,6 +349,9 @@ pub async fn get_skenario_bundle(
             alurs,
             anims,
             snapshot,
+            assignable_users,
+            current_user_allowed_model_asset_ids,
+            current_user_allowed_model_paths,
         },
     }))
 }

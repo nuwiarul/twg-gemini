@@ -55,7 +55,11 @@ pub async fn login(
         ));
     }
 
-    let user = map_user_row(&row)?;
+    let mut user = map_user_row(&row)?;
+    let (allowed_ids, allowed_paths) =
+        crate::routes::users::fetch_user_allowed_assets(&state.db, user.id).await?;
+    user.allowed_model_asset_ids = allowed_ids;
+    user.allowed_model_paths = allowed_paths;
     let (access_token, refresh_token) =
         state
             .tokens
@@ -270,7 +274,12 @@ pub async fn fetch_user_by_id(state: &AppState, id: Uuid) -> AppResult<UserDto> 
     .await?
     .ok_or_else(|| AppError::NotFound("user not found".into()))?;
 
-    Ok(map_user_row(&row)?)
+    let mut user = map_user_row(&row)?;
+    let (allowed_ids, allowed_paths) =
+        crate::routes::users::fetch_user_allowed_assets(&state.db, user.id).await?;
+    user.allowed_model_asset_ids = allowed_ids;
+    user.allowed_model_paths = allowed_paths;
+    Ok(user)
 }
 
 pub fn map_user_row(row: &sqlx::postgres::PgRow) -> Result<UserDto, sqlx::Error> {
@@ -284,6 +293,8 @@ pub fn map_user_row(row: &sqlx::postgres::PgRow) -> Result<UserDto, sqlx::Error>
         satker_name: row.try_get("satker_name")?,
         profile_img: row.try_get("profile_img")?,
         units: row.try_get("units")?,
+        allowed_model_asset_ids: Vec::new(),
+        allowed_model_paths: Vec::new(),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

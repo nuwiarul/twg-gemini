@@ -206,6 +206,7 @@ pub struct TacticalMarkerEntity {
     pub idle_has_no_anims: bool,
     pub walk_has_no_anims: bool,
     pub bounds_dirty: bool,
+    pub last_bounds_affine: bevy::math::Affine3A,
     pub anim_culled: bool,
 }
 
@@ -608,6 +609,12 @@ pub fn spawn_marker_from_catalog(
         state.status_banner = Some("Pilih atau buka skenario terlebih dahulu.".into());
         return false;
     };
+    if !state.is_model_path_allowed(&entry.model_path) {
+        state.status_banner = Some(
+            "Model 3D ini tidak terdaftar dalam daftar Assets 3D akun Anda.".into(),
+        );
+        return false;
+    }
 
     let default_scale = compute_initial_spawn_scale(&state.assets_root, &entry.model_path);
     let rot_x = 0.0;
@@ -642,6 +649,8 @@ pub fn spawn_marker_from_catalog(
             is_spawn: true,
             description: None,
             metadata: serde_json::json!({}),
+            created_by: state.current_user_id(),
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -676,6 +685,7 @@ pub fn spawn_marker_from_catalog(
                 is_spawn: true,
                 description: None,
                 metadata: serde_json::json!({}),
+                allowed_user_ids: Vec::new(),
             },
         });
         true
@@ -774,6 +784,8 @@ pub fn spawn_basic_mesh_marker(
             is_spawn: true,
             description: None,
             metadata: dummy_meta,
+            created_by: state.current_user_id(),
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -809,6 +821,7 @@ pub fn spawn_basic_mesh_marker(
                 is_spawn: true,
                 description: None,
                 metadata: dummy_meta,
+                allowed_user_ids: Vec::new(),
             },
         });
         true
@@ -886,6 +899,7 @@ pub fn save_all_scenario_changes(
 
     let mut sent = 0usize;
 
+    let can_assign_users = state.can_write_admin();
     for id in marker_ids {
         if let Some(m) = state.markers.iter().find(|x| x.id == id).cloned() {
             api.send_plot_save(ApiCommand::UpdateMarker {
@@ -905,6 +919,7 @@ pub fn save_all_scenario_changes(
                     is_spawn: m.is_spawn,
                     description: m.description.clone(),
                     metadata: m.metadata.clone(),
+                    allowed_user_ids: can_assign_users.then_some(m.allowed_user_ids),
                 },
             });
             let _ = ws;
@@ -923,6 +938,7 @@ pub fn save_all_scenario_changes(
                     color: b.color,
                     height: b.height,
                     geom: b.geom,
+                    allowed_user_ids: can_assign_users.then_some(b.allowed_user_ids),
                 },
             });
             sent += 1;
@@ -940,6 +956,7 @@ pub fn save_all_scenario_changes(
                     width: l.width,
                     alpha: l.alpha,
                     geom: l.geom,
+                    allowed_user_ids: can_assign_users.then_some(l.allowed_user_ids),
                 },
             });
             sent += 1;
@@ -959,6 +976,7 @@ pub fn save_all_scenario_changes(
                     lng: t.lng,
                     lat: t.lat,
                     altitude: t.altitude,
+                    allowed_user_ids: can_assign_users.then_some(t.allowed_user_ids),
                 },
             });
             sent += 1;
@@ -981,6 +999,7 @@ pub fn save_all_scenario_changes(
                     autoplay: a.autoplay,
                     geom: a.geom,
                     data: a.data,
+                    allowed_user_ids: can_assign_users.then_some(a.allowed_user_ids),
                 },
             });
             sent += 1;
@@ -1546,7 +1565,8 @@ pub fn sync_markers_system(
             (marker.lng, marker.lat, marker.altitude, marker.rot_y)
         };
         let vis_ov = overrides.visibility.get(&marker.id).copied();
-        let mut is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn);
+        let mut is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn)
+            && !state.hidden_entity_ids.contains(&marker.id);
         let scale_mult = vis_ov
             .map(|v| v.scale_factor.max(0.001))
             .unwrap_or(1.0);
@@ -1627,7 +1647,8 @@ pub fn sync_markers_system(
                 )
             };
         let vis_ov = overrides.visibility.get(&marker.id).copied();
-        let mut is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn);
+        let mut is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn)
+            && !state.hidden_entity_ids.contains(&marker.id);
         let scale_mult = vis_ov
             .map(|v| v.scale_factor.max(0.001))
             .unwrap_or(1.0);
@@ -1720,6 +1741,7 @@ pub fn sync_markers_system(
                         idle_has_no_anims: true,
                         walk_has_no_anims: true,
                         bounds_dirty: true,
+                        last_bounds_affine: bevy::math::Affine3A::ZERO,
                         anim_culled: false,
                     },
                 ))
@@ -1853,6 +1875,7 @@ pub fn sync_markers_system(
                     idle_has_no_anims: false,
                     walk_has_no_anims: false,
                     bounds_dirty: true,
+                    last_bounds_affine: bevy::math::Affine3A::ZERO,
                     anim_culled: false,
                 },
             ))
@@ -3294,7 +3317,13 @@ pub fn selection_gizmo_system(
     play_rts: Res<PlayRtsState>,
     gizmo_state: Res<TransformGizmoState>,
     mut marker_bounds: ResMut<MarkerWorldBounds>,
-    mut marker_roots_q: Query<(Entity, &mut TacticalMarkerEntity, &Visibility)>,
+    mut marker_roots_q: Query<(
+        Entity,
+        &mut TacticalMarkerEntity,
+        &Visibility,
+        &Transform,
+        &GlobalTransform,
+    )>,
     children_q: Query<&Children>,
     mesh_aabb_q: Query<(&GlobalTransform, &Aabb)>,
     mut disc_q: Query<
@@ -3345,18 +3374,38 @@ pub fn selection_gizmo_system(
     let mut recomputed_this_frame = 0usize;
     let max_recompute_budget = if high_density { 180 } else { usize::MAX };
 
-    for (root_entity, mut comp, vis) in &mut marker_roots_q {
+    for (root_entity, mut comp, vis, root_tf, root_gtf) in &mut marker_roots_q {
         if *vis == Visibility::Hidden {
             marker_bounds.bounds.remove(&comp.id);
+            comp.last_bounds_affine = bevy::math::Affine3A::ZERO;
+            comp.bounds_dirty = true;
             continue;
         }
+        let is_rts_active = playback.play_test_mode
+            && (play_rts.selected_unit_ids.contains(&comp.id)
+                || play_rts.selected_gizmo_marker_id == Some(comp.id)
+                || play_rts.hovered_marker_id == Some(comp.id));
         let is_priority = selected_mid == Some(comp.id)
             || hovered_mid == Some(comp.id)
+            || is_rts_active
             || comp.is_walking_now
             || overrides.markers.contains_key(&comp.id);
         let has_bounds = marker_bounds.bounds.contains_key(&comp.id);
+        let gtf_affine = root_gtf.affine();
+        let gtf_changed = gtf_affine != comp.last_bounds_affine;
+        let tf_pending_propagate = root_tf
+            .translation
+            .distance_squared(root_gtf.translation())
+            > 1e-4
+            || root_tf.scale.distance_squared(root_gtf.scale()) > 1e-4
+            || root_tf.rotation.angle_between(root_gtf.rotation()) > 1e-3;
 
-        if !comp.bounds_dirty && has_bounds && !is_priority {
+        if !comp.bounds_dirty
+            && !gtf_changed
+            && !tf_pending_propagate
+            && has_bounds
+            && !is_priority
+        {
             continue;
         }
         if !is_priority && recomputed_this_frame >= max_recompute_budget {
@@ -3399,6 +3448,16 @@ pub fn selection_gizmo_system(
         }
 
         if found_any && wmin.is_finite() && wmax.is_finite() {
+            // If `sync_markers_system` updated `Transform` earlier in this same `Update` frame
+            // (e.g. route Stop snapping a marker back to its initial position), `GlobalTransform`
+            // has not propagated yet until `PostUpdate`. Shift bounds immediately by the pending
+            // translation delta (zero 1-frame flicker) and keep `bounds_dirty = true` so the next
+            // frame recomputes exact rotated/scaled bounds from the propagated `GlobalTransform`.
+            if tf_pending_propagate {
+                let pending_delta = root_tf.translation - root_gtf.translation();
+                wmin += pending_delta;
+                wmax += pending_delta;
+            }
             let cx = (wmin.x + wmax.x) * 0.5;
             let cz = (wmin.z + wmax.z) * 0.5;
             let hx = (wmax.x - wmin.x) * 0.5;
@@ -3414,7 +3473,12 @@ pub fn selection_gizmo_system(
                     footprint_radius,
                 },
             );
-            comp.bounds_dirty = false;
+            if tf_pending_propagate {
+                comp.bounds_dirty = true;
+            } else {
+                comp.last_bounds_affine = gtf_affine;
+                comp.bounds_dirty = false;
+            }
             recomputed_this_frame += 1;
         }
     }
@@ -5612,6 +5676,8 @@ pub fn map_interaction_system(
                     autoplay: false,
                     geom,
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -5643,6 +5709,7 @@ pub fn map_interaction_system(
                         autoplay: false,
                         geom,
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -5685,6 +5752,7 @@ pub fn map_interaction_system(
                                 autoplay: updated.autoplay,
                                 geom: updated.geom,
                                 data: updated.data,
+                                allowed_user_ids: None,
                             },
                         });
                     }
@@ -5718,6 +5786,7 @@ pub fn map_interaction_system(
             if state.offline_preview {
                 let now = chrono::Utc::now();
                 let text_id = Uuid::new_v4();
+                let created_by = state.current_user_id();
                 state.text_markers.push(TextMarker {
                     id: text_id,
                     operasi_id: sk.operasi_id,
@@ -5729,6 +5798,8 @@ pub fn map_interaction_system(
                     lng,
                     lat,
                     altitude: 0.0,
+                    created_by,
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 });
@@ -5751,6 +5822,7 @@ pub fn map_interaction_system(
                         lng,
                         lat,
                         altitude: 0.0,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -5851,6 +5923,7 @@ pub fn map_interaction_system(
                                 autoplay: updated.autoplay,
                                 geom: updated.geom,
                                 data: updated.data,
+                                allowed_user_ids: None,
                             },
                         });
                     }
@@ -5907,6 +5980,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -5992,6 +6066,8 @@ pub fn map_interaction_system(
                             autoplay: false,
                             geom: Vec::new(),
                             data,
+                            created_by: state.current_user_id(),
+                            allowed_user_ids: Vec::new(),
                             created_at: now,
                             updated_at: now,
                         };
@@ -6026,6 +6102,7 @@ pub fn map_interaction_system(
                                 autoplay: false,
                                 geom: Vec::new(),
                                 data,
+                                allowed_user_ids: Vec::new(),
                             },
                         });
                     }
@@ -6080,6 +6157,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -6114,6 +6192,8 @@ pub fn map_interaction_system(
                             autoplay: false,
                             geom: Vec::new(),
                             data,
+                            created_by: state.current_user_id(),
+                            allowed_user_ids: Vec::new(),
                             created_at: now,
                             updated_at: now,
                         };
@@ -6145,6 +6225,7 @@ pub fn map_interaction_system(
                                 autoplay: false,
                                 geom: Vec::new(),
                                 data,
+                                allowed_user_ids: Vec::new(),
                             },
                         });
                     }
@@ -6201,6 +6282,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -6272,6 +6354,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -6338,6 +6421,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -6400,6 +6484,7 @@ pub fn map_interaction_system(
                                     autoplay: updated.autoplay,
                                     geom: updated.geom,
                                     data: updated.data,
+                                    allowed_user_ids: None,
                                 },
                             });
                         }
@@ -6451,6 +6536,8 @@ pub fn map_interaction_system(
                             autoplay: false,
                             geom: Vec::new(),
                             data,
+                            created_by: state.current_user_id(),
+                            allowed_user_ids: Vec::new(),
                             created_at: now,
                             updated_at: now,
                         };
@@ -6484,6 +6571,7 @@ pub fn map_interaction_system(
                                 autoplay: false,
                                 geom: Vec::new(),
                                 data,
+                                allowed_user_ids: Vec::new(),
                             },
                         });
                     }
@@ -6542,6 +6630,8 @@ pub fn map_interaction_system(
                     autoplay: false,
                     geom: vec![[lng, lat, 0.0]],
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -6575,6 +6665,7 @@ pub fn map_interaction_system(
                         autoplay: false,
                         geom: vec![[lng, lat, 0.0]],
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -6607,6 +6698,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
             if state.offline_preview {
                 let now = chrono::Utc::now();
+                let created_by = state.current_user_id();
                 state.lines.push(twg_shared::models::PlotLine {
                     id: Uuid::new_v4(),
                     operasi_id: sk.operasi_id,
@@ -6616,6 +6708,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     width: 3.0,
                     alpha: 1.0,
                     geom: pts,
+                    created_by,
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 });
@@ -6630,6 +6724,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         width: 3.0,
                         alpha: 1.0,
                         geom: pts,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -6666,6 +6761,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                                 autoplay: updated.autoplay,
                                 geom: updated.geom,
                                 data: updated.data,
+                                allowed_user_ids: None,
                             },
                         });
                     }
@@ -6705,6 +6801,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data: serde_json::json!({}),
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -6742,6 +6840,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                             autoplay: false,
                             geom: anim.geom,
                             data: anim.data,
+                            allowed_user_ids: Vec::new(),
                         },
                     });
                 }
@@ -6780,6 +6879,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                                 autoplay: updated.autoplay,
                                 geom: updated.geom,
                                 data: updated.data,
+                                allowed_user_ids: None,
                             },
                         });
                     }
@@ -6821,6 +6921,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data: serde_json::json!({}),
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -6857,6 +6959,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                             autoplay: false,
                             geom: anim.geom,
                             data: anim.data,
+                            allowed_user_ids: Vec::new(),
                         },
                     });
                 }
@@ -6924,6 +7027,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
             if state.offline_preview {
                 let now = chrono::Utc::now();
+                let created_by = state.current_user_id();
                 state.buildings.push(twg_shared::models::Building {
                     id: Uuid::new_v4(),
                     operasi_id: sk.operasi_id,
@@ -6933,6 +7037,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     color: state.new_building_color.clone(),
                     height: state.new_building_height,
                     geom: pts,
+                    created_by,
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 });
@@ -6947,6 +7053,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         color: state.new_building_color.clone(),
                         height: state.new_building_height,
                         geom: pts,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -7021,6 +7128,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -7066,6 +7175,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         autoplay: false,
                         geom,
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
                 state.tool_mode = ToolMode::Select;
@@ -7142,7 +7252,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 .iter()
                 .filter(|m| {
                     let cat = m.category.to_lowercase();
-                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                    m.ready && state.is_model_path_allowed(&m.model_path) && (cat.contains("kendaraan") || cat.contains("vehicle"))
                 })
                 .take(4)
                 .map(|m| TrafficVehicleEntry {
@@ -7159,7 +7269,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 auto_pool = state
                     .catalog
                     .iter()
-                    .filter(|m| m.ready)
+                    .filter(|m| m.ready && state.is_model_path_allowed(&m.model_path))
                     .take(2)
                     .map(|m| TrafficVehicleEntry {
                         model_path: m.model_path.clone(),
@@ -7211,6 +7321,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -7247,6 +7359,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         autoplay: false,
                         geom,
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -7354,7 +7467,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 .iter()
                 .filter(|m| {
                     let cat = m.category.to_lowercase();
-                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                    m.ready && state.is_model_path_allowed(&m.model_path) && (cat.contains("kendaraan") || cat.contains("vehicle"))
                 })
                 .take(4)
                 .map(|m| TrafficVehicleEntry {
@@ -7370,7 +7483,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 auto_pool = state
                     .catalog
                     .iter()
-                    .filter(|m| m.ready)
+                    .filter(|m| m.ready && state.is_model_path_allowed(&m.model_path))
                     .take(2)
                     .map(|m| TrafficVehicleEntry {
                         model_path: m.model_path.clone(),
@@ -7418,6 +7531,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -7455,6 +7570,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         autoplay: false,
                         geom,
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -7570,7 +7686,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 .iter()
                 .filter(|m| {
                     let cat = m.category.to_lowercase();
-                    m.ready && (cat.contains("kendaraan") || cat.contains("vehicle"))
+                    m.ready && state.is_model_path_allowed(&m.model_path) && (cat.contains("kendaraan") || cat.contains("vehicle"))
                 })
                 .take(4)
                 .map(|m| TrafficVehicleEntry {
@@ -7586,7 +7702,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 auto_pool = state
                     .catalog
                     .iter()
-                    .filter(|m| m.ready)
+                    .filter(|m| m.ready && state.is_model_path_allowed(&m.model_path))
                     .take(2)
                     .map(|m| TrafficVehicleEntry {
                         model_path: m.model_path.clone(),
@@ -7624,6 +7740,8 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     autoplay: false,
                     geom,
                     data,
+                    created_by: state.current_user_id(),
+                    allowed_user_ids: Vec::new(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -7654,6 +7772,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         autoplay: false,
                         geom,
                         data,
+                        allowed_user_ids: Vec::new(),
                     },
                 });
             }
@@ -7934,7 +8053,7 @@ fn pick_scene_entity(
     if let Ok(world_ray) = camera.viewport_to_world(cam_gtf, cursor_px) {
         let mut best_hit: Option<(SelectedEntity, f32)> = None;
 
-        // 1a. 3D Markers (walk entire spawned glTF/mesh descendant hierarchy; skip locked)
+        // 1a. 3D Markers (walk entire spawned glTF/mesh descendant hierarchy; skip locked or unauthorized)
         let mut stack: Vec<Entity> = Vec::with_capacity(16);
         for (root_entity, marker_comp, vis) in &pick.marker_roots {
             if *vis == Visibility::Hidden {
@@ -7944,7 +8063,11 @@ fn pick_scene_entity(
                 .markers
                 .iter()
                 .find(|m| m.id == marker_comp.id)
-                .is_some_and(|m| state.is_marker_locked(m))
+                .is_none_or(|m| {
+                    !state.is_marker_effectively_visible(m)
+                        || state.is_marker_locked(m)
+                        || !state.can_edit_marker(m)
+                })
             {
                 continue;
             }
@@ -7976,10 +8099,15 @@ fn pick_scene_entity(
             }
         }
 
-        // 1b. 3D Extruded Buildings (exact triangle intersection; skip hidden or locked)
+        // 1b. 3D Extruded Buildings (exact triangle intersection; skip hidden, locked, or unauthorized)
         for (entity, bldg_comp) in &pick.building_roots {
             if state.hidden_entity_ids.contains(&bldg_comp.id)
                 || state.locked_entity_ids.contains(&bldg_comp.id)
+                || state
+                    .buildings
+                    .iter()
+                    .find(|b| b.id == bldg_comp.id)
+                    .is_none_or(|b| !state.can_edit_building(b))
             {
                 continue;
             }
@@ -8007,7 +8135,10 @@ fn pick_scene_entity(
     if state.show_unit_labels && !playback.play_test_mode {
         let mut best_label: Option<(Uuid, f32)> = None;
         for m in &state.markers {
-            if !m.is_spawn || state.is_marker_locked(m) {
+            if !state.is_marker_effectively_visible(m)
+                || state.is_marker_locked(m)
+                || !state.can_edit_marker(m)
+            {
                 continue;
             }
             let world_label_pos = if let Some(b) = marker_bounds.bounds.get(&m.id) {
@@ -8047,7 +8178,9 @@ fn pick_scene_entity(
     if state.show_text_markers {
         let mut best_tm: Option<(Uuid, f32)> = None;
         for tm in &state.text_markers {
-            if state.hidden_entity_ids.contains(&tm.id) || state.locked_entity_ids.contains(&tm.id)
+            if state.hidden_entity_ids.contains(&tm.id)
+                || state.locked_entity_ids.contains(&tm.id)
+                || !state.can_edit_text_marker(tm)
             {
                 continue;
             }
@@ -8080,7 +8213,7 @@ fn pick_scene_entity(
         }
     }
 
-    // Priority 2c: Direct click on any visible, unlocked Particle Animation pin on the map
+    // Priority 2c: Direct click on any visible, unlocked, editable Particle Animation pin on the map
     if !playback.play_test_mode && state.show_gizmos {
         let mut best_part: Option<(Uuid, f32)> = None;
         for anim in &state.anims {
@@ -8088,6 +8221,7 @@ fn pick_scene_entity(
                 || anim.geom.is_empty()
                 || state.hidden_entity_ids.contains(&anim.id)
                 || state.locked_entity_ids.contains(&anim.id)
+                || !state.can_edit_anim(anim)
             {
                 continue;
             }
@@ -8105,17 +8239,27 @@ fn pick_scene_entity(
         }
     }
 
-    // Priority 2d: Direct click on any visible, unlocked Route Animation polyline or waypoint
+    // Priority 2d: Direct click on any visible, unlocked, editable Plot Line
     if !playback.play_test_mode
         && let Some(line_id) = hit_test_any_plot_line(cursor_px, state, camera, cam_gtf)
+        && state
+            .lines
+            .iter()
+            .find(|l| l.id == line_id)
+            .is_some_and(|l| state.can_edit_line(l))
     {
         return Some(SelectedEntity::Line(line_id));
     }
 
-    // Priority 2e: Direct click on any visible, unlocked Route Animation polyline or waypoint
+    // Priority 2e: Direct click on any visible, unlocked, editable Route Animation polyline or waypoint
     if !playback.play_test_mode
         && state.show_gizmos
         && let Some(aid) = hit_test_any_route_line(cursor_px, state, camera, cam_gtf)
+        && state
+            .anims
+            .iter()
+            .find(|a| a.id == aid)
+            .is_some_and(|a| state.can_edit_anim(a))
     {
         return Some(SelectedEntity::Anim(aid));
     }
@@ -8123,7 +8267,10 @@ fn pick_scene_entity(
     // Priority 3: Click on ground highlight disc or very close to the unit's base pivot
     let mut best_ring: Option<(Uuid, f32)> = None;
     for m in &state.markers {
-        if !m.is_spawn || state.is_marker_locked(m) {
+        if !state.is_marker_effectively_visible(m)
+            || state.is_marker_locked(m)
+            || !state.can_edit_marker(m)
+        {
             continue;
         }
         let (center_3d, ring_r) = if let Some(b) = marker_bounds.bounds.get(&m.id) {

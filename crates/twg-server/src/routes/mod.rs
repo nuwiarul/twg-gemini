@@ -66,6 +66,10 @@ pub fn build_router(state: AppState) -> Router {
                 .put(users::update_user)
                 .delete(users::delete_user),
         )
+        .route(
+            "/api/v1/users/{id}/assets",
+            put(users::update_user_assets),
+        )
         // Master Data: Location Presets
         .route(
             "/api/v1/location-presets",

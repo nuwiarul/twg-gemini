@@ -423,6 +423,8 @@ fn spawn_benchmark_scenario(
             is_spawn: true,
             description: None,
             metadata: serde_json::json!({}),
+            created_by: None,
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         });
@@ -466,6 +468,8 @@ fn spawn_benchmark_scenario(
                 autoplay: true,
                 geom: vec![[p0_lng, p0_lat, 0.0], [p1_lng, p1_lat, 0.0]],
                 data: serde_json::json!({}),
+                created_by: None,
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             };
@@ -519,6 +523,8 @@ fn spawn_benchmark_scenario(
                 autoplay: true,
                 geom: vec![[plng, plat, 0.0]],
                 data: serde_json::json!({}),
+                created_by: None,
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             };

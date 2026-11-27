@@ -14,8 +14,8 @@ use twg_shared::{
         ResizeTextureRequest,
         UpdateAnimRequest, UpdateBuildingRequest, UpdateLocationPresetRequest, UpdateMarkerRequest,
         UpdateModelCategoryRequest, UpdateOperasiRequest, UpdatePlotLineRequest,
-        UpdateSatkerRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest, UpdateUserRequest,
-        UploadResponse,
+        UpdateSatkerRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest,
+        UpdateUserAssetsRequest, UpdateUserRequest, UploadResponse,
     },
     models::{
         Anim, Building, LocationPreset, Marker, MediaAssetDto, MediaAssetType, ModelAssetDto,
@@ -128,6 +128,11 @@ pub enum ApiCommand {
         auth: AuthCredentials,
         id: Uuid,
         req: UpdateUserRequest,
+    },
+    UpdateUserAssets {
+        auth: AuthCredentials,
+        id: Uuid,
+        req: UpdateUserAssetsRequest,
     },
     DeleteUser {
         auth: AuthCredentials,
@@ -689,6 +694,13 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
         }
         ApiCommand::UpdateUser { auth, id, req } => {
             let url = format!("{}/api/v1/users/{id}", base(&auth));
+            match authed_put::<_, UserDto>(client, &auth, &url, &req).await {
+                Ok(u) => ApiEvent::UserUpdated(u),
+                Err(e) => ApiEvent::UserError(e),
+            }
+        }
+        ApiCommand::UpdateUserAssets { auth, id, req } => {
+            let url = format!("{}/api/v1/users/{id}/assets", base(&auth));
             match authed_put::<_, UserDto>(client, &auth, &url, &req).await {
                 Ok(u) => ApiEvent::UserUpdated(u),
                 Err(e) => ApiEvent::UserError(e),

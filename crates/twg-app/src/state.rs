@@ -162,6 +162,7 @@ pub enum UserModalMode {
     None,
     Create,
     Edit(Uuid),
+    AssignAssets(Box<UserDto>),
     DeleteConfirm(Box<UserDto>),
 }
 
@@ -179,6 +180,9 @@ pub struct UserTableState {
     pub form_show_password: bool,
     pub form_role: UserRole,
     pub form_satker_id: Option<Uuid>,
+    pub assets_selected_ids: HashSet<Uuid>,
+    pub assets_search: String,
+    pub assets_category: String,
     pub submitting: bool,
     pub form_error: Option<String>,
 }
@@ -198,6 +202,9 @@ impl Default for UserTableState {
             form_show_password: false,
             form_role: UserRole::User,
             form_satker_id: None,
+            assets_selected_ids: HashSet::new(),
+            assets_search: String::new(),
+            assets_category: "all".to_string(),
             submitting: false,
             form_error: None,
         }
@@ -225,6 +232,15 @@ impl UserTableState {
         self.form_show_password = false;
         self.form_role = u.role;
         self.form_satker_id = u.satker_id;
+        self.submitting = false;
+        self.form_error = None;
+    }
+
+    pub fn open_assign_assets(&mut self, u: &UserDto) {
+        self.modal_mode = UserModalMode::AssignAssets(Box::new(u.clone()));
+        self.assets_selected_ids = u.allowed_model_asset_ids.iter().copied().collect();
+        self.assets_search.clear();
+        self.assets_category = "all".to_string();
         self.submitting = false;
         self.form_error = None;
     }
@@ -1967,6 +1983,8 @@ pub struct AppState {
     pub saving_pending_count: usize,
     pub floor_plan_uploading: bool,
     pub floor_plan_error: Option<String>,
+    pub assignable_users: Vec<twg_shared::models::UserSummaryDto>,
+    pub perm_user_search: String,
 }
 
 impl AppState {
@@ -2246,6 +2264,8 @@ impl AppState {
             saving_pending_count: 0,
             floor_plan_uploading: false,
             floor_plan_error: None,
+            assignable_users: Vec::new(),
+            perm_user_search: String::new(),
         }
     }
 
@@ -2270,6 +2290,17 @@ impl AppState {
                 alurs: self.alurs.clone(),
                 particles: self.particles.clone(),
                 snapshot: None,
+                assignable_users: self.assignable_users.clone(),
+                current_user_allowed_model_asset_ids: self
+                    .current_user
+                    .as_ref()
+                    .map(|u| u.allowed_model_asset_ids.clone())
+                    .unwrap_or_default(),
+                current_user_allowed_model_paths: self
+                    .current_user
+                    .as_ref()
+                    .map(|u| u.allowed_model_paths.clone())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -2537,6 +2568,156 @@ impl AppState {
         self.current_user
             .as_ref()
             .is_some_and(|u| u.role.can_write_admin())
+    }
+
+    pub fn is_standard_user(&self) -> bool {
+        !self.offline_preview
+            && self
+                .current_user
+                .as_ref()
+                .is_some_and(|u| u.role.is_standard_user())
+    }
+
+    pub fn current_user_id(&self) -> Option<Uuid> {
+        self.current_user.as_ref().map(|u| u.id)
+    }
+
+    fn normalize_rbac_model_path(p: &str) -> String {
+        p.trim()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_ascii_lowercase()
+    }
+
+    /// True if the active user may place / select / edit / animate the given 3D model path.
+    /// Admins (`admin`, `admin_monitor`, `admin_satker`) and offline preview always have full access.
+    /// Standard users (`user`, `user_satker`) only have access to models assigned in their 3D Asset list.
+    pub fn is_model_path_allowed(&self, model_path: &str) -> bool {
+        if self.is_big_screen_only_role() {
+            return false;
+        }
+        if !self.is_standard_user() {
+            return true;
+        }
+        let target = Self::normalize_rbac_model_path(model_path);
+        if target.is_empty() {
+            return false;
+        }
+        self.current_user.as_ref().is_some_and(|u| {
+            u.allowed_model_paths
+                .iter()
+                .any(|p| Self::normalize_rbac_model_path(p) == target)
+        })
+    }
+
+    pub fn can_edit_owned_entity(
+        &self,
+        created_by: Option<Uuid>,
+        allowed_user_ids: &[Uuid],
+    ) -> bool {
+        if self.is_big_screen_only_role() {
+            return false;
+        }
+        if !self.is_standard_user() {
+            return true;
+        }
+        let Some(uid) = self.current_user_id() else {
+            return false;
+        };
+        created_by == Some(uid) || allowed_user_ids.contains(&uid)
+    }
+
+    /// Single source of truth for whether the active user may select, transform, edit, pick,
+    /// or delete a `Marker` (either Basic Mesh or 3D Model).
+    pub fn can_edit_marker(&self, marker: &Marker) -> bool {
+        if self.is_big_screen_only_role() {
+            return false;
+        }
+        if !self.is_standard_user() {
+            return true;
+        }
+        if crate::scene::basic_mesh::is_basic_mesh_marker(marker) {
+            self.can_edit_owned_entity(marker.created_by, &marker.allowed_user_ids)
+        } else {
+            self.is_model_path_allowed(&marker.model_path)
+        }
+    }
+
+    pub fn can_edit_building(&self, b: &Building) -> bool {
+        self.can_edit_owned_entity(b.created_by, &b.allowed_user_ids)
+    }
+
+    pub fn can_edit_line(&self, l: &PlotLine) -> bool {
+        self.can_edit_owned_entity(l.created_by, &l.allowed_user_ids)
+    }
+
+    pub fn can_edit_text_marker(&self, t: &TextMarker) -> bool {
+        self.can_edit_owned_entity(t.created_by, &t.allowed_user_ids)
+    }
+
+    pub fn can_edit_anim(&self, a: &Anim) -> bool {
+        self.can_edit_owned_entity(a.created_by, &a.allowed_user_ids)
+    }
+
+    /// True if this animation should appear & be playable in Play Skenario / Play Tactical for the active user.
+    pub fn can_play_anim(&self, a: &Anim) -> bool {
+        if !self.is_standard_user() {
+            return true;
+        }
+        let Some(uid) = self.current_user_id() else {
+            return false;
+        };
+        a.created_by == Some(uid) || a.allowed_user_ids.contains(&uid)
+    }
+
+    /// Effective local visibility for a marker (combines server `is_spawn` with local-only Layers toggle).
+    pub fn is_marker_effectively_visible(&self, marker: &Marker) -> bool {
+        marker.is_spawn && !self.hidden_entity_ids.contains(&marker.id)
+    }
+
+    /// Resolves a human-readable `"Name (@username)"` label for a user ID from loaded scenario/user lists.
+    pub fn resolve_user_display(&self, user_id: Uuid) -> String {
+        if let Some(cu) = &self.current_user
+            && cu.id == user_id
+        {
+            return format!("{} (@{})", cu.name, cu.username);
+        }
+        if let Some(u) = self.assignable_users.iter().find(|u| u.id == user_id) {
+            return format!("{} (@{})", u.name, u.username);
+        }
+        if let Some(u) = self.user_table.users.iter().find(|u| u.id == user_id) {
+            return format!("{} (@{})", u.name, u.username);
+        }
+        format!("User {}", &user_id.to_string()[..8])
+    }
+
+    /// Users eligible to receive entity permissions in the active scenario (scoped by satker for `admin_satker`).
+    pub fn assignable_target_users(&self) -> Vec<twg_shared::models::UserSummaryDto> {
+        let is_admin_satker = self
+            .current_user
+            .as_ref()
+            .is_some_and(|u| u.role.is_admin_satker());
+        let my_satker = self.current_user.as_ref().and_then(|u| u.satker_id);
+        let sk_satker = self.active_skenario.as_ref().and_then(|s| s.satker_id);
+        self.assignable_users
+            .iter()
+            .filter(|u| {
+                if !u.role.is_standard_user() {
+                    return false;
+                }
+                if is_admin_satker {
+                    return u.role == UserRole::UserSatker
+                        && my_satker.is_some()
+                        && u.satker_id == my_satker;
+                }
+                if let Some(sid) = sk_satker {
+                    u.role == UserRole::UserSatker && u.satker_id == Some(sid)
+                } else {
+                    u.role == UserRole::User && u.satker_id.is_none()
+                }
+            })
+            .cloned()
+            .collect()
     }
 
     /// True whenever the 3D scenario world should be rendered (Plot Skenario or Layar Besar).
@@ -2866,6 +3047,8 @@ impl AppState {
                 is_spawn: true,
                 description: Some("Demo unit patwal".into()),
                 metadata: serde_json::json!({}),
+                created_by: None,
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -2890,6 +3073,8 @@ impl AppState {
                 is_spawn: true,
                 description: Some("Demo heli pengawas".into()),
                 metadata: serde_json::json!({}),
+                created_by: None,
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -2914,6 +3099,8 @@ impl AppState {
                 is_spawn: true,
                 description: None,
                 metadata: serde_json::json!({}),
+                created_by: None,
+                allowed_user_ids: Vec::new(),
                 created_at: now,
                 updated_at: now,
             },
@@ -2933,6 +3120,8 @@ impl AppState {
                 [115.2175, -8.6706],
                 [115.2171, -8.6706],
             ],
+            created_by: None,
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         }];
@@ -2952,6 +3141,8 @@ impl AppState {
                 [115.2153, -8.6714],
                 [115.2153, -8.6696],
             ],
+            created_by: None,
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         }];
@@ -2967,6 +3158,8 @@ impl AppState {
             lng: 115.2173,
             lat: -8.6704,
             altitude: 34.0,
+            created_by: None,
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         }];
@@ -2991,6 +3184,8 @@ impl AppState {
                 [115.2160, -8.6710, 0.0],
             ],
             data: serde_json::json!({}),
+            created_by: None,
+            allowed_user_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         }];

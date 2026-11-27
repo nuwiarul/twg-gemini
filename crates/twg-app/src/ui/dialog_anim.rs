@@ -107,7 +107,11 @@ pub fn create_dialog_anim(
             ..Default::default()
         });
     } else {
-        let first_m = state.markers.first().map(|m| m.id);
+        let first_m = state
+            .markers
+            .iter()
+            .find(|m| state.can_edit_marker(m))
+            .map(|m| m.id);
         cfg.lines.push(DialogLine {
             marker_id: first_m,
             text: "Selamat pagi, mohon tetap tertib.".to_string(),
@@ -139,6 +143,8 @@ pub fn create_dialog_anim(
         autoplay: false,
         geom: Vec::new(),
         data: serde_json::json!({}),
+        created_by: state.current_user_id(),
+        allowed_user_ids: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -174,6 +180,7 @@ pub fn create_dialog_anim(
                 autoplay: false,
                 geom: Vec::new(),
                 data: anim_out.data,
+                allowed_user_ids: Vec::new(),
             },
         });
     }
@@ -294,6 +301,7 @@ pub fn draw_inspector(
     let markers_snapshot: Vec<(Uuid, String)> = state
         .markers
         .iter()
+        .filter(|m| state.can_edit_marker(m))
         .map(|m| (m.id, m.name.clone()))
         .collect();
 
@@ -472,10 +480,11 @@ pub fn draw_inspector(
                             let cur_spk_name = line
                                 .marker_id
                                 .and_then(|id| {
-                                    markers_snapshot
+                                    state
+                                        .markers
                                         .iter()
-                                        .find(|(mid, _)| *mid == id)
-                                        .map(|(_, n)| n.clone())
+                                        .find(|m| m.id == id)
+                                        .map(|m| m.name.clone())
                                 })
                                 .unwrap_or_else(|| "-- Pilih Pembicara --".to_string());
                             let picking_this = state.tool_mode == ToolMode::PickDialogSpeaker

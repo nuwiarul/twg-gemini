@@ -253,6 +253,8 @@ fn create_static_camera_anim(state: &mut AppState, tcam: &TacticalCamera, api: &
         autoplay: false,
         geom: vec![],
         data: serde_json::json!({}),
+        created_by: state.current_user_id(),
+        allowed_user_ids: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -287,6 +289,7 @@ fn create_static_camera_anim(state: &mut AppState, tcam: &TacticalCamera, api: &
                 autoplay: false,
                 geom: anim.geom,
                 data: anim.data,
+                allowed_user_ids: Vec::new(),
             },
         });
     }
@@ -333,6 +336,8 @@ pub fn create_follow_camera_anim(
         autoplay: false,
         geom: vec![],
         data: serde_json::json!({}),
+        created_by: state.current_user_id(),
+        allowed_user_ids: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -367,6 +372,7 @@ pub fn create_follow_camera_anim(
                 autoplay: false,
                 geom: vec![],
                 data: anim.data,
+                allowed_user_ids: Vec::new(),
             },
         });
     }
@@ -742,6 +748,7 @@ fn draw_follow_inspector(
                     let mut ordered: Vec<(Uuid, String, bool)> = state
                         .markers
                         .iter()
+                        .filter(|m| state.can_edit_marker(m))
                         .map(|m| (m.id, m.name.clone(), marker_has_route_anim(m.id, &state.anims)))
                         .collect();
                     ordered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));

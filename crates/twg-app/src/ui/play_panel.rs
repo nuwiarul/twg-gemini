@@ -191,10 +191,15 @@ pub fn draw_play_animation_panel(
                 ui.columns(2, |cols| {
                     let anim_active = state.tactical_page.play_panel_tab == PlayPanelTab::Animasi;
                     let sk_active = state.tactical_page.play_panel_tab == PlayPanelTab::Skenario;
+                    let visible_anim_count = state
+                        .anims
+                        .iter()
+                        .filter(|a| state.can_play_anim(a))
+                        .count();
                     if cols[0]
                         .add(
                             egui::Button::new(
-                                egui::RichText::new(format!("Animasi ({})", state.anims.len()))
+                                egui::RichText::new(format!("Animasi ({visible_anim_count})"))
                                     .size(11.5)
                                     .strong()
                                     .color(egui::Color32::WHITE),
@@ -260,8 +265,13 @@ pub fn draw_play_animation_panel(
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        let has_playable = state
+                        let allowed_anims: Vec<twg_shared::models::Anim> = state
                             .anims
+                            .iter()
+                            .filter(|a| state.can_play_anim(a))
+                            .cloned()
+                            .collect();
+                        let has_playable = allowed_anims
                             .iter()
                             .any(|a| anim_is_playable(a, &state.markers));
                         let play_all_btn = egui::Button::new(
@@ -273,15 +283,30 @@ pub fn draw_play_animation_panel(
                         .fill(egui::Color32::from_rgb(5, 150, 105))
                         .min_size(egui::vec2(88.0, 24.0));
                         if ui.add_enabled(has_playable, play_all_btn).clicked() {
-                            playback.play_all_routes(&state.anims);
-                            broadcast_tactical_anim_cmd(
-                                state,
-                                ws,
-                                "play_all_anim",
-                                None,
-                                true,
-                                playback.speed_multiplier,
-                            );
+                            playback.play_all_routes(&allowed_anims);
+                            if state.is_standard_user() {
+                                for a in &allowed_anims {
+                                    if anim_is_playable(a, &state.markers) {
+                                        broadcast_tactical_anim_cmd(
+                                            state,
+                                            ws,
+                                            "play_anim",
+                                            Some(a.id),
+                                            true,
+                                            playback.speed_multiplier,
+                                        );
+                                    }
+                                }
+                            } else {
+                                broadcast_tactical_anim_cmd(
+                                    state,
+                                    ws,
+                                    "play_all_anim",
+                                    None,
+                                    true,
+                                    playback.speed_multiplier,
+                                );
+                            }
                         }
 
                         let stop_all_btn = egui::Button::new(
@@ -293,15 +318,28 @@ pub fn draw_play_animation_panel(
                         .fill(egui::Color32::from_rgb(153, 27, 27))
                         .min_size(egui::vec2(84.0, 24.0));
                         if ui.add_enabled(has_playable, stop_all_btn).clicked() {
-                            playback.stop_all_routes(&state.anims);
-                            broadcast_tactical_anim_cmd(
-                                state,
-                                ws,
-                                "stop_all_anim",
-                                None,
-                                true,
-                                playback.speed_multiplier,
-                            );
+                            playback.stop_all_routes(&allowed_anims);
+                            if state.is_standard_user() {
+                                for a in &allowed_anims {
+                                    broadcast_tactical_anim_cmd(
+                                        state,
+                                        ws,
+                                        "stop_anim",
+                                        Some(a.id),
+                                        true,
+                                        playback.speed_multiplier,
+                                    );
+                                }
+                            } else {
+                                broadcast_tactical_anim_cmd(
+                                    state,
+                                    ws,
+                                    "stop_all_anim",
+                                    None,
+                                    true,
+                                    playback.speed_multiplier,
+                                );
+                            }
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -482,7 +520,12 @@ pub fn draw_play_animation_panel(
 
             let selected_cat = playback.play_panel_category;
             let search_query = playback.play_panel_search.trim().to_lowercase();
-            let mut sorted_all: Vec<twg_shared::models::Anim> = state.anims.clone();
+            let mut sorted_all: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| state.can_play_anim(a))
+                .cloned()
+                .collect();
             sorted_all.sort_by(|a, b| {
                 a.sort_order
                     .cmp(&b.sort_order)

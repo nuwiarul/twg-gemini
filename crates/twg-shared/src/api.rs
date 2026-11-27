@@ -101,6 +101,12 @@ pub struct UpdateUserRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateUserAssetsRequest {
+    #[serde(default)]
+    pub model_asset_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOperasiRequest {
     pub name: String,
     #[serde(default)]
@@ -205,6 +211,8 @@ pub struct CreateMarkerRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +232,8 @@ pub struct UpdateMarkerRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub allowed_user_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +248,8 @@ pub struct CreateBuildingRequest {
     #[serde(default = "default_building_height")]
     pub height: f64,
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +260,8 @@ pub struct UpdateBuildingRequest {
     pub color: String,
     pub height: f64,
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub allowed_user_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +276,8 @@ pub struct CreatePlotLineRequest {
     #[serde(default = "default_one_f64")]
     pub alpha: f64,
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +287,8 @@ pub struct UpdatePlotLineRequest {
     pub width: f64,
     pub alpha: f64,
     pub geom: Vec<[f64; 2]>,
+    #[serde(default)]
+    pub allowed_user_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +306,8 @@ pub struct CreateTextMarkerRequest {
     pub lat: f64,
     #[serde(default = "default_text_alt")]
     pub altitude: f64,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +320,8 @@ pub struct UpdateTextMarkerRequest {
     pub lng: f64,
     pub lat: f64,
     pub altitude: f64,
+    #[serde(default)]
+    pub allowed_user_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +369,8 @@ pub struct CreateAnimRequest {
     pub geom: Vec<[f64; 3]>,
     #[serde(default)]
     pub data: serde_json::Value,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +387,8 @@ pub struct UpdateAnimRequest {
     pub geom: Vec<[f64; 3]>,
     #[serde(default)]
     pub data: serde_json::Value,
+    #[serde(default)]
+    pub allowed_user_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

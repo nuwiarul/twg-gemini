@@ -672,6 +672,13 @@ fn process_net_events_system(
             }
             ApiEvent::UserUpdated(u) => {
                 let uname = u.username.clone();
+                if state
+                    .current_user
+                    .as_ref()
+                    .is_some_and(|cu| cu.id == u.id)
+                {
+                    state.current_user = Some(u.clone());
+                }
                 state.user_table.close_modal();
                 state.status_banner = Some(format!("User '@{uname}' berhasil diperbarui"));
                 trigger_load_users(&mut state, &api);
@@ -909,6 +916,12 @@ fn process_net_events_system(
                 state.particles = bundle.particles;
                 state.alurs = bundle.alurs;
                 state.anims = bundle.anims;
+                state.assignable_users = bundle.assignable_users;
+                state.perm_user_search.clear();
+                if let Some(cu) = &mut state.current_user {
+                    cu.allowed_model_asset_ids = bundle.current_user_allowed_model_asset_ids;
+                    cu.allowed_model_paths = bundle.current_user_allowed_model_paths;
+                }
                 state.sort_anims_by_order();
                 state.selected = SelectedEntity::None;
                 state.marker_edit = None;

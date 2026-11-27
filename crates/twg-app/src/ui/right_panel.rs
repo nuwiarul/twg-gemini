@@ -1406,7 +1406,7 @@ fn draw_marker_inspector(
     };
     let mut m = orig.clone();
     let is_locked = state.is_marker_locked(&m);
-    let editable = !playback.play_test_mode && !is_locked;
+    let editable = !playback.play_test_mode && !is_locked && state.can_edit_marker(&m);
 
     // Quick Node Action Header
     ui.horizontal(|ui| {
@@ -2537,6 +2537,20 @@ fn draw_marker_inspector(
     }
 
     // Apply live edits to local state immediately and track dirty flag for toolbar Simpan
+    // 2c. Basic Mesh RBAC Ownership & Multi-User Approval Card
+    if is_basic_mesh_marker(&m) {
+        draw_entity_permissions_card(
+            ui,
+            state,
+            ("perm_basic_mesh", m.id),
+            "Basic Mesh",
+            false,
+            editable,
+            m.created_by,
+            &mut m.allowed_user_ids,
+        );
+    }
+
     let marker_changed = m.name != orig.name
         || m.is_spawn != orig.is_spawn
         || m.description != orig.description
@@ -2550,7 +2564,8 @@ fn draw_marker_inspector(
         || (m.scale_y - orig.scale_y).abs() > 1e-6
         || (m.scale_z - orig.scale_z).abs() > 1e-6
         || m.model_path != orig.model_path
-        || m.metadata != orig.metadata;
+        || m.metadata != orig.metadata
+        || m.allowed_user_ids != orig.allowed_user_ids;
 
     if editable && marker_changed {
         if let Some(existing) = state.markers.iter_mut().find(|x| x.id == m.id) {
@@ -2562,6 +2577,7 @@ fn draw_marker_inspector(
 
     // 3. Action Buttons
     if editable {
+        let can_assign_users = state.can_write_admin();
         ui.horizontal(|ui| {
             let save_btn = egui::Button::new(
                 egui::RichText::new("Simpan")
@@ -2590,6 +2606,7 @@ fn draw_marker_inspector(
                         is_spawn: m.is_spawn,
                         description: m.description.clone(),
                         metadata: m.metadata.clone(),
+                        allowed_user_ids: can_assign_users.then_some(m.allowed_user_ids.clone()),
                     },
                 });
                 ws.send(WsOutCommand::SendCommand(TacticalCommand {
@@ -2616,6 +2633,8 @@ fn draw_marker_inspector(
                     dup.name = format!("{} (Copy)", m.name);
                     dup.lng = offset_lng;
                     dup.lat = offset_lat;
+                    dup.created_by = state.current_user_id();
+                    dup.allowed_user_ids.clear();
                     state.selected = SelectedEntity::Marker(dup.id);
                     state.marker_edit = Some(dup.clone());
                     state.markers.push(dup);
@@ -2642,6 +2661,7 @@ fn draw_marker_inspector(
                             is_spawn: m.is_spawn,
                             description: m.description.clone(),
                             metadata: m.metadata.clone(),
+                            allowed_user_ids: Vec::new(),
                         },
                     });
                 }
@@ -2658,6 +2678,224 @@ fn draw_marker_inspector(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_entity_permissions_card(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id_salt: (&str, Uuid),
+    entity_label: &str,
+    is_anim: bool,
+    editable: bool,
+    created_by: Option<Uuid>,
+    allowed_user_ids: &mut Vec<Uuid>,
+) {
+    let is_admin_writer = state.can_write_admin();
+    let card_title = if is_admin_writer {
+        format!("Persetujuan User ({})", allowed_user_ids.len())
+    } else {
+        "Kepemilikan & Izin".to_string()
+    };
+
+    inspector_card(ui, &card_title, true, |ui| {
+        // 1. Owner / Creator badge
+        let my_id = state.current_user_id();
+        let owner_text = match created_by {
+            Some(cid) => {
+                let disp = state.resolve_user_display(cid);
+                if Some(cid) == my_id {
+                    format!("Pemilik: {disp} (Anda)")
+                } else {
+                    format!("Pembuat: {disp}")
+                }
+            }
+            None => "Pembuat: Admin / Sistem".to_string(),
+        };
+        let is_mine = created_by.is_some() && created_by == my_id;
+        ui.horizontal_wrapped(|ui| {
+            let col = if is_mine {
+                egui::Color32::from_rgb(52, 211, 153)
+            } else {
+                egui::Color32::from_rgb(148, 163, 184)
+            };
+            ui.label(egui::RichText::new(owner_text).size(11.0).strong().color(col));
+        });
+
+        if state.is_standard_user() {
+            ui.add_space(3.0);
+            if is_mine {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{entity_label} ini milik akun Anda. Admin, Admin Monitor, dan Admin Satker tetap dapat mengeditnya."
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+            } else if my_id.is_some_and(|me| allowed_user_ids.contains(&me)) {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(6, 78, 59))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Disetujui oleh Admin untuk akun Anda")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(167, 243, 208)),
+                        );
+                    });
+                ui.label(
+                    egui::RichText::new(if is_anim {
+                        "Anda dapat mengedit serta menekan Play/Pause/Stop di Play Skenario & Play Tactical."
+                    } else {
+                        "Anda diberi izin mengedit objek ini oleh Admin."
+                    })
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+            }
+            return;
+        }
+
+        if !is_admin_writer {
+            return;
+        }
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if is_anim {
+                "User yang dicentang dapat mengedit animasi ini dan memutarnya di panel Animasi (Play Skenario / Play Tactical)."
+            } else {
+                "User yang dicentang dapat memilih dan mengedit objek ini di Plot Editor."
+            })
+            .size(10.0)
+            .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
+        ui.add_space(4.0);
+
+        let targets = state.assignable_target_users();
+
+        if targets.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Belum ada akun User / User Satker pada ruang lingkup skenario ini.",
+                )
+                .size(10.5)
+                .color(egui::Color32::from_rgb(251, 191, 36)),
+            );
+            return;
+        }
+
+        ui.add_enabled_ui(editable, |ui| {
+            // Selected user chips
+            if !allowed_user_ids.is_empty() {
+                let mut remove_uid: Option<Uuid> = None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                    for uid in allowed_user_ids.iter() {
+                        let disp = state.resolve_user_display(*uid);
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(14, 74, 110))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248)))
+                            .corner_radius(10.0)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
+                                    ui.label(
+                                        egui::RichText::new(disp)
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(224, 242, 254)),
+                                    );
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("x")
+                                                    .size(9.5)
+                                                    .color(egui::Color32::from_rgb(252, 165, 165)),
+                                            )
+                                            .small()
+                                            .frame(false),
+                                        )
+                                        .on_hover_text("Cabut persetujuan user ini")
+                                        .clicked()
+                                    {
+                                        remove_uid = Some(*uid);
+                                    }
+                                });
+                            });
+                    }
+                });
+                if let Some(rm) = remove_uid {
+                    allowed_user_ids.retain(|id| *id != rm);
+                }
+                ui.add_space(4.0);
+            }
+
+            // Search + Select All / Clear
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.perm_user_search)
+                        .hint_text("Cari user...")
+                        .desired_width((ui.available_width() - 108.0).max(70.0)),
+                );
+                if ui.small_button("Semua").clicked() {
+                    let q = state.perm_user_search.trim().to_lowercase();
+                    for u in &targets {
+                        let hay = format!("{} {}", u.name, u.username).to_lowercase();
+                        if q.is_empty() || hay.contains(&q) {
+                            if !allowed_user_ids.contains(&u.id) {
+                                allowed_user_ids.push(u.id);
+                            }
+                        }
+                    }
+                }
+                if ui.small_button("Reset").clicked() {
+                    allowed_user_ids.clear();
+                }
+            });
+
+            ui.add_space(3.0);
+            let q = state.perm_user_search.trim().to_lowercase();
+            egui::ScrollArea::vertical()
+                .id_salt(id_salt)
+                .max_height(130.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut shown = 0usize;
+                    for u in &targets {
+                        let hay = format!("{} {}", u.name, u.username).to_lowercase();
+                        if !q.is_empty() && !hay.contains(&q) {
+                            continue;
+                        }
+                        shown += 1;
+                        let mut checked = allowed_user_ids.contains(&u.id);
+                        let lbl = if u.name.trim().is_empty() {
+                            format!("@{}", u.username)
+                        } else {
+                            format!("{} (@{})", u.name, u.username)
+                        };
+                        if ui.checkbox(&mut checked, lbl).changed() {
+                            if checked {
+                                if !allowed_user_ids.contains(&u.id) {
+                                    allowed_user_ids.push(u.id);
+                                }
+                            } else {
+                                allowed_user_ids.retain(|id| *id != u.id);
+                            }
+                        }
+                    }
+                    if shown == 0 {
+                        ui.label(
+                            egui::RichText::new("(Tidak ada user yg cocok pencarian)")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(100, 116, 139)),
+                        );
+                    }
+                });
+        });
+    });
+}
+
 fn draw_building_inspector(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -2670,7 +2908,7 @@ fn draw_building_inspector(
     };
     let mut b = orig.clone();
     let is_locked = state.locked_entity_ids.contains(&b.id);
-    let editable = !playback.play_test_mode && !is_locked;
+    let editable = !playback.play_test_mode && !is_locked && state.can_edit_building(&b);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -2726,9 +2964,23 @@ fn draw_building_inspector(
         });
     });
 
+    draw_entity_permissions_card(
+        ui,
+        state,
+        ("perm_building", b.id),
+        "Building",
+        false,
+        editable,
+        b.created_by,
+        &mut b.allowed_user_ids,
+    );
+
     if editable {
-        let b_changed =
-            b.name != orig.name || b.color != orig.color || (b.height - orig.height).abs() > 1e-6;
+        let can_assign_users = state.can_write_admin();
+        let b_changed = b.name != orig.name
+            || b.color != orig.color
+            || (b.height - orig.height).abs() > 1e-6
+            || b.allowed_user_ids != orig.allowed_user_ids;
         if b_changed {
             if let Some(existing) = state.buildings.iter_mut().find(|x| x.id == b.id) {
                 *existing = b.clone();
@@ -2757,6 +3009,7 @@ fn draw_building_inspector(
                         color: b.color,
                         height: b.height,
                         geom: b.geom,
+                        allowed_user_ids: can_assign_users.then_some(b.allowed_user_ids),
                     },
                 });
             }
@@ -2783,7 +3036,7 @@ fn draw_line_inspector(
     };
     let mut l = orig.clone();
     let is_locked = state.locked_entity_ids.contains(&l.id);
-    let editable = !playback.play_test_mode && !is_locked;
+    let editable = !playback.play_test_mode && !is_locked && state.can_edit_line(&l);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -2869,11 +3122,24 @@ fn draw_line_inspector(
         });
     });
 
+    draw_entity_permissions_card(
+        ui,
+        state,
+        ("perm_line", l.id),
+        "Plot Line",
+        false,
+        editable,
+        l.created_by,
+        &mut l.allowed_user_ids,
+    );
+
     if editable {
+        let can_assign_users = state.can_write_admin();
         let l_changed = l.name != orig.name
             || l.color != orig.color
             || (l.width - orig.width).abs() > 1e-6
-            || (l.alpha - orig.alpha).abs() > 1e-6;
+            || (l.alpha - orig.alpha).abs() > 1e-6
+            || l.allowed_user_ids != orig.allowed_user_ids;
         if l_changed {
             if let Some(existing) = state.lines.iter_mut().find(|x| x.id == l.id) {
                 *existing = l.clone();
@@ -2902,6 +3168,7 @@ fn draw_line_inspector(
                         width: l.width,
                         alpha: l.alpha,
                         geom: l.geom,
+                        allowed_user_ids: can_assign_users.then_some(l.allowed_user_ids),
                     },
                 });
             }
@@ -2928,7 +3195,7 @@ fn draw_text_inspector(
     };
     let mut t = orig.clone();
     let is_locked = state.locked_entity_ids.contains(&t.id);
-    let editable = !playback.play_test_mode && !is_locked;
+    let editable = !playback.play_test_mode && !is_locked && state.can_edit_text_marker(&t);
     if editable {
         // Legacy labels may have been saved below ground before altitude was restricted.
         t.altitude = t.altitude.max(0.0);
@@ -3035,14 +3302,27 @@ fn draw_text_inspector(
         });
     });
 
+    draw_entity_permissions_card(
+        ui,
+        state,
+        ("perm_text", t.id),
+        "Text Label",
+        false,
+        editable,
+        t.created_by,
+        &mut t.allowed_user_ids,
+    );
+
     if editable {
+        let can_assign_users = state.can_write_admin();
         let t_changed = t.text != orig.text
             || t.color != orig.color
             || (t.font_size - orig.font_size).abs() > 1e-6
             || t.show_background != orig.show_background
             || (t.lng - orig.lng).abs() > 1e-9
             || (t.lat - orig.lat).abs() > 1e-9
-            || (t.altitude - orig.altitude).abs() > 1e-6;
+            || (t.altitude - orig.altitude).abs() > 1e-6
+            || t.allowed_user_ids != orig.allowed_user_ids;
         if t_changed {
             if let Some(existing) = state.text_markers.iter_mut().find(|x| x.id == t.id) {
                 *existing = t.clone();
@@ -3073,6 +3353,7 @@ fn draw_text_inspector(
                         lng: t.lng,
                         lat: t.lat,
                         altitude: t.altitude,
+                        allowed_user_ids: can_assign_users.then_some(t.allowed_user_ids),
                     },
                 });
             }
@@ -3754,7 +4035,7 @@ fn draw_anim_inspector(
     };
     let mut a = orig.clone();
     let is_locked = state.locked_entity_ids.contains(&a.id);
-    let editable = !playback.play_test_mode && !is_locked;
+    let editable = !playback.play_test_mode && !is_locked && state.can_edit_anim(&a);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -3782,9 +4063,11 @@ fn draw_anim_inspector(
         return;
     }
 
+    let bound_ids_for_disp = anim_bound_marker_ids(&a);
     let markers_list: Vec<(Uuid, String)> = state
         .markers
         .iter()
+        .filter(|m| state.can_edit_marker(m) || bound_ids_for_disp.contains(&m.id))
         .map(|m| (m.id, m.name.clone()))
         .collect();
     if twg_shared::audio_anim::is_audio_anim(&a) {
@@ -5354,6 +5637,17 @@ fn draw_anim_inspector(
         });
     }
 
+    draw_entity_permissions_card(
+        ui,
+        state,
+        ("perm_anim", a.id),
+        "Animasi",
+        true,
+        editable,
+        a.created_by,
+        &mut a.allowed_user_ids,
+    );
+
     if editable {
         let a_changed = a.name != orig.name
             || a.anim_type != orig.anim_type
@@ -5364,7 +5658,8 @@ fn draw_anim_inspector(
             || a.replay != orig.replay
             || a.autoplay != orig.autoplay
             || a.geom != orig.geom
-            || a.data != orig.data;
+            || a.data != orig.data
+            || a.allowed_user_ids != orig.allowed_user_ids;
         if a_changed {
             if let Some(existing) = state.anims.iter_mut().find(|x| x.id == a.id) {
                 *existing = a.clone();
@@ -5374,7 +5669,7 @@ fn draw_anim_inspector(
         }
     }
 
-    let can_play = anim_is_playable(&a, &state.markers);
+    let can_play = state.can_play_anim(&a) && anim_is_playable(&a, &state.markers);
     ui.horizontal(|ui| {
         let test_btn = egui::Button::new(
             egui::RichText::new("Play di Skenario")
@@ -5433,6 +5728,7 @@ fn draw_anim_inspector(
         }
 
         if editable {
+            let can_assign_users = state.can_write_admin();
             let save_btn = egui::Button::new(
                 egui::RichText::new("Simpan")
                     .strong()
@@ -5457,6 +5753,8 @@ fn draw_anim_inspector(
                             autoplay: a.autoplay,
                             geom: a.geom.clone(),
                             data: a.data.clone(),
+                            allowed_user_ids: can_assign_users
+                                .then_some(a.allowed_user_ids.clone()),
                         },
                     });
                     state.dirty_anim_ids.remove(&a.id);
@@ -13486,6 +13784,9 @@ fn draw_traffic_queue_vehicle_pool_card(
                     .catalog
                     .iter()
                     .filter(|m| {
+                        if !state.is_model_path_allowed(&m.model_path) {
+                            return false;
+                        }
                         if vehicle_pool.iter().any(|v| v.model_path == m.model_path) {
                             return false;
                         }
@@ -13729,6 +14030,9 @@ fn draw_group_anim_inspector_cards(
                 .show_ui(ui, |ui| {
                     let mut avail_cnt = 0usize;
                     for cand in &state.anims {
+                        if !state.can_play_anim(cand) {
+                            continue;
+                        }
                         if would_create_group_cycle(a.id, cand.id, &state.anims) {
                             continue;
                         }

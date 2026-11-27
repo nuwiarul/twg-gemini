@@ -126,6 +126,8 @@ pub fn create_model_action_anim(
         autoplay: false,
         geom: Vec::new(),
         data: serde_json::json!({}),
+        created_by: state.current_user_id(),
+        allowed_user_ids: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -158,6 +160,7 @@ pub fn create_model_action_anim(
                 autoplay: false,
                 geom: Vec::new(),
                 data: anim_out.data,
+                allowed_user_ids: Vec::new(),
             },
         });
     }
@@ -297,6 +300,7 @@ pub fn draw_inspector(
             let markers_snapshot: Vec<(Uuid, String, String, usize, bool)> = state
                 .markers
                 .iter()
+                .filter(|m| state.can_edit_marker(m))
                 .map(|m| {
                     let entry = find_catalog_entry(state, &m.model_path);
                     let extra_cnt = entry.map(|e| e.extra_animations.len()).unwrap_or(0);

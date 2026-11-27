@@ -1,7 +1,7 @@
 use bevy_egui::egui;
 use twg_shared::{
-    api::{CreateUserRequest, UpdateUserRequest},
-    models::{UserDto, UserRole},
+    api::{CreateUserRequest, UpdateUserAssetsRequest, UpdateUserRequest},
+    models::{ModelAssetType, UserDto, UserRole},
 };
 
 use crate::{
@@ -276,7 +276,7 @@ pub fn draw_user_screen(
             let col_role = 132.0_f32;
             let col_satker = 160.0_f32;
             let col_updated = 130.0_f32;
-            let col_actions = 152.0_f32;
+            let col_actions = 248.0_f32;
             let total_gaps = TABLE_COL_GAP * 6.0;
             let col_name = (content_w
                 - col_no
@@ -286,7 +286,7 @@ pub fn draw_user_screen(
                 - col_updated
                 - col_actions
                 - total_gaps)
-                .max(140.0);
+                .max(130.0);
             let col_widths = [
                 col_no,
                 col_name,
@@ -298,6 +298,7 @@ pub fn draw_user_screen(
             ];
 
             let mut open_edit: Option<UserDto> = None;
+            let mut open_assets: Option<UserDto> = None;
             let mut open_delete: Option<UserDto> = None;
 
             egui::Frame::new()
@@ -474,7 +475,31 @@ pub fn draw_user_screen(
                                                 }
                                                 6 if can_manage => {
                                                     ui.horizontal(|ui| {
-                                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                                        if user.role.is_standard_user() {
+                                                            let cnt =
+                                                                user.allowed_model_asset_ids.len();
+                                                            let lbl = format!("Assets ({cnt})");
+                                                            if ui
+                                                                .add(
+                                                                    egui::Button::new(
+                                                                        egui::RichText::new(lbl)
+                                                                            .size(11.0)
+                                                                            .color(egui::Color32::WHITE),
+                                                                    )
+                                                                    .fill(egui::Color32::from_rgb(
+                                                                        14, 116, 144,
+                                                                    ))
+                                                                    .min_size(egui::vec2(82.0, 24.0)),
+                                                                )
+                                                                .on_hover_text(
+                                                                    "Atur daftar Assets 3D yang boleh digunakan user ini di Plot Editor",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                open_assets = Some(user.clone());
+                                                            }
+                                                        }
                                                         if ui
                                                             .add(
                                                                 egui::Button::new("Edit")
@@ -482,7 +507,7 @@ pub fn draw_user_screen(
                                                                         30, 58, 138,
                                                                     ))
                                                                     .min_size(egui::vec2(
-                                                                        58.0, 24.0,
+                                                                        52.0, 24.0,
                                                                     )),
                                                             )
                                                             .clicked()
@@ -497,7 +522,7 @@ pub fn draw_user_screen(
                                                                         153, 27, 27,
                                                                     ))
                                                                     .min_size(egui::vec2(
-                                                                        62.0, 24.0,
+                                                                        56.0, 24.0,
                                                                     )),
                                                             )
                                                             .on_disabled_hover_text(
@@ -517,6 +542,15 @@ pub fn draw_user_screen(
                         });
                 });
 
+            if let Some(u) = open_assets {
+                if state.model_assets.is_empty() {
+                    sync_bridge.send(crate::net::asset_sync::AssetSyncCommand::SyncWithServer {
+                        server_url: state.server_url.clone(),
+                        local_root: state.assets_root.clone(),
+                    });
+                }
+                state.user_table.open_assign_assets(&u);
+            }
             if let Some(u) = open_edit {
                 if state.satker_table.satkers.is_empty() {
                     trigger_load_satkers(state, api);
@@ -830,6 +864,337 @@ fn draw_user_modal(ctx: &egui::Context, state: &mut AppState, api: &ApiClientBri
                         });
                     }
                 }
+            }
+        }
+        UserModalMode::AssignAssets(user) => {
+            let mut close = false;
+            let mut save = false;
+
+            let mut categories: Vec<String> = state
+                .model_assets
+                .iter()
+                .map(|m| m.category.clone())
+                .collect();
+            categories.sort();
+            categories.dedup();
+
+            let needle = state.user_table.assets_search.trim().to_lowercase();
+            let active_cat = state.user_table.assets_category.clone();
+            let filtered_assets: Vec<twg_shared::models::ModelAssetDto> = state
+                .model_assets
+                .iter()
+                .filter(|m| {
+                    if active_cat != "all" && m.category != active_cat {
+                        return false;
+                    }
+                    if !needle.is_empty()
+                        && !m.name.to_lowercase().contains(&needle)
+                        && !m.slug.to_lowercase().contains(&needle)
+                        && !m.category.to_lowercase().contains(&needle)
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+
+            let copy_sources: Vec<UserDto> = state
+                .user_table
+                .users
+                .iter()
+                .filter(|u| {
+                    u.id != user.id
+                        && u.role.is_standard_user()
+                        && !u.allowed_model_asset_ids.is_empty()
+                })
+                .cloned()
+                .collect();
+
+            let total_assets = state.model_assets.len();
+            let selected_total = state.user_table.assets_selected_ids.len();
+
+            egui::Window::new(format!("Akses Assets 3D — {} (@{})", user.name, user.username))
+                .collapsible(false)
+                .resizable(false)
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .fixed_size(egui::vec2(640.0, 520.0))
+                .frame(
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(17, 24, 39))
+                        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(14, 116, 144)))
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::same(16)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let (bg, fg) = role_badge_colors(user.role);
+                        egui::Frame::new()
+                            .fill(bg)
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(user.role.label())
+                                        .size(10.5)
+                                        .strong()
+                                        .color(fg),
+                                );
+                            });
+                        if let Some(sn) = &user.satker_name {
+                            ui.label(
+                                egui::RichText::new(format!("Satker: {sn}"))
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Terpilih: {selected_total} / {total_assets} model"
+                                ))
+                                .size(11.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(56, 189, 248)),
+                            );
+                        });
+                    });
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "User ini hanya dapat menambahkan, memilih, mengedit, dan menganimasikan model 3D yang dicentang di bawah.",
+                        )
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add_space(8.0);
+
+                    // Filter & search bar
+                    ui.horizontal(|ui| {
+                        let cat_label = if state.user_table.assets_category == "all" {
+                            "Semua Kategori".to_string()
+                        } else {
+                            state.user_table.assets_category.clone()
+                        };
+                        egui::ComboBox::from_id_salt("user_assets_cat_filter")
+                            .selected_text(cat_label)
+                            .width(155.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut state.user_table.assets_category,
+                                    "all".to_string(),
+                                    "Semua Kategori",
+                                );
+                                for c in &categories {
+                                    ui.selectable_value(
+                                        &mut state.user_table.assets_category,
+                                        c.clone(),
+                                        c.as_str(),
+                                    );
+                                }
+                            });
+
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.user_table.assets_search)
+                                .hint_text("Cari nama / kategori model 3D...")
+                                .desired_width((ui.available_width() - 8.0).max(160.0)),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+                    // Quick actions: Select All (Filtered), Clear (Filtered), Copy from another user
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Pilih Semua (Filter)").clicked() {
+                            for m in &filtered_assets {
+                                state.user_table.assets_selected_ids.insert(m.id);
+                            }
+                        }
+                        if ui.small_button("Kosongkan (Filter)").clicked() {
+                            for m in &filtered_assets {
+                                state.user_table.assets_selected_ids.remove(&m.id);
+                            }
+                        }
+                        if !copy_sources.is_empty() {
+                            ui.separator();
+                            let mut copy_from: Option<Vec<uuid::Uuid>> = None;
+                            egui::ComboBox::from_id_salt("user_assets_copy_from")
+                                .selected_text("Salin dari User lain...")
+                                .width(175.0)
+                                .show_ui(ui, |ui| {
+                                    for src in &copy_sources {
+                                        let txt = format!(
+                                            "{} (@{}) — {} aset",
+                                            src.name,
+                                            src.username,
+                                            src.allowed_model_asset_ids.len()
+                                        );
+                                        if ui.selectable_label(false, txt).clicked() {
+                                            copy_from = Some(src.allowed_model_asset_ids.clone());
+                                        }
+                                    }
+                                });
+                            if let Some(ids) = copy_from {
+                                state.user_table.assets_selected_ids = ids.into_iter().collect();
+                            }
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Checklist scroll area
+                    let list_h = (ui.available_height() - 62.0).max(180.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("user_assign_assets_scroll")
+                        .max_height(list_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if filtered_assets.is_empty() {
+                                ui.add_space(24.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(if state.model_assets.is_empty() {
+                                            "Belum ada Assets 3D dari server. Pastikan Sync Server selesai."
+                                        } else {
+                                            "Tidak ada model 3D yang cocok dengan filter."
+                                        })
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                                    );
+                                });
+                                return;
+                            }
+
+                            for m in &filtered_assets {
+                                let mut checked =
+                                    state.user_table.assets_selected_ids.contains(&m.id);
+                                let row_bg = if checked {
+                                    egui::Color32::from_rgb(15, 42, 62)
+                                } else {
+                                    egui::Color32::from_rgb(20, 29, 46)
+                                };
+                                egui::Frame::new()
+                                    .fill(row_bg)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        if checked {
+                                            egui::Color32::from_rgb(14, 116, 144)
+                                        } else {
+                                            egui::Color32::from_rgb(34, 46, 68)
+                                        },
+                                    ))
+                                    .corner_radius(5.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 5))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            if ui.checkbox(&mut checked, "").changed() {
+                                                if checked {
+                                                    state
+                                                        .user_table
+                                                        .assets_selected_ids
+                                                        .insert(m.id);
+                                                } else {
+                                                    state
+                                                        .user_table
+                                                        .assets_selected_ids
+                                                        .remove(&m.id);
+                                                }
+                                            }
+                                            ui.label(
+                                                egui::RichText::new(&m.name)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(egui::Color32::WHITE),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("[{}]", m.category))
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let (t_txt, t_col) = match m.model_type {
+                                                        ModelAssetType::Animated => (
+                                                            "Animated",
+                                                            egui::Color32::from_rgb(110, 231, 183),
+                                                        ),
+                                                        ModelAssetType::Static => (
+                                                            "Static",
+                                                            egui::Color32::from_rgb(148, 163, 184),
+                                                        ),
+                                                    };
+                                                    ui.label(
+                                                        egui::RichText::new(t_txt)
+                                                            .size(10.0)
+                                                            .color(t_col),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    });
+                                ui.add_space(3.0);
+                            }
+                        });
+
+                    if let Some(err) = &state.user_table.form_error {
+                        ui.add_space(6.0);
+                        ui.colored_label(egui::Color32::from_rgb(252, 165, 165), err);
+                    }
+
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let save_btn = egui::Button::new(
+                            egui::RichText::new(if state.user_table.submitting {
+                                "Menyimpan..."
+                            } else {
+                                "Simpan Daftar Assets 3D"
+                            })
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(5, 150, 105))
+                        .min_size(egui::vec2(170.0, 30.0));
+                        if ui
+                            .add_enabled(!state.user_table.submitting, save_btn)
+                            .clicked()
+                        {
+                            save = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                !state.user_table.submitting,
+                                egui::Button::new("Batal").min_size(egui::vec2(80.0, 30.0)),
+                            )
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+
+            if close {
+                state.user_table.close_modal();
+            } else if save && let Some(auth) = current_auth(state) {
+                state.user_table.submitting = true;
+                state.user_table.form_error = None;
+                let ids: Vec<uuid::Uuid> = state
+                    .user_table
+                    .assets_selected_ids
+                    .iter()
+                    .copied()
+                    .collect();
+                api.send(ApiCommand::UpdateUserAssets {
+                    auth,
+                    id: user.id,
+                    req: UpdateUserAssetsRequest {
+                        model_asset_ids: ids,
+                    },
+                });
             }
         }
         UserModalMode::DeleteConfirm(user) => {
