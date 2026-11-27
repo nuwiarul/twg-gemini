@@ -383,15 +383,10 @@ fn pick_play_selectable_marker(
                 continue;
             }
 
-            let hidden_branch = if marker_comp.is_walking_now && marker_comp.walk_child.is_some() {
-                marker_comp.idle_child
-            } else {
-                marker_comp.walk_child
-            };
             stack.clear();
             stack.push(root_entity);
             while let Some(e) = stack.pop() {
-                if Some(e) == hidden_branch {
+                if marker_comp.is_branch_hidden(e) {
                     continue;
                 }
                 if let Ok((gtf, aabb_opt, mesh3d_opt)) = pick.mesh_nodes.get(e)

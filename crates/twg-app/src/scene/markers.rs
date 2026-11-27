@@ -233,7 +233,9 @@ impl TacticalMarkerEntity {
                 || self.action_slots.values().any(|s| s.child_entity == entity);
         }
         if self.lod_tier == MarkerLodTier::Lod2 && self.lod2_child.is_some() {
-            return Some(entity) != self.lod2_child;
+            return Some(entity) == self.idle_child
+                || Some(entity) == self.walk_child
+                || self.action_slots.values().any(|s| s.child_entity == entity);
         }
         if Some(entity) == self.lod2_child {
             return true;
@@ -3480,6 +3482,13 @@ pub fn selection_gizmo_system(
                 comp.bounds_dirty = false;
             }
             recomputed_this_frame += 1;
+        } else if comp.bounds_dirty || gtf_changed || tf_pending_propagate {
+            // Active LOD/variant scene is still spawning its child meshes (e.g. just switched
+            // LOD0 <-> LOD2 on Stop): evict stale cached bounds immediately so highlights fall
+            // back to the live marker transform instead of lingering at the previous position.
+            marker_bounds.bounds.remove(&comp.id);
+            comp.last_bounds_affine = bevy::math::Affine3A::ZERO;
+            comp.bounds_dirty = true;
         }
     }
 
