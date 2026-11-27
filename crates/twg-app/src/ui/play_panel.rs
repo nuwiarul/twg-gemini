@@ -706,6 +706,35 @@ pub fn draw_play_animation_panel(
                             }
                             continue;
                         }
+                        if twg_shared::model_action_anim::is_model_action_anim(anim) {
+                            use super::model_action_anim::ModelActionPlayAction;
+                            match super::model_action_anim::draw_play_card(
+                                ui,
+                                state,
+                                playback,
+                                anim,
+                                *global_idx,
+                                true,
+                            ) {
+                                Some(ModelActionPlayAction::Play) => action_play = Some(anim.id),
+                                Some(ModelActionPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(ModelActionPlayAction::Resume) => {
+                                    action_resume = Some(anim.id)
+                                }
+                                Some(ModelActionPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(ModelActionPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        fly_to = Some((lng, lat));
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
                         if twg_shared::environment_anim::is_environment_anim(anim) {
                             use super::environment_anim::EnvPlayAction;
                             match super::environment_anim::draw_play_card(
@@ -2704,6 +2733,12 @@ fn anim_matches_play_search(
             haystack.push(' ');
             haystack.push_str(&cfg.label_text);
         }
+    } else if twg_shared::model_action_anim::is_model_action_anim(anim) {
+        let cfg = twg_shared::model_action_anim::parse_model_action_config(anim);
+        haystack.push_str(" aksi model 3d klip animasi action ");
+        haystack.push_str(&cfg.action_slug);
+        haystack.push(' ');
+        haystack.push_str(cfg.play_mode.label());
     } else if twg_shared::billboard_anim::is_billboard_anim(anim) {
         haystack.push_str(" billboard videotron layar video gambar media ");
         let cfg = twg_shared::billboard_anim::parse_billboard_anim_config(anim);

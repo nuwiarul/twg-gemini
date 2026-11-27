@@ -4,6 +4,7 @@ mod audio_anim;
 mod billboard_anim;
 pub(crate) mod camera_anim;
 pub(crate) mod environment_anim;
+pub(crate) mod model_action_anim;
 mod bottom_bar;
 mod formation_pad;
 mod layar_besar_page;
@@ -584,6 +585,7 @@ pub fn egui_root_system(
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
+                | ToolMode::PickModelActionMarker
                 | ToolMode::PlaceParticle
                 | ToolMode::DrawWaterPolygon
                 | ToolMode::PlaceRainZone

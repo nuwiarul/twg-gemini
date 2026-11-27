@@ -1133,6 +1133,7 @@ fn process_net_events_system(
                     twg_shared::traffic_diversion::is_traffic_diversion_anim(&a);
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
+                let is_model_action = twg_shared::model_action_anim::is_model_action_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
                 let is_spawn_hide = spawn_hide_act.is_some();
                 let group_mode_opt = twg_shared::group_anim::group_anim_mode(&a);
@@ -1150,6 +1151,7 @@ fn process_net_events_system(
                     && !is_traffic_diversion
                     && !is_shoot
                     && !is_pointer
+                    && !is_model_action
                     && !is_spawn_hide
                     && !is_group
                     && bound_empty;
@@ -1164,6 +1166,10 @@ fn process_net_events_system(
                 state.sort_anims_by_order();
                 if is_audio {
                     state.status_banner = Some(format!("Play Suara '{anim_name}' dibuat — pilih Sound dari Assets di Inspector."));
+                } else if is_model_action {
+                    state.status_banner = Some(format!(
+                        "Aksi Model 3D '{anim_name}' dibuat — pilih klip aksi & mode putar (Loop / Tahan Pose / Kembali Idle) di Inspector!"
+                    ));
                 } else if is_billboard {
                     state.status_banner = Some(format!(
                         "Billboard / Videotron '{anim_name}' dipasang — pilih Gambar/Video di Inspector, atau geser/putar/skala via Gizmo (2: Move, 3: Rotate, 4: Scale)!"

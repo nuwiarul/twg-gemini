@@ -70,10 +70,33 @@ impl Default for AssetPreviewStage {
 
 pub fn resolve_preview_file_path(
     asset: &ModelAssetDto,
-    variant: AssetPreviewVariant,
+    variant: &AssetPreviewVariant,
     lod: AssetPreviewLod,
 ) -> String {
     match (asset.model_type, variant, lod) {
+        (ModelAssetType::Animated, AssetPreviewVariant::Action(slug), AssetPreviewLod::Lod2) => {
+            if let Some(act) = asset.extra_animations.iter().find(|a| a.slug == *slug) {
+                act.lod2_file
+                    .as_ref()
+                    .unwrap_or(&act.file)
+                    .rel_path
+                    .clone()
+            } else {
+                asset
+                    .lod2_file
+                    .as_ref()
+                    .unwrap_or(&asset.model_file)
+                    .rel_path
+                    .clone()
+            }
+        }
+        (ModelAssetType::Animated, AssetPreviewVariant::Action(slug), AssetPreviewLod::Lod0) => {
+            if let Some(act) = asset.extra_animations.iter().find(|a| a.slug == *slug) {
+                act.file.rel_path.clone()
+            } else {
+                asset.model_file.rel_path.clone()
+            }
+        }
         (ModelAssetType::Animated, AssetPreviewVariant::Walk, AssetPreviewLod::Lod2) => asset
             .walk_lod2_file
             .as_ref()
@@ -190,7 +213,7 @@ pub fn asset_preview_stage_system(
         return;
     };
 
-    let target_rel_path = resolve_preview_file_path(asset, state.preview_variant, state.preview_lod);
+    let target_rel_path = resolve_preview_file_path(asset, &state.preview_variant, state.preview_lod);
     let file_ready_locally = state.available_model_paths.contains(&target_rel_path)
         || state.assets_root.join(&target_rel_path).exists();
 

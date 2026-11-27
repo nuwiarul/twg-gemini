@@ -698,6 +698,32 @@ pub struct ModelFileMeta {
     pub download_url: String,
 }
 
+/// An extra named action animation clip uploaded for an `Animated` 3D model
+/// (e.g., `Melambai`, `Menembak`, `Pingsan`, `Hormat`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelActionClipDto {
+    pub slug: String,
+    pub name: String,
+    pub file: ModelFileMeta,
+    #[serde(default)]
+    pub lod2_file: Option<ModelFileMeta>,
+    /// Optional GLB animation clip names detected in the JSON header.
+    #[serde(default)]
+    pub clip_names: Vec<String>,
+}
+
+/// Lightweight catalog entry for an extra action clip synced to clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelCatalogActionClip {
+    pub slug: String,
+    pub name: String,
+    pub model_path: String,
+    #[serde(default)]
+    pub lod2_path: Option<String>,
+    #[serde(default)]
+    pub clip_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelAssetDto {
     pub id: Uuid,
@@ -712,6 +738,8 @@ pub struct ModelAssetDto {
     pub walk_file: Option<ModelFileMeta>,
     #[serde(default)]
     pub walk_lod2_file: Option<ModelFileMeta>,
+    #[serde(default)]
+    pub extra_animations: Vec<ModelActionClipDto>,
     pub default_height: f64,
     pub default_rotation_deg: [f64; 3],
     pub version: i32,
@@ -721,7 +749,7 @@ pub struct ModelAssetDto {
 
 impl ModelAssetDto {
     pub fn all_files(&self) -> Vec<&ModelFileMeta> {
-        let mut out = Vec::with_capacity(4);
+        let mut out = Vec::with_capacity(4 + self.extra_animations.len() * 2);
         out.push(&self.model_file);
         if let Some(f) = &self.lod2_file {
             out.push(f);
@@ -731,6 +759,12 @@ impl ModelAssetDto {
         }
         if let Some(f) = &self.walk_lod2_file {
             out.push(f);
+        }
+        for act in &self.extra_animations {
+            out.push(&act.file);
+            if let Some(f) = &act.lod2_file {
+                out.push(f);
+            }
         }
         out
     }
@@ -746,6 +780,17 @@ impl ModelAssetDto {
             lod2_path: self.lod2_file.as_ref().map(|f| f.rel_path.clone()),
             walk_model_path: self.walk_file.as_ref().map(|f| f.rel_path.clone()),
             walk_lod2_path: self.walk_lod2_file.as_ref().map(|f| f.rel_path.clone()),
+            extra_animations: self
+                .extra_animations
+                .iter()
+                .map(|a| ModelCatalogActionClip {
+                    slug: a.slug.clone(),
+                    name: a.name.clone(),
+                    model_path: a.file.rel_path.clone(),
+                    lod2_path: a.lod2_file.as_ref().map(|f| f.rel_path.clone()),
+                    clip_names: a.clip_names.clone(),
+                })
+                .collect(),
             default_height: self.default_height,
             default_rotation_deg: self.default_rotation_deg,
             ready,
@@ -1019,6 +1064,8 @@ pub struct ModelCatalogEntry {
     pub walk_model_path: Option<String>,
     #[serde(default)]
     pub walk_lod2_path: Option<String>,
+    #[serde(default)]
+    pub extra_animations: Vec<ModelCatalogActionClip>,
     pub default_height: f64,
     pub default_rotation_deg: [f64; 3],
     pub ready: bool,

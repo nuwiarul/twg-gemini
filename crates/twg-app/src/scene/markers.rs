@@ -148,6 +148,15 @@ pub struct SubtreeAnimGraph {
     pub walk_node: AnimationNodeIndex,
 }
 
+#[derive(Clone)]
+pub struct ActionSubtreeSlot {
+    pub rel_path: String,
+    pub child_entity: Entity,
+    pub gltf_handle: Handle<Gltf>,
+    pub anim_graph: Option<(Handle<AnimationGraph>, AnimationNodeIndex)>,
+    pub scale_calibrated: bool,
+}
+
 #[derive(Component)]
 pub struct TacticalMarkerEntity {
     pub id: Uuid,
@@ -159,11 +168,43 @@ pub struct TacticalMarkerEntity {
     pub walk_gltf_handle: Option<Handle<Gltf>>,
     pub walk_child: Option<Entity>,
     pub walk_anim_graph: Option<SubtreeAnimGraph>,
+    pub walk_scale_calibrated: bool,
+    pub action_slots: HashMap<String, ActionSubtreeSlot>,
+    pub embedded_action_graphs: HashMap<String, (Handle<AnimationGraph>, AnimationNodeIndex)>,
+    pub active_action_key: Option<String>,
     pub is_walking_now: bool,
     pub basic_mesh_child: Option<Entity>,
     pub basic_geom_sig: u64,
     pub basic_mat_sig: u64,
     pub basic_mat_handle: Option<StandardMaterialHandleAlias>,
+}
+
+impl TacticalMarkerEntity {
+    /// Returns `true` if `entity` is a non-active child variant subtree (Idle, Walk, or Action)
+    /// that should be hidden and excluded from bounds/raycast calculations.
+    pub fn is_branch_hidden(&self, entity: Entity) -> bool {
+        if let Some(active_key) = &self.active_action_key {
+            if let Some(slot) = self.action_slots.get(active_key) {
+                return Some(entity) == self.idle_child
+                    || Some(entity) == self.walk_child
+                    || self
+                        .action_slots
+                        .values()
+                        .any(|s| s.child_entity == entity && s.child_entity != slot.child_entity);
+            }
+            // Embedded clip playing on idle_child
+            return Some(entity) == self.walk_child
+                || self.action_slots.values().any(|s| s.child_entity == entity);
+        }
+        let show_walk = self.is_walking_now && self.walk_child.is_some();
+        if show_walk {
+            Some(entity) == self.idle_child
+                || self.action_slots.values().any(|s| s.child_entity == entity)
+        } else {
+            Some(entity) == self.walk_child
+                || self.action_slots.values().any(|s| s.child_entity == entity)
+        }
+    }
 }
 
 type StandardMaterialHandleAlias = Handle<StandardMaterial>;
@@ -368,6 +409,151 @@ pub const DEFAULT_OBJECT_3D_SCALE: f64 = 0.1;
 pub const MIN_OBJECT_3D_SCALE: f64 = 0.01;
 pub const MAX_OBJECT_3D_SCALE: f64 = 50.0;
 
+/// Reads a local binary `.glb` JSON header (fast, < 1 ms) and computes the maximum
+/// scene bounding-box axis extent across all mesh primitives, factoring in node scales
+/// and matrices. Returns `None` if the file is missing or not a valid `.glb`.
+fn read_glb_max_span(path: &std::path::Path) -> Option<f64> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        return None;
+    }
+    let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    if 20 + json_len > bytes.len() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_len]).ok()?;
+    let nodes = json.get("nodes")?.as_array()?;
+    let meshes = json.get("meshes")?.as_array()?;
+    let accessors = json.get("accessors")?.as_array()?;
+    let scene_idx = json.get("scene").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let roots = json
+        .get("scenes")?
+        .as_array()?
+        .get(scene_idx)?
+        .get("nodes")?
+        .as_array()?;
+
+    fn walk_node(
+        idx: usize,
+        parent_scale: [f64; 3],
+        nodes: &[serde_json::Value],
+        meshes: &[serde_json::Value],
+        accessors: &[serde_json::Value],
+        max_span: &mut f64,
+        depth: usize,
+    ) {
+        if depth > 64 {
+            return;
+        }
+        let Some(node) = nodes.get(idx) else {
+            return;
+        };
+        let local_scale = if let Some(sc) = node.get("scale").and_then(|v| v.as_array())
+            && sc.len() == 3
+        {
+            [
+                sc[0].as_f64().unwrap_or(1.0).abs(),
+                sc[1].as_f64().unwrap_or(1.0).abs(),
+                sc[2].as_f64().unwrap_or(1.0).abs(),
+            ]
+        } else if let Some(m) = node.get("matrix").and_then(|v| v.as_array())
+            && m.len() == 16
+        {
+            let col_len = |c: usize| {
+                let x = m[c * 4].as_f64().unwrap_or(0.0);
+                let y = m[c * 4 + 1].as_f64().unwrap_or(0.0);
+                let z = m[c * 4 + 2].as_f64().unwrap_or(0.0);
+                (x * x + y * y + z * z).sqrt().max(1e-6)
+            };
+            [col_len(0), col_len(1), col_len(2)]
+        } else {
+            [1.0, 1.0, 1.0]
+        };
+        let cur_scale = [
+            parent_scale[0] * local_scale[0],
+            parent_scale[1] * local_scale[1],
+            parent_scale[2] * local_scale[2],
+        ];
+        if let Some(mesh_idx) = node.get("mesh").and_then(|v| v.as_u64())
+            && let Some(mesh) = meshes.get(mesh_idx as usize)
+            && let Some(prims) = mesh.get("primitives").and_then(|v| v.as_array())
+        {
+            for prim in prims {
+                if let Some(pos_idx) = prim
+                    .get("attributes")
+                    .and_then(|a| a.get("POSITION"))
+                    .and_then(|v| v.as_u64())
+                    && let Some(acc) = accessors.get(pos_idx as usize)
+                    && let (Some(mn), Some(mx)) = (
+                        acc.get("min").and_then(|v| v.as_array()),
+                        acc.get("max").and_then(|v| v.as_array()),
+                    )
+                    && mn.len() >= 3
+                    && mx.len() >= 3
+                {
+                    for axis in 0..3 {
+                        let span = (mx[axis].as_f64().unwrap_or(0.0)
+                            - mn[axis].as_f64().unwrap_or(0.0))
+                        .abs()
+                            * cur_scale[axis];
+                        if span.is_finite() && span > *max_span {
+                            *max_span = span;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+            for ch in children {
+                if let Some(ci) = ch.as_u64() {
+                    walk_node(
+                        ci as usize,
+                        cur_scale,
+                        nodes,
+                        meshes,
+                        accessors,
+                        max_span,
+                        depth + 1,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut max_span = 0.0_f64;
+    for r in roots {
+        if let Some(ri) = r.as_u64() {
+            walk_node(
+                ri as usize,
+                [1.0, 1.0, 1.0],
+                nodes,
+                meshes,
+                accessors,
+                &mut max_span,
+                0,
+            );
+        }
+    }
+    (max_span > 1e-4 && max_span.is_finite()).then_some(max_span)
+}
+
+/// Computes an appropriate initial map `scale` when spawning a catalog 3D model:
+/// - Existing Assimp models (`max_span` ~90–100 units) keep `DEFAULT_OBJECT_3D_SCALE` (`0.1`, ~10m).
+/// - Newly exported metric Blender `.glb` models (`max_span` ~1.0–2.0m) are scaled automatically
+///   to ~10m so they drop onto the tactical map at the exact same proportional size as existing assets.
+fn compute_initial_spawn_scale(assets_root: &std::path::Path, model_path: &str) -> f64 {
+    let Some(raw_span) = read_glb_max_span(&assets_root.join(model_path)) else {
+        return DEFAULT_OBJECT_3D_SCALE;
+    };
+    if (50.0..=150.0).contains(&raw_span) {
+        return DEFAULT_OBJECT_3D_SCALE;
+    }
+    // Standard tactical drop target: ~10.0m (= 100.0 * DEFAULT_OBJECT_3D_SCALE)
+    let target_m = 100.0 * DEFAULT_OBJECT_3D_SCALE;
+    let raw = (target_m / raw_span).clamp(MIN_OBJECT_3D_SCALE, MAX_OBJECT_3D_SCALE);
+    ((raw * 100.0).round() / 100.0).clamp(MIN_OBJECT_3D_SCALE, MAX_OBJECT_3D_SCALE)
+}
+
 /// Spawns a 3D catalog model into the active scenario at `(lng, lat)`.
 /// Shared by both Drag-and-Drop onto the 3D map and the "+ Tambah" button in the 3D Catalog panel.
 pub fn spawn_marker_from_catalog(
@@ -382,7 +568,7 @@ pub fn spawn_marker_from_catalog(
         return false;
     };
 
-    let default_scale = DEFAULT_OBJECT_3D_SCALE;
+    let default_scale = compute_initial_spawn_scale(&state.assets_root, &entry.model_path);
     let rot_x = 0.0;
     let rot_y = 0.0;
     let rot_z = 0.0;
@@ -953,25 +1139,27 @@ pub fn sync_markers_system(
             present.insert(comp.id);
             comp.is_walking_now = *is_moving;
 
-            // Zero-flicker Walk <-> Idle visibility switch when marker has a walk animation model
-            let show_walk = *is_moving && comp.walk_child.is_some();
-            if let Some(idle_e) = comp.idle_child
-                && let Ok(mut iv) = child_vis_q.get_mut(idle_e)
-            {
-                *iv = if show_walk {
-                    Visibility::Hidden
-                } else {
-                    Visibility::Inherited
-                };
-            }
-            if let Some(walk_e) = comp.walk_child
-                && let Ok(mut wv) = child_vis_q.get_mut(walk_e)
-            {
-                *wv = if show_walk {
-                    Visibility::Inherited
-                } else {
-                    Visibility::Hidden
-                };
+            // Zero-flicker Walk <-> Idle visibility switch when no custom action clip is active
+            if comp.active_action_key.is_none() {
+                let show_walk = *is_moving && comp.walk_child.is_some();
+                if let Some(idle_e) = comp.idle_child
+                    && let Ok(mut iv) = child_vis_q.get_mut(idle_e)
+                {
+                    *iv = if show_walk {
+                        Visibility::Hidden
+                    } else {
+                        Visibility::Inherited
+                    };
+                }
+                if let Some(walk_e) = comp.walk_child
+                    && let Ok(mut wv) = child_vis_q.get_mut(walk_e)
+                {
+                    *wv = if show_walk {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                }
             }
         }
 
@@ -1087,6 +1275,10 @@ pub fn sync_markers_system(
                         walk_gltf_handle: None,
                         walk_child: None,
                         walk_anim_graph: None,
+                        walk_scale_calibrated: true,
+                        action_slots: HashMap::new(),
+                        embedded_action_graphs: HashMap::new(),
+                        active_action_key: None,
                         is_walking_now: is_moving,
                         basic_mesh_child: Some(child_id),
                         basic_geom_sig: geom_sig,
@@ -1164,6 +1356,10 @@ pub fn sync_markers_system(
                     walk_gltf_handle,
                     walk_child,
                     walk_anim_graph: None,
+                    walk_scale_calibrated: false,
+                    action_slots: HashMap::new(),
+                    embedded_action_graphs: HashMap::new(),
+                    active_action_key: None,
                     is_walking_now: is_moving,
                     basic_mesh_child: None,
                     basic_geom_sig: 0,
@@ -1372,19 +1568,114 @@ fn drive_subtree_gltf_anim(
     }
 }
 
+/// Deterministically drives all `AnimationPlayer` components inside `subtree_root` to an exact
+/// timestamp `seek_t` (seconds) using a cached single-clip `AnimationGraph`.
+/// Returns `true` if at least one `AnimationPlayer` was found and updated.
+fn drive_action_subtree_seek(
+    commands: &mut Commands,
+    subtree_root: Entity,
+    graph_handle: &Handle<AnimationGraph>,
+    node_idx: AnimationNodeIndex,
+    seek_t: f32,
+    children_q: &Query<&Children>,
+    anim_player_q: &mut Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
+) -> bool {
+    let mut stack = vec![subtree_root];
+    let mut found_any = false;
+    while let Some(e) = stack.pop() {
+        if let Ok((_, mut player, existing_graph_h)) = anim_player_q.get_mut(e) {
+            found_any = true;
+            let needs_graph = existing_graph_h.is_none_or(|gh| gh.0.id() != graph_handle.id());
+            if needs_graph {
+                commands
+                    .entity(e)
+                    .insert(AnimationGraphHandle(graph_handle.clone()));
+            }
+            let needs_start = !player.is_playing_animation(node_idx)
+                || player.playing_animations().count() != 1;
+            if needs_graph || needs_start {
+                player.stop_all();
+                let active = player.play(node_idx).repeat();
+                active.set_speed(0.0);
+                active.set_seek_time(seek_t);
+            } else if let Some(active) = player.animation_mut(node_idx) {
+                active.set_speed(0.0);
+                active.set_seek_time(seek_t);
+            }
+        }
+        if let Ok(children) = children_q.get(e) {
+            for child in children.iter() {
+                stack.push(child);
+            }
+        }
+    }
+    found_any
+}
+
+/// Measures the largest world-space bounding-box axis extent (`max(dx, dy, dz)`) of all
+/// descendant `Aabb`s under `subtree_root`. Because `idle_child` and `action_slot.child_entity`
+/// share the exact same `root_entity` parent, their span ratio equals their exact root-local
+/// scale mismatch (e.g. `100.0` when pairing an old cm-scale Assimp Idle model with a new
+/// metric 1.0m direct-Blender `.glb` action clip).
+fn measure_subtree_max_span(
+    subtree_root: Entity,
+    children_q: &Query<&Children>,
+    mesh_aabb_q: &Query<(&GlobalTransform, &Aabb)>,
+) -> Option<f32> {
+    let mut wmin = Vec3::splat(f32::INFINITY);
+    let mut wmax = Vec3::splat(f32::NEG_INFINITY);
+    let mut found = false;
+    let mut stack = vec![subtree_root];
+    while let Some(e) = stack.pop() {
+        if let Ok((gtf, aabb)) = mesh_aabb_q.get(e) {
+            let c = Vec3::from(aabb.center);
+            let h = Vec3::from(aabb.half_extents);
+            let aff = gtf.affine();
+            for sx in [-1.0_f32, 1.0] {
+                for sy in [-1.0_f32, 1.0] {
+                    for sz in [-1.0_f32, 1.0] {
+                        let pt = aff.transform_point3(c + Vec3::new(sx * h.x, sy * h.y, sz * h.z));
+                        wmin = wmin.min(pt);
+                        wmax = wmax.max(pt);
+                        found = true;
+                    }
+                }
+            }
+        }
+        if let Ok(children) = children_q.get(e) {
+            for child in children.iter() {
+                stack.push(child);
+            }
+        }
+    }
+    if found && wmin.is_finite() && wmax.is_finite() {
+        let size = wmax - wmin;
+        let max_axis = size.x.max(size.y).max(size.z);
+        (max_axis > 1e-5).then_some(max_axis)
+    } else {
+        None
+    }
+}
+
 /// Drives embedded glTF AnimationPlayers independently per marker:
 /// - Markers with separate Idle + Walk `.glb` files play Walk ONLY while moving and Idle when resting.
 /// - Single-file dual-clip animated markers (e.g. `*_anim_1.glb` vehicles/helicopters with `Idle|Idle`
 ///   and `Idle|Walk`) switch cleanly to their Walk clip while moving along any route and Idle at rest.
+/// - Custom `model_action` clips (`extra_animations` uploaded on Animated models, or embedded GLB clips)
+///   override Idle while active, with automatic Route Priority handoff (auto-stop when moving -> Walk).
 #[allow(clippy::too_many_arguments)]
 pub fn animate_markers_system(
     mut commands: Commands,
-    state: Res<AppState>,
-    playback: Res<PlaybackState>,
+    mut state: ResMut<AppState>,
+    mut playback: ResMut<PlaybackState>,
+    asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
+    anim_clips: Res<Assets<AnimationClip>>,
     mut anim_graphs: ResMut<Assets<AnimationGraph>>,
     mut marker_q: Query<(Entity, &mut TacticalMarkerEntity)>,
     children_q: Query<&Children>,
+    mesh_aabb_q: Query<(&GlobalTransform, &Aabb)>,
+    mut child_vis_q: Query<&mut Visibility, Without<TacticalMarkerEntity>>,
     mut anim_player_q: Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
 ) {
     if !state.is_3d_map_screen() {
@@ -1394,7 +1685,352 @@ pub fn animate_markers_system(
     let speed = playback.speed_multiplier.max(0.1);
     let playback_active = playback.is_playback_active();
 
+    // Collect model_action animations so we don't fight borrows on `state`
+    let action_anims: Vec<(
+        Uuid,
+        Uuid,
+        twg_shared::model_action_anim::ModelActionAnimConfig,
+    )> = state
+        .anims
+        .iter()
+        .filter(|a| twg_shared::model_action_anim::is_model_action_anim(a))
+        .filter_map(|a| {
+            let mid = a.marker_id?;
+            let cfg = twg_shared::model_action_anim::parse_model_action_config(a);
+            if cfg.action_slug.trim().is_empty() {
+                return None;
+            }
+            Some((a.id, mid, cfg))
+        })
+        .collect();
+
+    // Clear stale live statuses when playback is inactive
+    if !playback_active {
+        state.model_action_status.clear();
+    }
+
     for (root_entity, mut comp) in &mut marker_q {
+        let marker_id = comp.id;
+
+        // 0. Route Priority Rule: whenever this marker is actively moving (Route / Formation / RTS),
+        // automatically stop any bound `model_action` with `stop_on_route_move == true` so Walk plays.
+        if playback_active && comp.is_walking_now {
+            for (anim_id, mid, cfg) in &action_anims {
+                if *mid == marker_id && cfg.stop_on_route_move {
+                    if let Some(tr) = playback.tracks.get_mut(anim_id)
+                        && tr.status != crate::state::AnimRunStatus::Stopped
+                    {
+                        tr.status = crate::state::AnimRunStatus::Stopped;
+                        tr.distance_m = 0.0;
+                        tr.trigger_seq = 0;
+                        state
+                            .model_action_status
+                            .insert(*anim_id, "Dihentikan otomatis (Unit berjalan)".into());
+                    }
+                }
+            }
+        }
+
+        // Resolve the highest-priority active `model_action` for this marker (if any)
+        let mut winning_action: Option<(
+            Uuid,
+            twg_shared::model_action_anim::ModelActionAnimConfig,
+            crate::state::AnimRunStatus,
+            f64,
+            u64,
+        )> = None;
+
+        if playback_active {
+            for (anim_id, mid, cfg) in &action_anims {
+                if *mid != marker_id {
+                    continue;
+                }
+                if comp.is_walking_now && cfg.stop_on_route_move {
+                    continue;
+                }
+                let Some(tr) = playback.tracks.get(anim_id) else {
+                    continue;
+                };
+                let holds_pose = tr.status == crate::state::AnimRunStatus::Playing
+                    || tr.status == crate::state::AnimRunStatus::Paused
+                    || (tr.status == crate::state::AnimRunStatus::Finished
+                        && cfg.play_mode
+                            == twg_shared::model_action_anim::ModelActionPlayMode::OnceHoldLastFrame);
+                if !holds_pose {
+                    continue;
+                }
+                let replace = winning_action
+                    .as_ref()
+                    .is_none_or(|cur| tr.trigger_seq >= cur.4);
+                if replace {
+                    winning_action = Some((*anim_id, cfg.clone(), tr.status, tr.distance_m, tr.trigger_seq));
+                }
+            }
+        }
+
+        let mut action_applied = false;
+        if let Some((anim_id, cfg, status, elapsed_sec, _)) = winning_action {
+            let slug = cfg.action_slug.trim().to_string();
+            if elapsed_sec < cfg.delay_sec {
+                let rem = (cfg.delay_sec - elapsed_sec).max(0.0);
+                state
+                    .model_action_status
+                    .insert(anim_id, format!("Jeda awal ({rem:.1} dtk)..."));
+                comp.active_action_key = None;
+            } else if let Some(clip_name) = slug.strip_prefix("embedded:") {
+                // Embedded clip inside the marker's primary glTF file
+                if let Some(idle_gltf_h) = comp.gltf_handle.clone()
+                    && let Some(gltf) = gltfs.get(&idle_gltf_h)
+                {
+                    let clip_handle = gltf
+                        .named_animations
+                        .get(clip_name)
+                        .cloned()
+                        .or_else(|| {
+                            clip_name
+                                .strip_prefix('#')
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .and_then(|idx| gltf.animations.get(idx).cloned())
+                        })
+                        .or_else(|| gltf.animations.first().cloned());
+
+                    if let Some(clip_h) = clip_handle {
+                        let clip_dur = anim_clips
+                            .get(&clip_h)
+                            .map(|c| c.duration())
+                            .unwrap_or(1.0)
+                            .max(0.05);
+                        let (graph_h, node_idx) = comp
+                            .embedded_action_graphs
+                            .entry(slug.clone())
+                            .or_insert_with(|| {
+                                let (graph, node) = AnimationGraph::from_clip(clip_h.clone());
+                                (anim_graphs.add(graph), node)
+                            })
+                            .clone();
+
+                        let action_elapsed = (elapsed_sec - cfg.delay_sec).max(0.0) * cfg.speed.max(0.05);
+                        let (seek_t, should_finish, hold_pose, live_msg) =
+                            evaluate_model_action_time(&cfg, status, action_elapsed, clip_dur);
+
+                        if let Some(tr) = playback.tracks.get_mut(&anim_id) {
+                            update_model_action_track(tr, &cfg, clip_dur, should_finish);
+                        }
+                        state.model_action_status.insert(anim_id, live_msg);
+
+                        if hold_pose {
+                            let idle_root = comp.idle_child.unwrap_or(root_entity);
+                            if drive_action_subtree_seek(
+                                &mut commands,
+                                idle_root,
+                                &graph_h,
+                                node_idx,
+                                seek_t,
+                                &children_q,
+                                &mut anim_player_q,
+                            ) {
+                                comp.active_action_key = Some(slug);
+                                action_applied = true;
+                            }
+                        } else {
+                            comp.active_action_key = None;
+                        }
+                    }
+                }
+            } else {
+                // Separate uploaded action clip from ModelCatalogEntry::extra_animations
+                let rel_path_opt = state
+                    .catalog
+                    .iter()
+                    .find(|c| c.model_path == comp.model_path)
+                    .and_then(|c| {
+                        c.extra_animations
+                            .iter()
+                            .find(|a| a.slug == slug)
+                            .map(|a| a.model_path.clone())
+                    });
+
+                if let Some(rel_path) = rel_path_opt {
+                    let file_ready = state.available_model_paths.contains(&rel_path)
+                        || state.assets_root.join(&rel_path).exists();
+                    if file_ready {
+                        // Lazily spawn ActionSubtreeSlot if missing or path changed
+                        let needs_spawn = comp
+                            .action_slots
+                            .get(&slug)
+                            .is_none_or(|s| s.rel_path != rel_path);
+                        if needs_spawn {
+                            if let Some(old) = comp.action_slots.remove(&slug) {
+                                commands.entity(old.child_entity).despawn();
+                            }
+                            let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
+                            let scene_h = asset_server
+                                .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                            let child_e = commands
+                                .spawn((
+                                    WorldAssetRoot(scene_h),
+                                    Transform::IDENTITY,
+                                    Visibility::Hidden,
+                                ))
+                                .id();
+                            commands.entity(root_entity).add_child(child_e);
+                            comp.action_slots.insert(
+                                slug.clone(),
+                                ActionSubtreeSlot {
+                                    rel_path,
+                                    child_entity: child_e,
+                                    gltf_handle: gltf_h,
+                                    anim_graph: None,
+                                    scale_calibrated: false,
+                                },
+                            );
+                        }
+
+                        let idle_child_opt = comp.idle_child;
+                        if let Some(slot) = comp.action_slots.get_mut(&slug) {
+                            let child_e = slot.child_entity;
+
+                            // Auto-calibrate action clip scale to match Idle model height
+                            // (handles cm-scale Assimp Idle [100x] + metric Blender Action [1x] seamlessly).
+                            if !slot.scale_calibrated {
+                                if let Some(idle_e) = idle_child_opt {
+                                    if let (Some(idle_span), Some(act_span)) = (
+                                        measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q),
+                                        measure_subtree_max_span(child_e, &children_q, &mesh_aabb_q),
+                                    ) {
+                                        let ratio = (idle_span / act_span).clamp(0.001, 1000.0);
+                                        if (ratio - 1.0).abs() > 0.08 {
+                                            commands
+                                                .entity(child_e)
+                                                .insert(Transform::from_scale(Vec3::splat(ratio)));
+                                        }
+                                        slot.scale_calibrated = true;
+                                    }
+                                } else {
+                                    slot.scale_calibrated = true;
+                                }
+                            }
+
+                            if let Some(gltf) = gltfs.get(&slot.gltf_handle)
+                                && let Some(clip_h) = gltf.animations.first().cloned()
+                            {
+                                let clip_dur = anim_clips
+                                    .get(&clip_h)
+                                    .map(|c| c.duration())
+                                    .unwrap_or(1.0)
+                                    .max(0.05);
+                                let (graph_h, node_idx) = slot
+                                    .anim_graph
+                                    .get_or_insert_with(|| {
+                                        let (graph, node) = AnimationGraph::from_clip(clip_h.clone());
+                                        (anim_graphs.add(graph), node)
+                                    })
+                                    .clone();
+
+                                let action_elapsed =
+                                    (elapsed_sec - cfg.delay_sec).max(0.0) * cfg.speed.max(0.05);
+                                let (seek_t, should_finish, hold_pose, live_msg) =
+                                    evaluate_model_action_time(&cfg, status, action_elapsed, clip_dur);
+
+                                if let Some(tr) = playback.tracks.get_mut(&anim_id) {
+                                    update_model_action_track(tr, &cfg, clip_dur, should_finish);
+                                }
+                                state.model_action_status.insert(anim_id, live_msg);
+
+                                if hold_pose {
+                                    if drive_action_subtree_seek(
+                                        &mut commands,
+                                        child_e,
+                                        &graph_h,
+                                        node_idx,
+                                        seek_t,
+                                        &children_q,
+                                        &mut anim_player_q,
+                                    ) && slot.scale_calibrated
+                                    {
+                                        comp.active_action_key = Some(slug);
+                                        action_applied = true;
+                                    }
+                                } else {
+                                    comp.active_action_key = None;
+                                }
+                            } else {
+                                state
+                                    .model_action_status
+                                    .insert(anim_id, "Memuat klip aksi 3D...".into());
+                            }
+                        }
+                    } else {
+                        state
+                            .model_action_status
+                            .insert(anim_id, "Menunggu sinkronisasi file aksi...".into());
+                    }
+                } else {
+                    state
+                        .model_action_status
+                        .insert(anim_id, format!("Aksi '{slug}' tidak ditemukan pada model"));
+                    comp.active_action_key = None;
+                }
+            }
+        } else {
+            comp.active_action_key = None;
+        }
+
+        // Auto-calibrate Walk subtree scale to match Idle height once both meshes finish loading
+        // (prevents 100x size mismatch if mixing cm-scale Assimp Idle with metric Blender Walk).
+        if !comp.walk_scale_calibrated {
+            if let (Some(idle_e), Some(walk_e)) = (comp.idle_child, comp.walk_child) {
+                if let (Some(idle_span), Some(walk_span)) = (
+                    measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q),
+                    measure_subtree_max_span(walk_e, &children_q, &mesh_aabb_q),
+                ) {
+                    let ratio = (idle_span / walk_span).clamp(0.001, 1000.0);
+                    if (ratio - 1.0).abs() > 0.08 {
+                        commands
+                            .entity(walk_e)
+                            .insert(Transform::from_scale(Vec3::splat(ratio)));
+                    }
+                    comp.walk_scale_calibrated = true;
+                }
+            } else if comp.walk_child.is_none() {
+                comp.walk_scale_calibrated = true;
+            }
+        }
+
+        // Sync visibility of Idle, Walk, and all Action child subtrees cleanly (zero overlap)
+        if let Some(idle_e) = comp.idle_child
+            && let Ok(mut iv) = child_vis_q.get_mut(idle_e)
+        {
+            *iv = if comp.is_branch_hidden(idle_e) {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+        }
+        if let Some(walk_e) = comp.walk_child
+            && let Ok(mut wv) = child_vis_q.get_mut(walk_e)
+        {
+            *wv = if comp.is_branch_hidden(walk_e) {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+        }
+        for slot in comp.action_slots.values() {
+            if let Ok(mut av) = child_vis_q.get_mut(slot.child_entity) {
+                *av = if comp.is_branch_hidden(slot.child_entity) {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                };
+            }
+        }
+
+        // If a custom action clip is actively driving this marker, skip standard Walk/Idle AnimationPlayer overrides
+        if action_applied {
+            continue;
+        }
+
         let has_walk_variant = comp.walk_child.is_some() && comp.walk_gltf_handle.is_some();
 
         // 1. Dedicated Walk subtree (`*_walk.glb`): plays ONLY while actively moving on a route
@@ -1449,6 +2085,131 @@ pub fn animate_markers_system(
     }
 }
 
+/// Evaluates `(seek_t_sec, should_finish_now, keep_action_visible, live_status_text)`
+/// for a `model_action` clip.
+fn evaluate_model_action_time(
+    cfg: &twg_shared::model_action_anim::ModelActionAnimConfig,
+    status: crate::state::AnimRunStatus,
+    action_elapsed: f64,
+    clip_dur: f32,
+) -> (f32, bool, bool, String) {
+    use twg_shared::model_action_anim::ModelActionPlayMode;
+    let dur = clip_dur.max(0.05) as f64;
+    match cfg.play_mode {
+        ModelActionPlayMode::LoopForever => {
+            let seek = (action_elapsed % dur) as f32;
+            let txt = if status == crate::state::AnimRunStatus::Paused {
+                format!("Dijeda di {:.1} / {:.1} dtk", seek, clip_dur)
+            } else {
+                format!("Loop terus ({:.1} / {:.1} dtk)", seek, clip_dur)
+            };
+            (seek, false, true, txt)
+        }
+        ModelActionPlayMode::OnceHoldLastFrame => {
+            if status == crate::state::AnimRunStatus::Finished || action_elapsed >= dur {
+                let hold_t = (clip_dur - 0.004).max(0.0);
+                (
+                    hold_t,
+                    status == crate::state::AnimRunStatus::Playing,
+                    true,
+                    "Menahan pose akhir (klik Stop untuk Idle)".to_string(),
+                )
+            } else {
+                let seek = action_elapsed as f32;
+                let txt = if status == crate::state::AnimRunStatus::Paused {
+                    format!("Dijeda di {:.1} / {:.1} dtk", seek, clip_dur)
+                } else {
+                    format!("Memutar ({:.1} / {:.1} dtk)", seek, clip_dur)
+                };
+                (seek, false, true, txt)
+            }
+        }
+        ModelActionPlayMode::OnceReturnIdle => {
+            if status == crate::state::AnimRunStatus::Finished || action_elapsed >= dur {
+                (
+                    0.0,
+                    status == crate::state::AnimRunStatus::Playing,
+                    false,
+                    "Selesai — kembali ke Idle".to_string(),
+                )
+            } else {
+                let seek = action_elapsed as f32;
+                let txt = if status == crate::state::AnimRunStatus::Paused {
+                    format!("Dijeda di {:.1} / {:.1} dtk", seek, clip_dur)
+                } else {
+                    format!("Memutar 1× ({:.1} / {:.1} dtk)", seek, clip_dur)
+                };
+                (seek, false, true, txt)
+            }
+        }
+        ModelActionPlayMode::RepeatCountReturnIdle => {
+            let n = cfg.repeat_count.clamp(1, 50) as f64;
+            let total_clip_time = dur * n;
+            if status == crate::state::AnimRunStatus::Finished || action_elapsed >= total_clip_time
+            {
+                (
+                    0.0,
+                    status == crate::state::AnimRunStatus::Playing,
+                    false,
+                    format!("Selesai {}× — kembali ke Idle", cfg.repeat_count.clamp(1, 50)),
+                )
+            } else {
+                let cur_cycle = (action_elapsed / dur).floor() as u32 + 1;
+                let seek = (action_elapsed % dur) as f32;
+                let txt = if status == crate::state::AnimRunStatus::Paused {
+                    format!(
+                        "Dijeda ({cur_cycle}/{} · {:.1} dtk)",
+                        cfg.repeat_count.clamp(1, 50),
+                        seek
+                    )
+                } else {
+                    format!(
+                        "Putaran {cur_cycle}/{} ({:.1} / {:.1} dtk)",
+                        cfg.repeat_count.clamp(1, 50),
+                        seek,
+                        clip_dur
+                    )
+                };
+                (seek, false, true, txt)
+            }
+        }
+    }
+}
+
+fn update_model_action_track(
+    tr: &mut crate::state::AnimRuntimeTrack,
+    cfg: &twg_shared::model_action_anim::ModelActionAnimConfig,
+    clip_dur: f32,
+    should_finish: bool,
+) {
+    use twg_shared::model_action_anim::ModelActionPlayMode;
+    let speed = cfg.speed.max(0.05);
+    match cfg.play_mode {
+        ModelActionPlayMode::LoopForever => {
+            tr.total_length_m = 0.0;
+        }
+        ModelActionPlayMode::OnceHoldLastFrame | ModelActionPlayMode::OnceReturnIdle => {
+            let total = cfg.delay_sec + (clip_dur.max(0.05) as f64 / speed);
+            tr.total_length_m = total;
+            if should_finish {
+                tr.distance_m = total;
+                tr.status = crate::state::AnimRunStatus::Finished;
+                tr.completed_cycles = tr.completed_cycles.saturating_add(1);
+            }
+        }
+        ModelActionPlayMode::RepeatCountReturnIdle => {
+            let n = cfg.repeat_count.clamp(1, 50) as f64;
+            let total = cfg.delay_sec + ((clip_dur.max(0.05) as f64 * n) / speed);
+            tr.total_length_m = total;
+            if should_finish {
+                tr.distance_m = total;
+                tr.status = crate::state::AnimRunStatus::Finished;
+                tr.completed_cycles = tr.completed_cycles.saturating_add(1);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn selection_gizmo_system(
     time: Res<Time>,
@@ -1493,15 +2254,10 @@ pub fn selection_gizmo_system(
         let mut wmax = Vec3::splat(f32::NEG_INFINITY);
         let mut found_any = false;
 
-        let hidden_branch = if comp.is_walking_now && comp.walk_child.is_some() {
-            comp.idle_child
-        } else {
-            comp.walk_child
-        };
         stack.clear();
         stack.push(root_entity);
         while let Some(e) = stack.pop() {
-            if Some(e) == hidden_branch {
+            if comp.is_branch_hidden(e) {
                 continue;
             }
             if let Ok((gtf, aabb)) = mesh_aabb_q.get(e) {
@@ -1703,6 +2459,7 @@ pub fn selection_gizmo_system(
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
+                | ToolMode::PickModelActionMarker
         );
 
     // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold
@@ -1728,6 +2485,10 @@ pub fn selection_gizmo_system(
     } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickCameraFollowMarker {
         state
             .picking_camera_follow_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickModelActionMarker {
+        state
+            .picking_model_action_for_anim_id
             .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
     } else if !playback.play_test_mode
         && let SelectedEntity::Anim(aid) = state.selected
@@ -2350,6 +3111,12 @@ pub fn map_interaction_system(
                 state.status_banner = Some("Pemilihan objek target Camera Follow dibatalkan.".into());
                 return;
             }
+            if state.tool_mode == ToolMode::PickModelActionMarker {
+                state.picking_model_action_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Pemilihan objek target Aksi Model 3D dibatalkan.".into());
+                return;
+            }
             if state.tool_mode == ToolMode::PickSpawnHideMarker {
                 let picked_anim = state
                     .picking_spawn_hide_for_anim_id
@@ -2890,6 +3657,7 @@ pub fn map_interaction_system(
                     | ToolMode::PickPointerMarker
                     | ToolMode::PickSpawnHideMarker
                     | ToolMode::PickCameraFollowMarker
+                    | ToolMode::PickModelActionMarker
             ))
         && gizmo_state.hovered_handle.is_none()
     {
@@ -2911,6 +3679,7 @@ pub fn map_interaction_system(
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
+                | ToolMode::PickModelActionMarker
         ) {
             match picked {
                 Some(SelectedEntity::Marker(mid)) => Some(SelectedEntity::Marker(mid)),
@@ -4302,6 +5071,77 @@ pub fn map_interaction_system(
                     }
                 } else {
                     crate::ui::camera_anim::create_follow_camera_anim(
+                        &mut state,
+                        &api,
+                        Some(marker_id),
+                    );
+                }
+                state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
+        ToolMode::PickModelActionMarker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some((marker_name, marker_model_path)) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| (m.name.clone(), m.model_path.clone()))
+            {
+                if let Some(anim_id) = state.picking_model_action_for_anim_id.take() {
+                    let first_action = crate::ui::model_action_anim::available_actions_for_model(
+                        &state,
+                        &marker_model_path,
+                    );
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        anim.marker_id = Some(marker_id);
+                        let mut cfg =
+                            twg_shared::model_action_anim::parse_model_action_config(anim);
+                        if !first_action.iter().any(|(s, _)| s == &cfg.action_slug) {
+                            cfg.action_slug = first_action
+                                .first()
+                                .map(|(s, _)| s.clone())
+                                .unwrap_or_default();
+                        }
+                        twg_shared::model_action_anim::write_model_action_config(anim, &cfg);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name.clone(),
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+                        state.status_banner = Some(format!(
+                            "Aksi Model 3D '{}' sekarang menargetkan '{marker_name}'.",
+                            updated.name
+                        ));
+                    }
+                } else {
+                    crate::ui::model_action_anim::create_model_action_anim(
                         &mut state,
                         &api,
                         Some(marker_id),
@@ -5790,15 +6630,10 @@ fn pick_scene_entity(
             {
                 continue;
             }
-            let hidden_branch = if marker_comp.is_walking_now && marker_comp.walk_child.is_some() {
-                marker_comp.idle_child
-            } else {
-                marker_comp.walk_child
-            };
             stack.clear();
             stack.push(root_entity);
             while let Some(e) = stack.pop() {
-                if Some(e) == hidden_branch {
+                if marker_comp.is_branch_hidden(e) {
                     continue;
                 }
                 if let Ok((gtf, aabb_opt, mesh3d_opt)) = pick.mesh_nodes.get(e)

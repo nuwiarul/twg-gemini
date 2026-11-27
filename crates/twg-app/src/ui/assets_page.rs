@@ -844,15 +844,15 @@ fn draw_inspect_and_edit(
                 }
             });
 
-            // Idle vs Walk variant switcher (Animated models)
+            // Idle vs Walk vs Extra Action variant switcher (Animated models)
             if asset.model_type == ModelAssetType::Animated {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new("Varian:").strong());
                     if ui
                         .selectable_label(
                             state.preview_variant == AssetPreviewVariant::Idle,
-                            "Idle (Tanpa Animasi)",
+                            "Idle",
                         )
                         .clicked()
                     {
@@ -861,21 +861,30 @@ fn draw_inspect_and_edit(
                     if ui
                         .selectable_label(
                             state.preview_variant == AssetPreviewVariant::Walk,
-                            "Walk (Animasi Jalan)",
+                            "Walk",
                         )
                         .clicked()
                     {
                         state.preview_variant = AssetPreviewVariant::Walk;
                     }
+                    for act in &asset.extra_animations {
+                        let is_sel = matches!(
+                            &state.preview_variant,
+                            AssetPreviewVariant::Action(s) if s == &act.slug
+                        );
+                        if ui.selectable_label(is_sel, &act.name).clicked() {
+                            state.preview_variant = AssetPreviewVariant::Action(act.slug.clone());
+                        }
+                    }
                 });
 
-                if state.preview_variant == AssetPreviewVariant::Walk {
+                if !matches!(state.preview_variant, AssetPreviewVariant::Idle) {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let play_lbl = if state.preview_anim_playing {
-                            "Pause Walk"
+                            "Pause Anim"
                         } else {
-                            "Play Walk"
+                            "Play Anim"
                         };
                         if ui.button(play_lbl).clicked() {
                             state.preview_anim_playing = !state.preview_anim_playing;
@@ -976,6 +985,248 @@ fn draw_inspect_and_edit(
                 );
             }
         });
+
+    // --- Section 2B: Extra Action Animation Clips (Animated Models Only) ---
+    if asset.model_type == ModelAssetType::Animated {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Animasi Aksi Tambahan ({})",
+                    asset.extra_animations.len()
+                ))
+                .strong()
+                .color(egui::Color32::from_rgb(251, 191, 36)),
+            );
+        });
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(22, 31, 48))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(51, 65, 85)))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Upload file .glb animasi tambahan (contoh: Melambai, Menembak, Pingsan, Hormat) agar dapat dipicu melalui Animasi -> Lainnya -> Aksi Model 3D.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(6.0);
+
+                if asset.extra_animations.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Belum ada aksi tambahan untuk model ini.")
+                            .size(11.0)
+                            .italics()
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                } else {
+                    for act in &asset.extra_animations {
+                        let is_previewing = matches!(
+                            &state.preview_variant,
+                            AssetPreviewVariant::Action(s) if s == &act.slug
+                        );
+                        egui::Frame::new()
+                            .fill(if is_previewing {
+                                egui::Color32::from_rgb(30, 50, 74)
+                            } else {
+                                egui::Color32::from_rgb(15, 23, 38)
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if is_previewing {
+                                    egui::Color32::from_rgb(56, 189, 248)
+                                } else {
+                                    egui::Color32::from_rgb(41, 53, 72)
+                                },
+                            ))
+                            .corner_radius(5.0)
+                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&act.name)
+                                                .strong()
+                                                .size(12.0)
+                                                .color(egui::Color32::WHITE),
+                                        );
+                                        let clip_info = if act.clip_names.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" • clip: {}", act.clip_names.join(", "))
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} • {} ({} tris){clip_info}",
+                                                act.slug,
+                                                format_bytes(act.file.size_bytes),
+                                                act.file.tris
+                                            ))
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let confirming = state
+                                                .asset_form
+                                                .confirm_delete_action_slug
+                                                .as_deref()
+                                                == Some(act.slug.as_str());
+                                            if confirming {
+                                                if ui
+                                                    .add_enabled(
+                                                        !state.asset_form.submitting,
+                                                        egui::Button::new(
+                                                            egui::RichText::new("Ya")
+                                                                .size(10.5)
+                                                                .color(egui::Color32::WHITE),
+                                                        )
+                                                        .fill(egui::Color32::from_rgb(185, 28, 28)),
+                                                    )
+                                                    .clicked()
+                                                    && let Some(auth) = current_auth(state)
+                                                {
+                                                    state.asset_form.submitting = true;
+                                                    state.asset_form.error = None;
+                                                    state.asset_form.confirm_delete_action_slug =
+                                                        None;
+                                                    if is_previewing {
+                                                        state.preview_variant =
+                                                            AssetPreviewVariant::Idle;
+                                                    }
+                                                    api.send(ApiCommand::DeleteModelAction {
+                                                        auth,
+                                                        model_id: asset.id,
+                                                        action_slug: act.slug.clone(),
+                                                    });
+                                                }
+                                                if ui
+                                                    .small_button("Batal")
+                                                    .clicked()
+                                                {
+                                                    state.asset_form.confirm_delete_action_slug =
+                                                        None;
+                                                }
+                                            } else {
+                                                if ui
+                                                    .add_enabled(
+                                                        !state.asset_form.submitting,
+                                                        egui::Button::new(
+                                                            egui::RichText::new("Hapus")
+                                                                .size(10.5)
+                                                                .color(egui::Color32::from_rgb(
+                                                                    252, 165, 165,
+                                                                )),
+                                                        )
+                                                        .fill(egui::Color32::from_rgb(69, 20, 26)),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    state.asset_form.confirm_delete_action_slug =
+                                                        Some(act.slug.clone());
+                                                }
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            egui::RichText::new(if is_previewing {
+                                                                "Aktif"
+                                                            } else {
+                                                                "Preview"
+                                                            })
+                                                            .size(10.5),
+                                                        )
+                                                        .fill(if is_previewing {
+                                                            egui::Color32::from_rgb(14, 116, 144)
+                                                        } else {
+                                                            egui::Color32::from_rgb(30, 41, 59)
+                                                        }),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    state.preview_variant =
+                                                        AssetPreviewVariant::Action(
+                                                            act.slug.clone(),
+                                                        );
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("+ Tambah Aksi Baru (.glb / .gltf):")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.asset_form.new_action_name)
+                        .hint_text("Nama aksi (mis. Melambai, Menembak, Pingsan)")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+                draw_file_picker_row(
+                    ui,
+                    "Pilih File Aksi (.glb/.gltf)...",
+                    &mut state.asset_form.new_action_file_path,
+                    None,
+                );
+                ui.add_space(6.0);
+                let up_lbl = if state.asset_form.submitting {
+                    "Mengunggah & Konversi Aksi..."
+                } else {
+                    "+ Upload Aksi ke Model"
+                };
+                if ui
+                    .add_enabled(
+                        !state.asset_form.submitting,
+                        egui::Button::new(
+                            egui::RichText::new(up_lbl)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(21, 128, 61)),
+                    )
+                    .clicked()
+                {
+                    let trimmed = state.asset_form.new_action_name.trim().to_string();
+                    if trimmed.is_empty() {
+                        state.asset_form.error =
+                            Some("Nama aksi wajib diisi (contoh: Melambai).".into());
+                    } else if let Some(path) = state.asset_form.new_action_file_path.clone() {
+                        if let Some(auth) = current_auth(state) {
+                            state.asset_form.submitting = true;
+                            state.asset_form.error = None;
+                            state.asset_form.success = None;
+                            api.send(ApiCommand::UploadModelAction {
+                                auth,
+                                model_id: asset.id,
+                                name: trimmed,
+                                file_path: path,
+                            });
+                        } else {
+                            state.asset_form.error = Some(
+                                "Harus login sebagai Admin untuk mengunggah aksi animasi.".into(),
+                            );
+                        }
+                    } else {
+                        state.asset_form.error =
+                            Some("Pilih file .glb/.gltf animasi aksi terlebih dahulu.".into());
+                    }
+                }
+            });
+    }
 
     ui.add_space(8.0);
     ui.separator();
@@ -1697,7 +1948,7 @@ fn draw_viewport_hud(ctx: &egui::Context, center_rect: egui::Rect, state: &AppSt
         return;
     };
 
-    let target_rel = resolve_preview_file_path(asset, state.preview_variant, state.preview_lod);
+    let target_rel = resolve_preview_file_path(asset, &state.preview_variant, state.preview_lod);
     let ready = state.available_model_paths.contains(&target_rel)
         || state.assets_root.join(&target_rel).exists();
 
@@ -1705,13 +1956,22 @@ fn draw_viewport_hud(ctx: &egui::Context, center_rect: egui::Rect, state: &AppSt
         AssetPreviewLod::Lod0 => "LOD0",
         AssetPreviewLod::Lod2 => "LOD2",
     };
-    let var_tag = if asset.model_type == ModelAssetType::Animated {
-        match state.preview_variant {
-            AssetPreviewVariant::Idle => " • IDLE (No Anim)",
-            AssetPreviewVariant::Walk => " • WALK (Animated)",
+    let var_tag: String = if asset.model_type == ModelAssetType::Animated {
+        match &state.preview_variant {
+            AssetPreviewVariant::Idle => " • IDLE (No Anim)".to_string(),
+            AssetPreviewVariant::Walk => " • WALK (Animated)".to_string(),
+            AssetPreviewVariant::Action(slug) => {
+                let lbl = asset
+                    .extra_animations
+                    .iter()
+                    .find(|a| a.slug == *slug)
+                    .map(|a| a.name.as_str())
+                    .unwrap_or(slug.as_str());
+                format!(" • AKSI: {lbl}")
+            }
         }
     } else {
-        " • STATIS"
+        " • STATIS".to_string()
     };
 
     egui::Area::new(egui::Id::new("asset_preview_hud"))

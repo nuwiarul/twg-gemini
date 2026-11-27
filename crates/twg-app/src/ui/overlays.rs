@@ -300,7 +300,8 @@ pub fn draw_projected_labels(
             | ToolMode::PickShootMarker
             | ToolMode::PickPointerMarker
             | ToolMode::PickSpawnHideMarker
-            | ToolMode::PickCameraFollowMarker => String::new(),
+            | ToolMode::PickCameraFollowMarker
+            | ToolMode::PickModelActionMarker => String::new(),
             ToolMode::PlaceParticle => format!(
                 "Mode Letakkan Partikel ({}): Klik lokasi di peta untuk menempatkan (Esc batal)",
                 state.new_particle_kind.label()

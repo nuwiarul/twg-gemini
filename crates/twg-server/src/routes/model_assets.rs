@@ -16,8 +16,8 @@ use tokio::process::Command;
 use twg_shared::{
     api::{ApiResponse, CreateModelCategoryRequest, UpdateModelCategoryRequest},
     models::{
-        ModelAssetDto, ModelAssetType, ModelCategoryCount, ModelCategoryDto, ModelFileMeta,
-        ModelSyncManifest,
+        ModelActionClipDto, ModelAssetDto, ModelAssetType, ModelCategoryCount, ModelCategoryDto,
+        ModelFileMeta, ModelSyncManifest,
     },
 };
 use uuid::Uuid;
@@ -79,10 +79,43 @@ struct CatalogSeedEntry {
     default_height: f64,
     #[serde(default)]
     default_rotation_deg: [f64; 3],
+    #[serde(default)]
+    extra_animations: Vec<ModelActionClipDto>,
 }
 
 fn default_height() -> f64 {
     10.0
+}
+
+/// Extract animation clip names from a binary GLB file's JSON chunk.
+async fn extract_glb_animation_names(path: &Path) -> Vec<String> {
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return Vec::new();
+    };
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        return Vec::new();
+    }
+    let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    if 20 + json_len > bytes.len() {
+        return Vec::new();
+    }
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes[20..20 + json_len]) else {
+        return Vec::new();
+    };
+    let Some(arr) = json.get("animations").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            item.get("name")
+                .and_then(|n| n.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Clip {}", idx + 1))
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +184,23 @@ fn row_to_dto(row: &sqlx::postgres::PgRow) -> AppResult<ModelAssetDto> {
         _ => None,
     };
 
+    let extra_animations_raw: serde_json::Value = row
+        .try_get("extra_animations")
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    let mut extra_animations: Vec<ModelActionClipDto> =
+        serde_json::from_value(extra_animations_raw).unwrap_or_default();
+    for act in &mut extra_animations {
+        if act.file.download_url.is_empty() && !act.file.rel_path.is_empty() {
+            act.file.download_url = file_download_url(&act.file.rel_path);
+        }
+        if let Some(l2) = act.lod2_file.as_mut()
+            && l2.download_url.is_empty()
+            && !l2.rel_path.is_empty()
+        {
+            l2.download_url = file_download_url(&l2.rel_path);
+        }
+    }
+
     Ok(ModelAssetDto {
         id: row.try_get("id")?,
         slug: row.try_get("slug")?,
@@ -172,6 +222,7 @@ fn row_to_dto(row: &sqlx::postgres::PgRow) -> AppResult<ModelAssetDto> {
             walk_lod2_size_bytes,
             walk_lod2_tris,
         ),
+        extra_animations,
         default_height: row.try_get("default_height")?,
         default_rotation_deg: [default_rot_x, default_rot_y, default_rot_z],
         version: row.try_get("version")?,
@@ -189,6 +240,7 @@ pub async fn fetch_all_models(db: &PgPool) -> AppResult<Vec<ModelAssetDto>> {
             lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
             walk_path, walk_sha256, walk_size_bytes, walk_tris,
             walk_lod2_path, walk_lod2_sha256, walk_lod2_size_bytes, walk_lod2_tris,
+            extra_animations,
             default_height, default_rot_x, default_rot_y, default_rot_z,
             version, created_at, updated_at
         FROM model_assets
@@ -297,6 +349,9 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
             entry.model_type
         };
 
+        let extra_json = serde_json::to_value(&entry.extra_animations)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+
         sqlx::query(
             r#"
             INSERT INTO model_assets (
@@ -305,6 +360,7 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
                 lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
                 walk_path, walk_sha256, walk_size_bytes, walk_tris,
                 walk_lod2_path, walk_lod2_sha256, walk_lod2_size_bytes, walk_lod2_tris,
+                extra_animations,
                 default_height, default_rot_x, default_rot_y, default_rot_z, version
             )
             VALUES (
@@ -313,7 +369,8 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
                 $10, $11, $12, $13,
                 $14, $15, $16, $17,
                 $18, $19, $20, $21,
-                $22, $23, $24, $25, 1
+                $22,
+                $23, $24, $25, $26, 1
             )
             ON CONFLICT (slug) DO NOTHING
             "#,
@@ -339,6 +396,7 @@ pub async fn seed_model_assets_if_empty(db: &PgPool, assets_dir: &Path) -> anyho
         .bind(&walk_lod2_sha256)
         .bind(walk_lod2_size_bytes)
         .bind(entry.walk_lod2_tris)
+        .bind(&extra_json)
         .bind(entry.default_height)
         .bind(entry.default_rotation_deg[0])
         .bind(entry.default_rotation_deg[1])
@@ -452,9 +510,31 @@ pub async fn repair_unnormalized_skin_weights_if_needed(
         let (w_sha, w_sz, w_ch) = resolve_opt_slot(m.walk_file.as_ref());
         let (wl2_sha, wl2_sz, wl2_ch) = resolve_opt_slot(m.walk_lod2_file.as_ref());
 
-        if !(m_ch || l2_ch || w_ch || wl2_ch) {
+        let mut extra_updated = m.extra_animations.clone();
+        let mut extra_ch = false;
+        for act in &mut extra_updated {
+            let (sha, sz, ch) = resolve_slot(&act.file);
+            if ch {
+                act.file.sha256 = sha;
+                act.file.size_bytes = sz;
+                extra_ch = true;
+            }
+            if let Some(l2) = act.lod2_file.as_mut() {
+                let (sha2, sz2, ch2) = resolve_slot(l2);
+                if ch2 {
+                    l2.sha256 = sha2;
+                    l2.size_bytes = sz2;
+                    extra_ch = true;
+                }
+            }
+        }
+
+        if !(m_ch || l2_ch || w_ch || wl2_ch || extra_ch) {
             continue;
         }
+
+        let extra_json = serde_json::to_value(&extra_updated)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
 
         sqlx::query(
             r#"
@@ -468,6 +548,7 @@ pub async fn repair_unnormalized_skin_weights_if_needed(
                 walk_size_bytes = $7,
                 walk_lod2_sha256 = $8,
                 walk_lod2_size_bytes = $9,
+                extra_animations = $10,
                 version = version + 1,
                 updated_at = NOW()
             WHERE id = $1
@@ -482,6 +563,7 @@ pub async fn repair_unnormalized_skin_weights_if_needed(
         .bind(w_sz)
         .bind(&wl2_sha)
         .bind(wl2_sz)
+        .bind(&extra_json)
         .execute(db)
         .await?;
 
@@ -916,6 +998,7 @@ async fn fetch_model_by_id(db: &PgPool, id: Uuid) -> AppResult<ModelAssetDto> {
             lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
             walk_path, walk_sha256, walk_size_bytes, walk_tris,
             walk_lod2_path, walk_lod2_sha256, walk_lod2_size_bytes, walk_lod2_tris,
+            extra_animations,
             default_height, default_rot_x, default_rot_y, default_rot_z,
             version, created_at, updated_at
         FROM model_assets
@@ -1294,6 +1377,7 @@ pub async fn update_model_asset(
         .map(|f| f.tris)
         .unwrap_or(0);
 
+    let mut extra_animations = existing.extra_animations.clone();
     let mut files_to_cleanup_after: Vec<String> = Vec::new();
 
     // If category changed, relocate kept files to the new category directory first
@@ -1307,6 +1391,16 @@ pub async fn update_model_asset(
         }
         if let Some(p) = &walk_lod2_path {
             walk_lod2_path = Some(relocate_file_to_category(assets_dir, p, &category).await?);
+        }
+        for act in &mut extra_animations {
+            act.file.rel_path =
+                relocate_file_to_category(assets_dir, &act.file.rel_path, &category).await?;
+            act.file.download_url = file_download_url(&act.file.rel_path);
+            if let Some(l2) = act.lod2_file.as_mut() {
+                l2.rel_path =
+                    relocate_file_to_category(assets_dir, &l2.rel_path, &category).await?;
+                l2.download_url = file_download_url(&l2.rel_path);
+            }
         }
     }
 
@@ -1344,12 +1438,18 @@ pub async fn update_model_asset(
                 lod2_size = s2.size_bytes;
                 lod2_tris = s2.tris;
             }
-            // If converting from animated -> static, clear walk files
+            // If converting from animated -> static, clear walk & extra action files
             if let Some(wp) = walk_path.take() {
                 files_to_cleanup_after.push(wp);
             }
             if let Some(wlp) = walk_lod2_path.take() {
                 files_to_cleanup_after.push(wlp);
+            }
+            for act in extra_animations.drain(..) {
+                files_to_cleanup_after.push(act.file.rel_path);
+                if let Some(l2) = act.lod2_file {
+                    files_to_cleanup_after.push(l2.rel_path);
+                }
             }
             walk_sha = None;
             walk_size = 0;
@@ -1437,6 +1537,9 @@ pub async fn update_model_asset(
         }
     }
 
+    let extra_json = serde_json::to_value(&extra_animations)
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+
     sqlx::query(
         r#"
         UPDATE model_assets
@@ -1461,10 +1564,11 @@ pub async fn update_model_asset(
             walk_lod2_sha256 = $19,
             walk_lod2_size_bytes = $20,
             walk_lod2_tris = $21,
-            default_height = $22,
-            default_rot_x = $23,
-            default_rot_y = $24,
-            default_rot_z = $25,
+            extra_animations = $22,
+            default_height = $23,
+            default_rot_x = $24,
+            default_rot_y = $25,
+            default_rot_z = $26,
             version = version + 1,
             updated_at = NOW()
         WHERE id = $1
@@ -1491,6 +1595,7 @@ pub async fn update_model_asset(
     .bind(&walk_lod2_sha)
     .bind(walk_lod2_size)
     .bind(walk_lod2_tris)
+    .bind(&extra_json)
     .bind(default_height)
     .bind(default_rot_x)
     .bind(default_rot_y)
@@ -1500,6 +1605,167 @@ pub async fn update_model_asset(
 
     for old_rel in files_to_cleanup_after {
         remove_file_if_unreferenced(&state.db, assets_dir, &old_rel).await;
+    }
+
+    let dto = fetch_model_by_id(&state.db, id).await?;
+    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    Ok(Json(ApiResponse { data: dto }))
+}
+
+pub async fn upload_model_action(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    AxumPath(id): AxumPath<Uuid>,
+    multipart: Multipart,
+) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
+    auth.require_super_admin_write()?;
+
+    let existing = fetch_model_by_id(&state.db, id).await?;
+    if existing.model_type != ModelAssetType::Animated {
+        return Err(AppError::BadRequest(
+            "Animasi aksi tambahan hanya tersedia untuk model bertipe Animasi (Idle + Walk).".into(),
+        ));
+    }
+
+    let form = parse_model_multipart(multipart).await?;
+    let action_name = form
+        .fields
+        .get("name")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Nama aksi wajib diisi (contoh: Melambai, Menembak, Pingsan).".into()))?;
+
+    let action_file = form
+        .files
+        .get("action_file")
+        .or_else(|| form.files.get("file"))
+        .ok_or_else(|| AppError::BadRequest("File animasi aksi (.glb/.gltf) wajib dipilih.".into()))?;
+    validate_gltf_extension(&action_file.filename)?;
+
+    let raw_slug = form
+        .fields
+        .get("slug")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&action_name);
+    let action_slug = sanitize_slug(raw_slug);
+    let model_base = existing
+        .slug
+        .split('/')
+        .nth(1)
+        .unwrap_or("model")
+        .to_string();
+
+    let rel_lod0 = format!(
+        "models/{}/{}_act_{}.glb",
+        existing.category, model_base, action_slug
+    );
+    let rel_lod2 = format!(
+        "models/{}/{}_act_{}_lod2.glb",
+        existing.category, model_base, action_slug
+    );
+    let assets_dir = &state.config.assets_dir;
+    let abs_lod0 = assets_dir.join(&rel_lod0);
+    let abs_lod2 = assets_dir.join(&rel_lod2);
+
+    let (s0, s2) = convert_uploaded_model(action_file, &abs_lod0, &abs_lod2, "required").await?;
+    let clip_names = extract_glb_animation_names(&abs_lod0).await;
+
+    let new_clip = ModelActionClipDto {
+        slug: action_slug.clone(),
+        name: action_name,
+        file: ModelFileMeta {
+            download_url: file_download_url(&rel_lod0),
+            rel_path: rel_lod0.clone(),
+            sha256: s0.sha256,
+            size_bytes: s0.size_bytes,
+            tris: s0.tris,
+        },
+        lod2_file: Some(ModelFileMeta {
+            download_url: file_download_url(&rel_lod2),
+            rel_path: rel_lod2.clone(),
+            sha256: s2.sha256,
+            size_bytes: s2.size_bytes,
+            tris: s2.tris,
+        }),
+        clip_names,
+    };
+
+    let mut extra = existing.extra_animations.clone();
+    let mut old_files = Vec::new();
+    if let Some(pos) = extra.iter().position(|a| a.slug == action_slug) {
+        let prev = std::mem::replace(&mut extra[pos], new_clip);
+        if prev.file.rel_path != rel_lod0 {
+            old_files.push(prev.file.rel_path);
+        }
+        if let Some(l2) = prev.lod2_file
+            && l2.rel_path != rel_lod2
+        {
+            old_files.push(l2.rel_path);
+        }
+    } else {
+        extra.push(new_clip);
+    }
+
+    let extra_json = serde_json::to_value(&extra)
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+
+    sqlx::query(
+        r#"
+        UPDATE model_assets
+        SET extra_animations = $2, version = version + 1, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(&extra_json)
+    .execute(&state.db)
+    .await?;
+
+    for old_rel in old_files {
+        remove_file_if_unreferenced(&state.db, assets_dir, &old_rel).await;
+    }
+
+    let dto = fetch_model_by_id(&state.db, id).await?;
+    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    Ok(Json(ApiResponse { data: dto }))
+}
+
+pub async fn delete_model_action(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    AxumPath((id, action_slug)): AxumPath<(Uuid, String)>,
+) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
+    auth.require_super_admin_write()?;
+
+    let existing = fetch_model_by_id(&state.db, id).await?;
+    let mut extra = existing.extra_animations.clone();
+    let Some(pos) = extra.iter().position(|a| a.slug == action_slug) else {
+        return Err(AppError::NotFound(format!(
+            "Aksi animasi '{action_slug}' tidak ditemukan pada model ini."
+        )));
+    };
+    let removed = extra.remove(pos);
+
+    let extra_json = serde_json::to_value(&extra)
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+
+    sqlx::query(
+        r#"
+        UPDATE model_assets
+        SET extra_animations = $2, version = version + 1, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(&extra_json)
+    .execute(&state.db)
+    .await?;
+
+    let assets_dir = &state.config.assets_dir;
+    remove_file_if_unreferenced(&state.db, assets_dir, &removed.file.rel_path).await;
+    if let Some(l2) = removed.lod2_file {
+        remove_file_if_unreferenced(&state.db, assets_dir, &l2.rel_path).await;
     }
 
     let dto = fetch_model_by_id(&state.db, id).await?;
@@ -1535,7 +1801,15 @@ async fn remove_file_if_unreferenced(db: &PgPool, assets_dir: &Path, rel_path: &
     let refs: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM model_assets
-        WHERE model_path = $1 OR lod2_path = $1 OR walk_path = $1 OR walk_lod2_path = $1
+        WHERE model_path = $1
+           OR lod2_path = $1
+           OR walk_path = $1
+           OR walk_lod2_path = $1
+           OR EXISTS (
+               SELECT 1 FROM jsonb_array_elements(extra_animations) elem
+               WHERE elem->'file'->>'rel_path' = $1
+                  OR elem->'lod2_file'->>'rel_path' = $1
+           )
         "#,
     )
     .bind(rel_path)
@@ -1606,6 +1880,7 @@ async fn write_catalog_snapshot(db: &PgPool, assets_dir: &Path) -> anyhow::Resul
                 "walk_lod2_sha256": m.walk_lod2_file.as_ref().map(|f| &f.sha256),
                 "walk_lod2_size_bytes": m.walk_lod2_file.as_ref().map(|f| f.size_bytes).unwrap_or(0),
                 "walk_lod2_tris": m.walk_lod2_file.as_ref().map(|f| f.tris).unwrap_or(0),
+                "extra_animations": m.extra_animations,
                 "default_height": m.default_height,
                 "default_rotation_deg": m.default_rotation_deg,
                 "ready": true,

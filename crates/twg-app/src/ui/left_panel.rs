@@ -1839,7 +1839,9 @@ fn draw_layers_tab(
                         && (filter.is_empty()
                             || a.name.to_lowercase().contains(&filter)
                             || "panah".contains(&filter)
-                            || "pointer".contains(&filter))
+                            || "pointer".contains(&filter)
+                            || "aksi".contains(&filter)
+                            || "model".contains(&filter))
                 })
                 .count();
             let other_header = if has_active_filter {
@@ -1867,6 +1869,8 @@ fn draw_layers_tab(
                         && !a.name.to_lowercase().contains(&filter)
                         && !"panah".contains(&filter)
                         && !"pointer".contains(&filter)
+                        && !"aksi".contains(&filter)
+                        && !"model".contains(&filter)
                     {
                         continue;
                     }
@@ -1894,11 +1898,19 @@ fn draw_layers_tab(
                                 if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
                                     toggle_locked_id = Some(a.id);
                                 }
-                                ui.label(egui::RichText::new("[PANAH]").size(8.5).strong().color(
+                                let (tag_txt, tag_col) =
+                                    if twg_shared::model_action_anim::is_model_action_anim(a) {
+                                        ("[AKSI 3D]", egui::Color32::from_rgb(251, 191, 36))
+                                    } else if is_pointer_arrow_anim(a) {
+                                        ("[PANAH]", egui::Color32::from_rgb(250, 204, 21))
+                                    } else {
+                                        ("[LAIN]", egui::Color32::from_rgb(125, 211, 252))
+                                    };
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
                                     if !vis {
                                         egui::Color32::from_rgb(100, 116, 139)
                                     } else {
-                                        egui::Color32::from_rgb(250, 204, 21)
+                                        tag_col
                                     },
                                 ));
                                 let name_col = if sel {
@@ -3628,7 +3640,11 @@ fn draw_animations_tab(
         AnimCategory::Particle => draw_particle_create_card(ui, state, editable),
         AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
         AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
-        AnimCategory::Other => draw_other_create_card(ui, state, editable),
+        AnimCategory::Other => {
+            super::model_action_anim::draw_create(ui, state, api, editable);
+            ui.add_space(6.0);
+            draw_other_create_card(ui, state, editable);
+        }
         AnimCategory::Audio => {
             super::audio_anim::draw_create(ui, state, api, editable);
             super::billboard_anim::draw_create(ui, state, editable);
@@ -5252,7 +5268,9 @@ fn draw_ordered_animation_list(
                         }
                     },
                     AnimCategory::Other => {
-                        if is_pointer_arrow_anim(a) {
+                        if twg_shared::model_action_anim::is_model_action_anim(a) {
+                            ("AKSI 3D", egui::Color32::from_rgb(217, 119, 6))
+                        } else if is_pointer_arrow_anim(a) {
                             ("PANAH 3D", egui::Color32::from_rgb(180, 83, 9))
                         } else {
                             ("LAIN", egui::Color32::from_rgb(14, 116, 144))
@@ -5529,6 +5547,8 @@ fn draw_ordered_animation_list(
                                     "Awal Normal"
                                 }
                             )
+                        } else if twg_shared::model_action_anim::is_model_action_anim(a) {
+                            super::model_action_anim::anim_summary(state, a)
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a

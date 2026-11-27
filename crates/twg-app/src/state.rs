@@ -723,11 +723,12 @@ pub enum AssetPreviewLod {
     Lod2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AssetPreviewVariant {
     #[default]
     Idle,
     Walk,
+    Action(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -896,6 +897,9 @@ pub struct AssetFormState {
     pub model_file_path: Option<PathBuf>,
     pub idle_file_path: Option<PathBuf>,
     pub walk_file_path: Option<PathBuf>,
+    pub new_action_name: String,
+    pub new_action_file_path: Option<PathBuf>,
+    pub confirm_delete_action_slug: Option<String>,
     pub submitting: bool,
     pub error: Option<String>,
     pub success: Option<String>,
@@ -916,6 +920,9 @@ impl Default for AssetFormState {
             model_file_path: None,
             idle_file_path: None,
             walk_file_path: None,
+            new_action_name: String::new(),
+            new_action_file_path: None,
+            confirm_delete_action_slug: None,
             submitting: false,
             error: None,
             success: None,
@@ -947,6 +954,9 @@ impl AssetFormState {
             model_file_path: None,
             idle_file_path: None,
             walk_file_path: None,
+            new_action_name: String::new(),
+            new_action_file_path: None,
+            confirm_delete_action_slug: None,
             submitting: false,
             error: None,
             success: None,
@@ -966,6 +976,9 @@ impl AssetFormState {
         self.model_file_path = None;
         self.idle_file_path = None;
         self.walk_file_path = None;
+        self.new_action_name.clear();
+        self.new_action_file_path = None;
+        self.confirm_delete_action_slug = None;
         self.submitting = false;
         self.error = None;
         self.success = None;
@@ -999,6 +1012,7 @@ pub enum ToolMode {
     PickPointerMarker,
     PickSpawnHideMarker,
     PickCameraFollowMarker,
+    PickModelActionMarker,
     PlaceParticle,
     Measure,
 }
@@ -1028,6 +1042,7 @@ impl ToolMode {
             Self::PickPointerMarker => "Pilih Target Panah",
             Self::PickSpawnHideMarker => "Pilih Objek Spawn/Hide",
             Self::PickCameraFollowMarker => "Pilih Objek Kamera",
+            Self::PickModelActionMarker => "Pilih Objek Aksi 3D",
             Self::PlaceParticle => "Letakkan Partikel",
             Self::Measure => "Measure",
         }
@@ -1096,6 +1111,7 @@ impl AnimCategory {
             "play_sound" | "billboard" => Self::Audio,
             "camera_static" | "camera_follow" => Self::Camera,
             "water_sim" | "rain_sim" => Self::Environment,
+            "model_action" => Self::Other,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1503,6 +1519,9 @@ impl PlaybackState {
                 || twg_shared::pointer_anim::is_pointer_arrow_anim(a)
             {
                 a.marker_id.is_some()
+            } else if twg_shared::model_action_anim::is_model_action_anim(a) {
+                let cfg = twg_shared::model_action_anim::parse_model_action_config(a);
+                a.marker_id.is_some() && !cfg.action_slug.trim().is_empty()
             } else if twg_shared::spawn_hide_anim::is_spawn_hide_anim(a) {
                 let cfg = twg_shared::spawn_hide_anim::parse_spawn_hide_config(a);
                 cfg.include_in_play_all && !cfg.marker_ids.is_empty()
@@ -1704,6 +1723,7 @@ pub struct AppState {
     pub picking_pointer_for_anim_id: Option<Uuid>,
     pub picking_spawn_hide_for_anim_id: Option<Uuid>,
     pub picking_camera_follow_for_anim_id: Option<Uuid>,
+    pub picking_model_action_for_anim_id: Option<Uuid>,
     pub route_target_marker_id: Option<Uuid>,
     pub new_route_is_multi: bool,
     pub new_route_formation: twg_shared::route_formation::RouteFormationKind,
@@ -1768,6 +1788,8 @@ pub struct AppState {
     pub new_camera_follow_name: String,
     pub new_camera_follow_preset: twg_shared::camera_anim::CameraFollowPreset,
     pub camera_status: HashMap<Uuid, String>,
+    pub new_model_action_name: String,
+    pub model_action_status: HashMap<Uuid, String>,
     pub new_water_kind: twg_shared::environment_anim::WaterSimKind,
     pub new_water_name: String,
     pub redrawing_water_anim_id: Option<Uuid>,
@@ -1989,6 +2011,7 @@ impl AppState {
             picking_pointer_for_anim_id: None,
             picking_spawn_hide_for_anim_id: None,
             picking_camera_follow_for_anim_id: None,
+            picking_model_action_for_anim_id: None,
             route_target_marker_id: None,
             new_route_is_multi: false,
             new_route_formation: twg_shared::route_formation::RouteFormationKind::Grid,
@@ -2018,6 +2041,8 @@ impl AppState {
             new_camera_follow_name: "Camera Follow 1".to_string(),
             new_camera_follow_preset: twg_shared::camera_anim::CameraFollowPreset::Rear,
             camera_status: HashMap::new(),
+            new_model_action_name: "Aksi Model 1".to_string(),
+            model_action_status: HashMap::new(),
             new_water_kind: twg_shared::environment_anim::WaterSimKind::Ocean,
             new_water_name: "Laut 1".to_string(),
             redrawing_water_anim_id: None,

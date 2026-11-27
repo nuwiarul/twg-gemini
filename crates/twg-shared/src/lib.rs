@@ -6,6 +6,7 @@ pub mod environment_anim;
 pub mod geo;
 pub mod glb_skin;
 pub mod group_anim;
+pub mod model_action_anim;
 pub mod models;
 pub mod particle_anim;
 pub mod pointer_anim;

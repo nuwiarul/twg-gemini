@@ -270,6 +270,17 @@ pub enum ApiCommand {
         auth: AuthCredentials,
         id: Uuid,
     },
+    UploadModelAction {
+        auth: AuthCredentials,
+        model_id: Uuid,
+        name: String,
+        file_path: PathBuf,
+    },
+    DeleteModelAction {
+        auth: AuthCredentials,
+        model_id: Uuid,
+        action_slug: String,
+    },
     CreateModelCategory {
         auth: AuthCredentials,
         req: CreateModelCategoryRequest,
@@ -943,6 +954,67 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
             match authed_delete(client, &auth, &url).await {
                 Ok(()) => ApiEvent::ModelAssetDeleted(id),
                 Err(e) => ApiEvent::ModelAssetError(e),
+            }
+        }
+        ApiCommand::UploadModelAction {
+            auth,
+            model_id,
+            name,
+            file_path,
+        } => {
+            let url = format!("{}/api/v1/assets/models/{model_id}/actions", base(&auth));
+            match tokio::fs::read(&file_path).await {
+                Ok(bytes) => {
+                    let fname = file_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("action.glb")
+                        .to_string();
+                    let part = multipart::Part::bytes(bytes).file_name(fname);
+                    let form = multipart::Form::new()
+                        .text("name", name)
+                        .part("action_file", part);
+                    match client
+                        .post(&url)
+                        .bearer_auth(&auth.access_token)
+                        .header("X-Device-ID", &auth.device_id)
+                        .multipart(form)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => match parse_api_json::<ModelAssetDto>(resp).await {
+                            Ok(dto) => ApiEvent::ModelAssetUpdated(dto),
+                            Err(e) => ApiEvent::ModelAssetError(e),
+                        },
+                        Err(e) => ApiEvent::ModelAssetError(format!("Upload aksi gagal: {e}")),
+                    }
+                }
+                Err(e) => {
+                    ApiEvent::ModelAssetError(format!("Gagal membaca file aksi: {e}"))
+                }
+            }
+        }
+        ApiCommand::DeleteModelAction {
+            auth,
+            model_id,
+            action_slug,
+        } => {
+            let url = format!(
+                "{}/api/v1/assets/models/{model_id}/actions/{action_slug}",
+                base(&auth)
+            );
+            match client
+                .delete(&url)
+                .bearer_auth(&auth.access_token)
+                .header("X-Device-ID", &auth.device_id)
+                .send()
+                .await
+            {
+                Ok(resp) => match parse_api_json::<ModelAssetDto>(resp).await {
+                    Ok(dto) => ApiEvent::ModelAssetUpdated(dto),
+                    Err(e) => ApiEvent::ModelAssetError(e),
+                },
+                Err(e) => ApiEvent::ModelAssetError(format!("Hapus aksi gagal: {e}")),
             }
         }
         ApiCommand::CreateModelCategory { auth, req } => {

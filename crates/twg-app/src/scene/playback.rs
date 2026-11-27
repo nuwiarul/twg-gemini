@@ -130,6 +130,7 @@ pub fn playback_system(
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
+                | ToolMode::PickModelActionMarker
                 | ToolMode::PlaceParticle
                 | ToolMode::DrawWaterPolygon
                 | ToolMode::PlaceRainZone
@@ -361,6 +362,26 @@ pub fn playback_system(
                             track.status = AnimRunStatus::Finished;
                         }
                     }
+                }
+            }
+            continue;
+        }
+
+        // Custom 3D Model Action Clips (`model_action`) advance elapsed seconds in `track.distance_m`.
+        // Exact clip duration, mode transitions (Hold Last Frame / Return Idle), and Route Priority
+        // handoff (auto-stop when marker moves) are enforced in `animate_markers_system`.
+        if twg_shared::model_action_anim::is_model_action_anim(anim) {
+            let cfg = twg_shared::model_action_anim::parse_model_action_config(anim);
+            let track = playback.tracks.entry(anim.id).or_default();
+            if cfg.play_mode == twg_shared::model_action_anim::ModelActionPlayMode::LoopForever {
+                track.total_length_m = 0.0;
+            }
+            if track.status == AnimRunStatus::Playing {
+                if anim.marker_id.is_none() || cfg.action_slug.trim().is_empty() {
+                    track.status = AnimRunStatus::Stopped;
+                    track.trigger_seq = 0;
+                } else {
+                    track.distance_m += step_dt;
                 }
             }
             continue;

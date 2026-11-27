@@ -1021,6 +1021,46 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                 }
             });
         }
+        ToolMode::PickModelActionMarker => {
+            let rebinding_anim = state
+                .picking_model_action_for_anim_id
+                .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                .cloned();
+            let title = if rebinding_anim.is_some() {
+                "Ganti Target Aksi Model 3D"
+            } else {
+                "Buat Aksi Model 3D: Pilih 1 Objek 3D"
+            };
+            inspector_card(ui, title, true, |ui| {
+                if let Some(ra) = rebinding_anim {
+                    ui.label(
+                        egui::RichText::new(format!("Animasi: {}", ra.name))
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(251, 191, 36)),
+                    );
+                } else {
+                    ui.label("Nama Animasi Aksi Model 3D:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_model_action_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Klik 1 Objek / Model 3D di peta untuk memilih target klip animasi aksi.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
+                ui.add_space(6.0);
+                if ui.small_button("Batal (Esc)").clicked() {
+                    state.picking_model_action_for_anim_id = None;
+                    state.tool_mode = ToolMode::Select;
+                }
+            });
+        }
         ToolMode::PickCameraFollowMarker => {
             let rebinding_anim = state
                 .picking_camera_follow_for_anim_id
@@ -2963,6 +3003,8 @@ fn draw_editor_preview_card(
         "Gambar area poligon air (minimal 3 titik) di peta terlebih dahulu".into()
     } else if twg_shared::environment_anim::is_rain_anim(a) {
         "Tentukan lokasi zona hujan lokal di peta terlebih dahulu".into()
+    } else if twg_shared::model_action_anim::is_model_action_anim(a) {
+        "Pilih 1 Objek 3D (model Animasi) & klip aksi tambahan di Inspector terlebih dahulu".into()
     } else if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
     } else if is_traffic_flow_or_signal(a) {
@@ -3641,6 +3683,9 @@ fn draw_anim_inspector(
     } else if twg_shared::environment_anim::is_environment_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         super::environment_anim::draw_inspector(ui, state, &mut a, editable);
+    } else if twg_shared::model_action_anim::is_model_action_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::model_action_anim::draw_inspector(ui, state, &mut a, editable);
     } else if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
     } else if is_traffic_flow_or_signal(&a) {
@@ -4898,6 +4943,8 @@ fn draw_anim_inspector(
             "Pilih minimal 1 Marker / Objek 3D target terlebih dahulu"
         } else if is_pointer_arrow_anim(&a) {
             "Pilih 1 Marker / Objek 3D target panah terlebih dahulu"
+        } else if twg_shared::model_action_anim::is_model_action_anim(&a) {
+            "Pilih 1 Objek 3D (model Animasi) & klip aksi tambahan terlebih dahulu"
         } else if is_shoot_anim(&a) {
             "Pilih 1 Model 3D sumber animasi Shoot terlebih dahulu"
         } else {
@@ -8605,6 +8652,8 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         parse_particle_anim_config(a).kind.short_tag()
     } else if is_pointer_arrow_anim(a) {
         "PANAH 3D"
+    } else if twg_shared::model_action_anim::is_model_action_anim(a) {
+        "AKSI 3D"
     } else if let Some(sk) = shoot_anim_kind(a) {
         sk.short_tag()
     } else if twg_shared::billboard_anim::is_billboard_anim(a) {

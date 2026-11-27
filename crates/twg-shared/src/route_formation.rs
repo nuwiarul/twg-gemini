@@ -971,6 +971,13 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::environment_anim::is_rain_anim(anim) {
         return crate::environment_anim::parse_rain_anim_config(anim).has_playable_setup(anim);
     }
+    if crate::model_action_anim::is_model_action_anim(anim) {
+        let cfg = crate::model_action_anim::parse_model_action_config(anim);
+        return cfg.has_playable_setup()
+            && cfg
+                .marker_id
+                .is_some_and(|id| markers.iter().any(|m| m.id == id));
+    }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }

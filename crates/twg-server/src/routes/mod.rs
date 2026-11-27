@@ -14,7 +14,7 @@ pub mod users;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -189,6 +189,14 @@ pub fn build_router(state: AppState) -> Router {
             get(model_assets::get_model_asset)
                 .put(model_assets::update_model_asset)
                 .delete(model_assets::delete_model_asset),
+        )
+        .route(
+            "/api/v1/assets/models/{id}/actions",
+            post(model_assets::upload_model_action),
+        )
+        .route(
+            "/api/v1/assets/models/{id}/actions/{slug}",
+            delete(model_assets::delete_model_action),
         )
         // Media Assets (Image Texture + Sound + Video)
         .route(

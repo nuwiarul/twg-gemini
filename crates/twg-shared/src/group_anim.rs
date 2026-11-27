@@ -377,6 +377,9 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::environment_anim::is_rain_anim(anim) {
         return crate::environment_anim::parse_rain_anim_config(anim).continuous;
     }
+    if crate::model_action_anim::is_model_action_anim(anim) {
+        return crate::model_action_anim::parse_model_action_config(anim).is_continuous();
+    }
     if crate::shoot_anim::is_shoot_anim(anim) {
         return crate::shoot_anim::shoot_anim_is_continuous(anim);
     }
