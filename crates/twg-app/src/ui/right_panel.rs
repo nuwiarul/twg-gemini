@@ -3707,6 +3707,14 @@ fn draw_anim_inspector(
     } else if is_pointer_arrow_anim(&a) {
         draw_pointer_arrow_inspector_cards(ui, state, route_edit, &mut a, &markers_list, editable);
     } else if let Some(shoot_kind) = shoot_anim_kind(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::model_action_anim::draw_shoot_action_pose_card(
+            ui,
+            state,
+            &mut a,
+            shoot_kind,
+            editable,
+        );
         match shoot_kind {
             ShootAnimKind::WaterCannon => {
                 draw_water_cannon_inspector_cards(

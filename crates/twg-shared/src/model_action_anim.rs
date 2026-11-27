@@ -84,6 +84,10 @@ pub struct ModelActionAnimConfig {
     pub repeat_count: u32,
     #[serde(default = "default_speed")]
     pub speed: f64,
+    /// Optional fine-tune scale multiplier (`0.10..=5.0`, default `1.0`) applied on top of
+    /// automatic Idle height calibration.
+    #[serde(default = "default_scale_multiplier")]
+    pub scale_multiplier: f64,
     #[serde(default)]
     pub delay_sec: f64,
     /// Automatically stop this action and switch to Walk whenever the bound marker starts moving
@@ -96,6 +100,9 @@ fn default_repeat_count() -> u32 {
     2
 }
 fn default_speed() -> f64 {
+    1.0
+}
+fn default_scale_multiplier() -> f64 {
     1.0
 }
 fn default_true() -> bool {
@@ -111,6 +118,7 @@ impl Default for ModelActionAnimConfig {
             play_mode: ModelActionPlayMode::LoopForever,
             repeat_count: default_repeat_count(),
             speed: default_speed(),
+            scale_multiplier: default_scale_multiplier(),
             delay_sec: 0.0,
             stop_on_route_move: true,
         }
@@ -124,6 +132,11 @@ impl ModelActionAnimConfig {
         self.repeat_count = self.repeat_count.clamp(1, 1000);
         self.speed = if self.speed.is_finite() {
             self.speed.clamp(0.15, 4.0)
+        } else {
+            1.0
+        };
+        self.scale_multiplier = if self.scale_multiplier.is_finite() {
+            self.scale_multiplier.clamp(0.1, 5.0)
         } else {
             1.0
         };
@@ -212,6 +225,7 @@ mod tests {
             play_mode: ModelActionPlayMode::OnceHoldLastFrame,
             repeat_count: 1,
             speed: 1.25,
+            scale_multiplier: 1.2,
             delay_sec: 0.5,
             stop_on_route_move: true,
         };

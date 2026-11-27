@@ -502,6 +502,38 @@ pub fn draw_inspector(
                     },
                 );
             });
+            ui.horizontal(|ui| {
+                ui.label("Skala Klip:");
+                numeric_spinner_w(
+                    ui,
+                    ("model_act_scale", anim.id),
+                    &mut cfg.scale_multiplier,
+                    82.0,
+                    SpinnerConfig {
+                        min: 0.1,
+                        max: 5.0,
+                        step: 0.05,
+                        drag_speed: 0.02,
+                        decimals: 2,
+                        suffix: "×",
+                        wrap_around: false,
+                    },
+                );
+                if (cfg.scale_multiplier - 1.0).abs() > 0.005
+                    && ui.small_button("Reset 1×").clicked()
+                {
+                    cfg.scale_multiplier = 1.0;
+                }
+            });
+            if !cfg.action_slug.is_empty() && anim.marker_id.is_some() {
+                ui.checkbox(
+                    &mut state.shoot_pose_compare_idle,
+                    "Preview & Bandingkan dengan Idle di Peta",
+                )
+                .on_hover_text(
+                    "Menampilkan pose Aksi dan pose Idle berdampingan di peta Editor agar Anda bisa menyamakan Skala Klip dengan presisi.",
+                );
+            }
             ui.add_space(4.0);
             ui.checkbox(
                 &mut cfg.stop_on_route_move,
@@ -796,4 +828,278 @@ pub fn draw_play_card(
         });
     ui.add_space(6.0);
     action
+}
+
+/// Shared Inspector card rendered on all 5 Shoot animation types (Water Cannon, Lempar Batu,
+/// Gas Air Mata, Peluru, APAR) allowing the user to bind an uploaded 3D action clip, scrub
+/// the exact pose live on the 3D map by frame number to align the nozzle/hand launch offset,
+/// and choose how the clip synchronizes when firing.
+pub fn draw_shoot_action_pose_card(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    anim: &mut Anim,
+    shoot_kind: twg_shared::shoot_anim::ShootAnimKind,
+    editable: bool,
+) {
+    use twg_shared::shoot_anim::{
+        ShootActionSyncMode, ShootAnimKind, parse_shoot_model_action_config,
+        write_shoot_model_action_config,
+    };
+
+    let mut cfg = parse_shoot_model_action_config(anim);
+    let orig_cfg = cfg.clone();
+
+    let marker_opt = anim
+        .marker_id
+        .and_then(|id| state.markers.iter().find(|m| m.id == id))
+        .cloned();
+    let actions: Vec<(String, String)> = marker_opt
+        .as_ref()
+        .map(|m| available_actions_for_model(state, &m.model_path))
+        .unwrap_or_default();
+
+    let default_open = cfg.is_enabled() || !actions.is_empty();
+    inspector_card(
+        ui,
+        "Gaya Animasi Karakter & Frame Tembak",
+        default_open,
+        |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                if marker_opt.is_none() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Pilih Objek / Marker 3D sumber terlebih dahulu untuk memilih klip aksi karakter.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    return;
+                }
+                if actions.is_empty() && !cfg.is_enabled() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Model ini belum punya klip aksi tambahan. Upload klip (mis. Lempar Batu / Menembak / APAR) di Assets -> 3D Models -> + Tambah Aksi.",
+                        )
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    return;
+                }
+
+                let selected_lbl = if cfg.action_slug.is_empty() {
+                    "Tidak Ada (Pose Idle Default)".to_string()
+                } else {
+                    actions
+                        .iter()
+                        .find(|(s, _)| s == &cfg.action_slug)
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_else(|| cfg.action_slug.clone())
+                };
+
+                ui.label("Klip Animasi Karakter:");
+                let prev_slug = cfg.action_slug.clone();
+                egui::ComboBox::from_id_salt(("shoot_action_clip", anim.id))
+                    .selected_text(selected_lbl)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut cfg.action_slug,
+                            String::new(),
+                            "Tidak Ada (Pose Idle Default)",
+                        );
+                        for (slug, name) in &actions {
+                            ui.selectable_value(&mut cfg.action_slug, slug.clone(), name);
+                        }
+                    });
+
+                // Smart default sync mode when freshly enabling a clip on sustained vs throw Shoot types
+                if prev_slug.is_empty() && !cfg.action_slug.is_empty() {
+                    state.shoot_pose_preview_enabled = true;
+                    cfg.sync_mode = match shoot_kind {
+                        ShootAnimKind::Apar | ShootAnimKind::WaterCannon => {
+                            ShootActionSyncMode::HoldPoseWhileFiring
+                        }
+                        ShootAnimKind::StoneThrow
+                        | ShootAnimKind::TearGas
+                        | ShootAnimKind::Bullet => ShootActionSyncMode::PlayFullPerShot,
+                    };
+                }
+
+                if cfg.is_enabled() {
+                    ui.add_space(6.0);
+                    ui.checkbox(
+                        &mut state.shoot_pose_preview_enabled,
+                        "Preview Pose Frame di Peta (untuk atur posisi tembakan)",
+                    )
+                    .on_hover_text(
+                        "Tampilkan karakter berhenti tepat pada Frame Tembak di peta 3D agar Anda bisa menyesuaikan Offset Nozzle / Tangan dengan presisi.",
+                    );
+                    if state.shoot_pose_preview_enabled {
+                        ui.checkbox(
+                            &mut state.shoot_pose_compare_idle,
+                            "Tampilkan Pose Idle Berdampingan (Bandingkan Skala)",
+                        )
+                        .on_hover_text(
+                            "Menampilkan pose Idle asli di samping karakter pose Shoot agar Anda bisa menyamakan tinggi badan dengan presisi via Skala Klip.",
+                        );
+                    }
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Skala Klip:");
+                        let prev_sc = cfg.scale_multiplier;
+                        numeric_spinner_w(
+                            ui,
+                            ("shoot_action_scale", anim.id),
+                            &mut cfg.scale_multiplier,
+                            84.0,
+                            SpinnerConfig {
+                                min: 0.1,
+                                max: 5.0,
+                                step: 0.05,
+                                drag_speed: 0.02,
+                                decimals: 2,
+                                suffix: "×",
+                                wrap_around: false,
+                            },
+                        );
+                        if (cfg.scale_multiplier - prev_sc).abs() > 1e-4 {
+                            state.shoot_pose_preview_enabled = true;
+                        }
+                        if (cfg.scale_multiplier - 1.0).abs() > 0.005
+                            && ui.small_button("Reset 1×").clicked()
+                        {
+                            cfg.scale_multiplier = 1.0;
+                        }
+                    });
+
+                    // Resolve cached clip duration from Bevy (fallback 2.0s until GLB loads)
+                    let clip_rel = marker_opt
+                        .as_ref()
+                        .and_then(|m| find_catalog_entry(state, &m.model_path))
+                        .and_then(|cat| {
+                            cat.extra_animations
+                                .iter()
+                                .find(|a| a.slug == cfg.action_slug)
+                                .map(|a| a.model_path.clone())
+                        });
+                    let clip_dur_sec = clip_rel
+                        .as_ref()
+                        .and_then(|p| state.action_clip_durations.get(p).copied())
+                        .unwrap_or(2.0)
+                        .max(0.1);
+                    let max_frame = ((clip_dur_sec as f64 * cfg.fps).round() as u32).max(1);
+                    if cfg.trigger_frame > max_frame {
+                        cfg.trigger_frame = max_frame;
+                    }
+
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Frame Lepas / Tembak (0–{max_frame} fr · durasi klip {clip_dur_sec:.2} dtk):"
+                        ))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(253, 230, 138)),
+                    );
+
+                    let prev_frame = cfg.trigger_frame;
+                    let mut frame_f = cfg.trigger_frame as f64;
+                    ui.horizontal(|ui| {
+                        let slider_w = (ui.available_width() - 96.0).max(80.0);
+                        ui.spacing_mut().slider_width = slider_w;
+                        ui.add(
+                            egui::Slider::new(&mut cfg.trigger_frame, 0..=max_frame)
+                                .show_value(false),
+                        );
+                        frame_f = cfg.trigger_frame as f64;
+                        if numeric_spinner_w(
+                            ui,
+                            ("shoot_trigger_frame", anim.id),
+                            &mut frame_f,
+                            86.0,
+                            SpinnerConfig {
+                                min: 0.0,
+                                max: max_frame as f64,
+                                step: 1.0,
+                                drag_speed: 0.25,
+                                decimals: 0,
+                                suffix: " fr",
+                                wrap_around: false,
+                            },
+                        ) {
+                            cfg.trigger_frame =
+                                frame_f.round().clamp(0.0, max_frame as f64) as u32;
+                        }
+                    });
+                    if cfg.trigger_frame != prev_frame {
+                        state.shoot_pose_preview_enabled = true;
+                    }
+
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Pose Frame {} / {}  •  Tembakan muncul di {:.2} dtk ({:.0} FPS)",
+                            cfg.trigger_frame,
+                            max_frame,
+                            cfg.trigger_delay_sec(),
+                            cfg.fps,
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(110, 231, 183)),
+                    );
+
+                    ui.add_space(6.0);
+                    ui.label("Mode Sinkronisasi Saat Play:");
+                    egui::ComboBox::from_id_salt(("shoot_action_sync_mode", anim.id))
+                        .selected_text(cfg.sync_mode.label())
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for &m in ShootActionSyncMode::ALL {
+                                ui.selectable_value(&mut cfg.sync_mode, m, m.label())
+                                    .on_hover_text(m.description());
+                            }
+                        });
+                    ui.label(
+                        egui::RichText::new(cfg.sync_mode.description())
+                            .size(9.5)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Kecepatan Klip:");
+                        numeric_spinner_w(
+                            ui,
+                            ("shoot_action_speed", anim.id),
+                            &mut cfg.anim_speed,
+                            78.0,
+                            SpinnerConfig {
+                                min: 0.25,
+                                max: 3.0,
+                                step: 0.1,
+                                drag_speed: 0.05,
+                                decimals: 2,
+                                suffix: "×",
+                                wrap_around: false,
+                            },
+                        );
+                        ui.add_space(4.0);
+                        ui.label("FPS:");
+                        for fps_opt in [24.0_f64, 30.0, 60.0] {
+                            let active = (cfg.fps - fps_opt).abs() < 0.5;
+                            if ui
+                                .selectable_label(active, format!("{fps_opt:.0}"))
+                                .clicked()
+                            {
+                                cfg.fps = fps_opt;
+                            }
+                        }
+                    });
+                }
+            });
+        },
+    );
+
+    if cfg != orig_cfg {
+        write_shoot_model_action_config(anim, &cfg);
+    }
 }

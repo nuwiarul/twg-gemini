@@ -167,9 +167,186 @@ pub fn shoot_anim_is_continuous(anim: &Anim) -> bool {
     }
 }
 
+/// How a bound 3D character action clip synchronizes with a Shoot animation during playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShootActionSyncMode {
+    /// Play the clip from frame 0 to the end; the projectile/spray launches at `trigger_frame`.
+    /// Ideal for Stone Throw, Tear Gas, and single-shot Bullet.
+    #[default]
+    PlayFullPerShot,
+    /// Play from frame 0 to `trigger_frame`, then hold that exact aiming/spraying pose while
+    /// firing continues, returning to Idle when done. Ideal for APAR, Water Cannon, and sustained fire.
+    HoldPoseWhileFiring,
+    /// Loop the clip continuously while firing (projectile/spray still begins at `trigger_frame`).
+    LoopWhileFiring,
+}
+
+impl ShootActionSyncMode {
+    pub const ALL: &'static [Self] = &[
+        Self::PlayFullPerShot,
+        Self::HoldPoseWhileFiring,
+        Self::LoopWhileFiring,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlayFullPerShot => "Putar Penuh per Tembakan",
+            Self::HoldPoseWhileFiring => "Tahan Pose di Frame Tembak",
+            Self::LoopWhileFiring => "Loop Klip Selama Menembak",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::PlayFullPerShot => {
+                "Putar frame 0 -> akhir; tembakan/lemparan lepas tepat di Frame Tembak lalu lanjut follow-through (cocok untuk Lempar Batu, Gas Air Mata, Tembak 1×)."
+            }
+            Self::HoldPoseWhileFiring => {
+                "Angkat senjata/APAR dari frame 0 ke Frame Tembak lalu tahan pose tersebut selama tembakan/semprotan berlangsung (cocok untuk APAR, Burst/Auto, Water Cannon)."
+            }
+            Self::LoopWhileFiring => {
+                "Tembakan mulai tepat di Frame Tembak sementara klip karakter terus berulang selama animasi Shoot aktif."
+            }
+        }
+    }
+}
+
+/// Optional character action clip & exact trigger frame stored under `anim.data["shoot_action"]`
+/// for any of the 5 Shoot animation types.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShootModelActionConfig {
+    /// Matches `ModelCatalogActionClip::slug` on the bound marker's 3D catalog model (empty = disabled).
+    #[serde(default)]
+    pub action_slug: String,
+    /// Frame index (at `fps`) where the projectile/spray launches from the nozzle/hand.
+    #[serde(default)]
+    pub trigger_frame: u32,
+    /// Reference FPS for frame-to-seconds mapping (default 30.0 — Mixamo/Blender standard).
+    #[serde(default = "default_shoot_action_fps")]
+    pub fps: f64,
+    /// Clip playback speed multiplier (`0.25..=3.0`, default `1.0`).
+    #[serde(default = "default_shoot_action_speed")]
+    pub anim_speed: f64,
+    /// Optional fine-tune scale multiplier (`0.10..=5.0`, default `1.0`) applied on top of
+    /// automatic Idle height calibration (useful for weapon-holding clips whose prop AABB skews auto-scale).
+    #[serde(default = "default_shoot_action_scale")]
+    pub scale_multiplier: f64,
+    #[serde(default)]
+    pub sync_mode: ShootActionSyncMode,
+}
+
+fn default_shoot_action_fps() -> f64 {
+    30.0
+}
+
+fn default_shoot_action_speed() -> f64 {
+    1.0
+}
+
+fn default_shoot_action_scale() -> f64 {
+    1.0
+}
+
+impl Default for ShootModelActionConfig {
+    fn default() -> Self {
+        Self {
+            action_slug: String::new(),
+            trigger_frame: 0,
+            fps: 30.0,
+            anim_speed: 1.0,
+            scale_multiplier: 1.0,
+            sync_mode: ShootActionSyncMode::PlayFullPerShot,
+        }
+    }
+}
+
+impl ShootModelActionConfig {
+    pub fn sanitized(mut self) -> Self {
+        self.action_slug = self.action_slug.trim().to_string();
+        if !self.fps.is_finite() {
+            self.fps = 30.0;
+        }
+        self.fps = self.fps.clamp(1.0, 120.0);
+        if !self.anim_speed.is_finite() {
+            self.anim_speed = 1.0;
+        }
+        self.anim_speed = self.anim_speed.clamp(0.25, 3.0);
+        if !self.scale_multiplier.is_finite() {
+            self.scale_multiplier = 1.0;
+        }
+        self.scale_multiplier = self.scale_multiplier.clamp(0.1, 5.0);
+        self.trigger_frame = self.trigger_frame.min(6000);
+        self
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.action_slug.trim().is_empty()
+    }
+
+    /// Exact timestamp inside the clip (seconds) corresponding to `trigger_frame`.
+    pub fn trigger_clip_time_sec(&self) -> f64 {
+        (self.trigger_frame as f64) / self.fps.clamp(1.0, 120.0)
+    }
+
+    /// Real-world delay (seconds) from Shoot start until the projectile/spray launches.
+    pub fn trigger_delay_sec(&self) -> f64 {
+        if !self.is_enabled() {
+            return 0.0;
+        }
+        self.trigger_clip_time_sec() / self.anim_speed.clamp(0.25, 3.0)
+    }
+
+    /// Computes the clip seek timestamp (seconds) for a Shoot animation at `elapsed_sec`,
+    /// or `None` when `PlayFullPerShot` has finished its follow-through and returned to Idle.
+    pub fn evaluate_clip_seek_sec(&self, elapsed_sec: f64, clip_dur_sec: f32) -> Option<f32> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let dur = (clip_dur_sec as f64).max(0.05);
+        let max_seek = (dur - 0.004).max(0.0);
+        let clip_t = elapsed_sec.max(0.0) * self.anim_speed.clamp(0.25, 3.0);
+        let trig_t = self.trigger_clip_time_sec().min(max_seek);
+        match self.sync_mode {
+            ShootActionSyncMode::PlayFullPerShot => {
+                if clip_t <= dur {
+                    Some(clip_t.min(max_seek) as f32)
+                } else {
+                    None
+                }
+            }
+            ShootActionSyncMode::HoldPoseWhileFiring => Some(clip_t.min(trig_t) as f32),
+            ShootActionSyncMode::LoopWhileFiring => Some((clip_t % dur) as f32),
+        }
+    }
+}
+
+pub fn parse_shoot_model_action_config(anim: &Anim) -> ShootModelActionConfig {
+    anim.data
+        .get("shoot_action")
+        .and_then(|v| serde_json::from_value::<ShootModelActionConfig>(v.clone()).ok())
+        .map(ShootModelActionConfig::sanitized)
+        .unwrap_or_default()
+}
+
+pub fn write_shoot_model_action_config(anim: &mut Anim, cfg: &ShootModelActionConfig) {
+    let clean = cfg.clone().sanitized();
+    if !anim.data.is_object() {
+        anim.data = serde_json::json!({});
+    }
+    if let Some(obj) = anim.data.as_object_mut() {
+        if !clean.is_enabled() {
+            obj.remove("shoot_action");
+        } else if let Ok(v) = serde_json::to_value(&clean) {
+            obj.insert("shoot_action".to_string(), v);
+        }
+    }
+}
+
 /// Returns the effective finite cycle duration (seconds) for any non-continuous shoot animation.
 pub fn shoot_anim_effective_duration_sec(anim: &Anim) -> f64 {
-    match shoot_anim_kind(anim) {
+    let action_delay = parse_shoot_model_action_config(anim).trigger_delay_sec();
+    let base = match shoot_anim_kind(anim) {
         Some(ShootAnimKind::StoneThrow) => {
             let cfg = parse_stone_throw_config(anim);
             if cfg.single_shot {
@@ -187,7 +364,8 @@ pub fn shoot_anim_effective_duration_sec(anim: &Anim) -> f64 {
             }
         }
         _ => anim.duration_sec.max(0.5),
-    }
+    };
+    base + action_delay
 }
 
 /// Returns the primary reach / range in meters of any shoot animation (for compact Layer rows).
@@ -1443,5 +1621,50 @@ mod tests {
             }
             assert!(shoot_anim_range_m(&anim) > 0.0);
         }
+    }
+
+    #[test]
+    fn shoot_model_action_roundtrips_and_evaluates_trigger_frame_modes() {
+        let mut anim = dummy_shoot_anim(ShootAnimKind::StoneThrow);
+        let stone = StoneThrowConfig {
+            single_shot: true,
+            ..Default::default()
+        };
+        write_stone_throw_config(&mut anim, &stone);
+        let base_dur = shoot_anim_effective_duration_sec(&anim);
+
+        // 15 frames at 30 FPS at 1.0x speed => 0.50s trigger delay
+        let cfg = ShootModelActionConfig {
+            action_slug: "lempar_batu".into(),
+            trigger_frame: 15,
+            fps: 30.0,
+            anim_speed: 1.0,
+            scale_multiplier: 1.35,
+            sync_mode: ShootActionSyncMode::PlayFullPerShot,
+        };
+        write_shoot_model_action_config(&mut anim, &cfg);
+        let parsed = parse_shoot_model_action_config(&anim);
+        assert_eq!(parsed, cfg);
+        assert!((parsed.trigger_delay_sec() - 0.5).abs() < 1e-6);
+        assert!((shoot_anim_effective_duration_sec(&anim) - (base_dur + 0.5)).abs() < 1e-6);
+
+        // PlayFullPerShot plays 0..dur then returns None (back to Idle)
+        assert!((parsed.evaluate_clip_seek_sec(0.5, 1.5).unwrap() - 0.5).abs() < 1e-4);
+        assert!(parsed.evaluate_clip_seek_sec(1.8, 1.5).is_none());
+
+        // HoldPoseWhileFiring clamps at trigger_frame timestamp (0.5s)
+        let hold = ShootModelActionConfig {
+            sync_mode: ShootActionSyncMode::HoldPoseWhileFiring,
+            ..cfg.clone()
+        };
+        assert!((hold.evaluate_clip_seek_sec(0.2, 2.0).unwrap() - 0.2).abs() < 1e-4);
+        assert!((hold.evaluate_clip_seek_sec(5.0, 2.0).unwrap() - 0.5).abs() < 1e-4);
+
+        // LoopWhileFiring wraps modulo clip duration
+        let looped = ShootModelActionConfig {
+            sync_mode: ShootActionSyncMode::LoopWhileFiring,
+            ..cfg
+        };
+        assert!((looped.evaluate_clip_seek_sec(2.5, 2.0).unwrap() - 0.5).abs() < 1e-4);
     }
 }

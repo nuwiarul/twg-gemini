@@ -1790,6 +1790,12 @@ pub struct AppState {
     pub camera_status: HashMap<Uuid, String>,
     pub new_model_action_name: String,
     pub model_action_status: HashMap<Uuid, String>,
+    /// Whether scrubbing/selecting a Shoot animation with a character action clip shows its live pose at `trigger_frame` on the 3D map.
+    pub shoot_pose_preview_enabled: bool,
+    /// Whether the bound marker's `Idle` pose is displayed side-by-side in the Plot Editor for visual scale comparison.
+    pub shoot_pose_compare_idle: bool,
+    /// Cached `AnimationClip::duration()` per relative GLB path (seconds), populated when loaded in Bevy.
+    pub action_clip_durations: HashMap<String, f32>,
     pub new_water_kind: twg_shared::environment_anim::WaterSimKind,
     pub new_water_name: String,
     pub redrawing_water_anim_id: Option<Uuid>,
@@ -2043,6 +2049,9 @@ impl AppState {
             camera_status: HashMap::new(),
             new_model_action_name: "Aksi Model 1".to_string(),
             model_action_status: HashMap::new(),
+            shoot_pose_preview_enabled: true,
+            shoot_pose_compare_idle: false,
+            action_clip_durations: HashMap::new(),
             new_water_kind: twg_shared::environment_anim::WaterSimKind::Ocean,
             new_water_name: "Laut 1".to_string(),
             redrawing_water_anim_id: None,

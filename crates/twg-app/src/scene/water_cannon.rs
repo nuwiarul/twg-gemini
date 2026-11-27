@@ -141,9 +141,19 @@ pub fn water_cannon_visual_system(
         };
 
         if let Some(phase_sec) = play_phase_opt {
-            let cfg = parse_water_cannon_config(anim);
-            to_render.push((anim.id, marker_id, cfg, phase_sec, false));
-            active_ids.insert(anim.id);
+            let action_delay = twg_shared::shoot_anim::parse_shoot_model_action_config(anim)
+                .trigger_delay_sec();
+            if phase_sec >= action_delay {
+                let cfg = parse_water_cannon_config(anim);
+                to_render.push((
+                    anim.id,
+                    marker_id,
+                    cfg,
+                    (phase_sec - action_delay).max(0.0),
+                    false,
+                ));
+                active_ids.insert(anim.id);
+            }
         } else if is_editor_preview {
             let cfg = parse_water_cannon_config(anim);
             to_render.push((anim.id, marker_id, cfg, editor_time, true));

@@ -828,8 +828,18 @@ pub fn shoot_fx_visual_system(
         };
 
         let dur_sec = twg_shared::shoot_anim::shoot_anim_effective_duration_sec(anim);
-        let (anim_time, preview_flag) = if let Some(phase_sec) = play_phase_opt {
-            (phase_sec, false)
+        let action_delay = twg_shared::shoot_anim::parse_shoot_model_action_config(anim)
+            .trigger_delay_sec();
+        let (anim_time, fx_dur_sec, preview_flag) = if let Some(phase_sec) = play_phase_opt {
+            // Wait until the character action reaches `trigger_frame` before launching projectiles/spray!
+            if phase_sec < action_delay {
+                continue;
+            }
+            (
+                (phase_sec - action_delay).max(0.0),
+                (dur_sec - action_delay).max(0.1),
+                false,
+            )
         } else {
             let preview_t = match &payload {
                 ActiveShootPayload::TearGas(cfg) if !cfg.continuous => {
@@ -846,10 +856,10 @@ pub fn shoot_fx_visual_system(
                 }
                 _ => now_sec,
             };
-            (preview_t, true)
+            (preview_t, (dur_sec - action_delay).max(0.1), true)
         };
 
-        to_render.push((anim.id, marker_id, payload, anim_time, dur_sec, preview_flag));
+        to_render.push((anim.id, marker_id, payload, anim_time, fx_dur_sec, preview_flag));
         active_ids.insert(anim.id);
     }
 

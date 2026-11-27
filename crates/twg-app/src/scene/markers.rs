@@ -154,7 +154,10 @@ pub struct ActionSubtreeSlot {
     pub child_entity: Entity,
     pub gltf_handle: Handle<Gltf>,
     pub anim_graph: Option<(Handle<AnimationGraph>, AnimationNodeIndex)>,
-    pub scale_calibrated: bool,
+    /// Auto-calibrated base scale factor matching `idle_child` (`None` until both AABBs load).
+    pub base_auto_scale: Option<f32>,
+    /// Last applied uniform scale (`base_auto_scale * user_scale_multiplier`) to avoid redundant writes.
+    pub applied_scale: f32,
 }
 
 #[derive(Component)]
@@ -172,6 +175,7 @@ pub struct TacticalMarkerEntity {
     pub action_slots: HashMap<String, ActionSubtreeSlot>,
     pub embedded_action_graphs: HashMap<String, (Handle<AnimationGraph>, AnimationNodeIndex)>,
     pub active_action_key: Option<String>,
+    pub compare_idle_active: bool,
     pub route_move_anim: twg_shared::route_formation::RouteMoveAnimConfig,
     pub is_walking_now: bool,
     pub basic_mesh_child: Option<Entity>,
@@ -186,6 +190,9 @@ impl TacticalMarkerEntity {
     pub fn is_branch_hidden(&self, entity: Entity) -> bool {
         if let Some(active_key) = &self.active_action_key {
             if let Some(slot) = self.action_slots.get(active_key) {
+                if self.compare_idle_active && Some(entity) == self.idle_child {
+                    return false;
+                }
                 return Some(entity) == self.idle_child
                     || Some(entity) == self.walk_child
                     || self
@@ -1298,6 +1305,7 @@ pub fn sync_markers_system(
                         action_slots: HashMap::new(),
                         embedded_action_graphs: HashMap::new(),
                         active_action_key: None,
+                        compare_idle_active: false,
                         route_move_anim,
                         is_walking_now: is_moving,
                         basic_mesh_child: Some(child_id),
@@ -1380,6 +1388,7 @@ pub fn sync_markers_system(
                     action_slots: HashMap::new(),
                     embedded_action_graphs: HashMap::new(),
                     active_action_key: None,
+                    compare_idle_active: false,
                     route_move_anim,
                     is_walking_now: is_moving,
                     basic_mesh_child: None,
@@ -1678,6 +1687,50 @@ fn measure_subtree_max_span(
     }
 }
 
+/// Calibrates `slot.base_auto_scale` once against `idle_child` and applies
+/// `base_auto_scale * user_scale_mult` to `slot.child_entity` whenever it changes.
+/// Returns `true` once calibration is complete.
+fn calibrate_and_apply_action_slot_scale(
+    commands: &mut Commands,
+    slot: &mut ActionSubtreeSlot,
+    idle_child_opt: Option<Entity>,
+    user_scale_mult: f32,
+    children_q: &Query<&Children>,
+    mesh_aabb_q: &Query<(&GlobalTransform, &Aabb)>,
+) -> bool {
+    let base = if let Some(b) = slot.base_auto_scale {
+        b
+    } else if let Some(idle_e) = idle_child_opt {
+        let Some(idle_span) = measure_subtree_max_span(idle_e, children_q, mesh_aabb_q) else {
+            return false;
+        };
+        let Some(act_span) = measure_subtree_max_span(slot.child_entity, children_q, mesh_aabb_q)
+        else {
+            return false;
+        };
+        let ratio = (idle_span / act_span).clamp(0.001, 1000.0);
+        let b = if (ratio - 1.0).abs() > 0.08 {
+            ratio
+        } else {
+            1.0
+        };
+        slot.base_auto_scale = Some(b);
+        b
+    } else {
+        slot.base_auto_scale = Some(1.0);
+        1.0
+    };
+
+    let target_scale = (base * user_scale_mult.clamp(0.1, 5.0)).clamp(0.0005, 5000.0);
+    if (slot.applied_scale - target_scale).abs() > 1e-4 {
+        commands
+            .entity(slot.child_entity)
+            .insert(Transform::from_scale(Vec3::splat(target_scale)));
+        slot.applied_scale = target_scale;
+    }
+    true
+}
+
 /// Drives embedded glTF AnimationPlayers independently per marker:
 /// - Markers with separate Idle + Walk `.glb` files play Walk ONLY while moving and Idle when resting.
 /// - Single-file dual-clip animated markers (e.g. `*_anim_1.glb` vehicles/helicopters with `Idle|Idle`
@@ -1724,6 +1777,70 @@ pub fn animate_markers_system(
             Some((a.id, mid, cfg))
         })
         .collect();
+
+    // Collect Shoot character pose actions:
+    // - During Playback: active Playing/Paused Shoot animations with an enabled `shoot_action` clip
+    // - During Plot Editor: live frame-scrubbed pose of the currently selected Shoot anim (`anim_edit`)
+    let shoot_playback_actions: Vec<(
+        Uuid,
+        Uuid,
+        twg_shared::shoot_anim::ShootModelActionConfig,
+    )> = if playback_active {
+        state
+            .anims
+            .iter()
+            .filter(|a| twg_shared::shoot_anim::is_shoot_anim(a))
+            .filter_map(|a| {
+                let mid = a.marker_id?;
+                let cfg = twg_shared::shoot_anim::parse_shoot_model_action_config(a);
+                if !cfg.is_enabled() {
+                    return None;
+                }
+                Some((a.id, mid, cfg))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let shoot_editor_pose: Option<(Uuid, twg_shared::shoot_anim::ShootModelActionConfig)> =
+        if !playback_active && state.shoot_pose_preview_enabled {
+            state
+                .anim_edit
+                .as_ref()
+                .filter(|a| {
+                    state.selected == SelectedEntity::Anim(a.id)
+                        && twg_shared::shoot_anim::is_shoot_anim(a)
+                })
+                .and_then(|a| {
+                    let mid = a.marker_id?;
+                    let cfg = twg_shared::shoot_anim::parse_shoot_model_action_config(a);
+                    cfg.is_enabled().then_some((mid, cfg))
+                })
+        } else {
+            None
+        };
+
+    // Standalone `Aksi Model 3D` live scale-compare preview in Plot Editor
+    let model_action_editor_pose: Option<(
+        Uuid,
+        twg_shared::model_action_anim::ModelActionAnimConfig,
+    )> = if !playback_active && state.shoot_pose_compare_idle {
+        state
+            .anim_edit
+            .as_ref()
+            .filter(|a| {
+                state.selected == SelectedEntity::Anim(a.id)
+                    && twg_shared::model_action_anim::is_model_action_anim(a)
+            })
+            .and_then(|a| {
+                let mid = a.marker_id?;
+                let cfg = twg_shared::model_action_anim::parse_model_action_config(a);
+                (!cfg.action_slug.trim().is_empty()).then_some((mid, cfg))
+            })
+    } else {
+        None
+    };
 
     // Clear stale live statuses when playback is inactive
     if !playback_active {
@@ -1902,7 +2019,8 @@ pub fn animate_markers_system(
                                     child_entity: child_e,
                                     gltf_handle: gltf_h,
                                     anim_graph: None,
-                                    scale_calibrated: false,
+                                    base_auto_scale: None,
+                                    applied_scale: 1.0,
                                 },
                             );
                         }
@@ -1910,27 +2028,14 @@ pub fn animate_markers_system(
                         let idle_child_opt = comp.idle_child;
                         if let Some(slot) = comp.action_slots.get_mut(&slug) {
                             let child_e = slot.child_entity;
-
-                            // Auto-calibrate action clip scale to match Idle model height
-                            // (handles cm-scale Assimp Idle [100x] + metric Blender Action [1x] seamlessly).
-                            if !slot.scale_calibrated {
-                                if let Some(idle_e) = idle_child_opt {
-                                    if let (Some(idle_span), Some(act_span)) = (
-                                        measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q),
-                                        measure_subtree_max_span(child_e, &children_q, &mesh_aabb_q),
-                                    ) {
-                                        let ratio = (idle_span / act_span).clamp(0.001, 1000.0);
-                                        if (ratio - 1.0).abs() > 0.08 {
-                                            commands
-                                                .entity(child_e)
-                                                .insert(Transform::from_scale(Vec3::splat(ratio)));
-                                        }
-                                        slot.scale_calibrated = true;
-                                    }
-                                } else {
-                                    slot.scale_calibrated = true;
-                                }
-                            }
+                            let calibrated = calibrate_and_apply_action_slot_scale(
+                                &mut commands,
+                                slot,
+                                idle_child_opt,
+                                cfg.scale_multiplier as f32,
+                                &children_q,
+                                &mesh_aabb_q,
+                            );
 
                             if let Some(gltf) = gltfs.get(&slot.gltf_handle)
                                 && let Some(clip_h) = gltf.animations.first().cloned()
@@ -1967,7 +2072,7 @@ pub fn animate_markers_system(
                                         seek_t,
                                         &children_q,
                                         &mut anim_player_q,
-                                    ) && slot.scale_calibrated
+                                    ) && calibrated
                                     {
                                         comp.active_action_key = Some(slug);
                                         action_applied = true;
@@ -2053,7 +2158,8 @@ pub fn animate_markers_system(
                                 child_entity: child_e,
                                 gltf_handle: gltf_h,
                                 anim_graph: None,
-                                scale_calibrated: false,
+                                base_auto_scale: None,
+                                applied_scale: 1.0,
                             },
                         );
                     }
@@ -2063,24 +2169,14 @@ pub fn animate_markers_system(
                         speed * (comp.route_move_anim.anim_speed as f32).clamp(0.25, 3.0);
                     if let Some(slot) = comp.action_slots.get_mut(&slug) {
                         let child_e = slot.child_entity;
-                        if !slot.scale_calibrated {
-                            if let Some(idle_e) = idle_child_opt {
-                                if let (Some(idle_span), Some(act_span)) = (
-                                    measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q),
-                                    measure_subtree_max_span(child_e, &children_q, &mesh_aabb_q),
-                                ) {
-                                    let ratio = (idle_span / act_span).clamp(0.001, 1000.0);
-                                    if (ratio - 1.0).abs() > 0.08 {
-                                        commands
-                                            .entity(child_e)
-                                            .insert(Transform::from_scale(Vec3::splat(ratio)));
-                                    }
-                                    slot.scale_calibrated = true;
-                                }
-                            } else {
-                                slot.scale_calibrated = true;
-                            }
-                        }
+                        let calibrated = calibrate_and_apply_action_slot_scale(
+                            &mut commands,
+                            slot,
+                            idle_child_opt,
+                            1.0,
+                            &children_q,
+                            &mesh_aabb_q,
+                        );
 
                         if let Some(gltf) = gltfs.get(&slot.gltf_handle)
                             && let Some(clip_h) = gltf.animations.first().cloned()
@@ -2126,12 +2222,222 @@ pub fn animate_markers_system(
                                 }
                             }
 
-                            if found_player && slot.scale_calibrated {
+                            if found_player && calibrated {
                                 comp.active_action_key = Some(slug);
                                 action_applied = true;
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Shoot Character Pose Action & Standalone Editor Scale Comparison:
+        // 1) In Plot Editor (`shoot_editor_pose` or `model_action_editor_pose`): freezes the
+        //    character live so the user can align nozzle/hand offset & compare height against Idle.
+        // 2) During Playback (`shoot_playback_actions`): plays the character clip synchronized
+        //    with the Shoot track so the shot/throw fires at exact `trigger_frame`.
+        let mut want_compare_idle = false;
+        if !action_applied && !comp.is_walking_now {
+            enum PoseRequest {
+                ShootEditor(twg_shared::shoot_anim::ShootModelActionConfig),
+                ShootPlayback(twg_shared::shoot_anim::ShootModelActionConfig, f64),
+                ModelActionEditor(twg_shared::model_action_anim::ModelActionAnimConfig),
+            }
+
+            let pose_req: Option<PoseRequest> = if !playback_active {
+                if let Some((_, cfg)) = shoot_editor_pose
+                    .as_ref()
+                    .filter(|(mid, _)| *mid == marker_id)
+                {
+                    Some(PoseRequest::ShootEditor(cfg.clone()))
+                } else if let Some((_, cfg)) = model_action_editor_pose
+                    .as_ref()
+                    .filter(|(mid, _)| *mid == marker_id)
+                {
+                    Some(PoseRequest::ModelActionEditor(cfg.clone()))
+                } else {
+                    None
+                }
+            } else {
+                let mut best: Option<(
+                    twg_shared::shoot_anim::ShootModelActionConfig,
+                    f64,
+                    u64,
+                )> = None;
+                for (aid, mid, cfg) in &shoot_playback_actions {
+                    if *mid != marker_id {
+                        continue;
+                    }
+                    let Some(tr) = playback.tracks.get(aid) else {
+                        continue;
+                    };
+                    if tr.status != crate::state::AnimRunStatus::Playing
+                        && tr.status != crate::state::AnimRunStatus::Paused
+                    {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|b| tr.trigger_seq >= b.2) {
+                        best = Some((cfg.clone(), tr.distance_m, tr.trigger_seq));
+                    }
+                }
+                best.map(|(cfg, dist, _)| PoseRequest::ShootPlayback(cfg, dist))
+            };
+
+            if let Some(req) = pose_req {
+                let (slug, user_scale_mult, is_editor_compare) = match &req {
+                    PoseRequest::ShootEditor(cfg) => (
+                        cfg.action_slug.trim().to_string(),
+                        cfg.scale_multiplier as f32,
+                        state.shoot_pose_compare_idle,
+                    ),
+                    PoseRequest::ShootPlayback(cfg, _) => (
+                        cfg.action_slug.trim().to_string(),
+                        cfg.scale_multiplier as f32,
+                        false,
+                    ),
+                    PoseRequest::ModelActionEditor(cfg) => (
+                        cfg.action_slug.trim().to_string(),
+                        cfg.scale_multiplier as f32,
+                        true,
+                    ),
+                };
+
+                let rel_path_opt = state
+                    .catalog
+                    .iter()
+                    .find(|c| c.model_path == comp.model_path)
+                    .and_then(|cat| {
+                        cat.extra_animations
+                            .iter()
+                            .find(|a| a.slug == slug)
+                            .map(|a| a.model_path.clone())
+                    });
+
+                if let Some(rel_path) = rel_path_opt {
+                    let file_ready = state.available_model_paths.contains(&rel_path)
+                        || state.assets_root.join(&rel_path).exists();
+                    if file_ready {
+                        let needs_spawn = comp
+                            .action_slots
+                            .get(&slug)
+                            .is_none_or(|s| s.rel_path != rel_path);
+                        if needs_spawn {
+                            if let Some(old) = comp.action_slots.remove(&slug) {
+                                commands.entity(old.child_entity).despawn();
+                            }
+                            let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
+                            let scene_h = asset_server
+                                .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                            let child_e = commands
+                                .spawn((
+                                    WorldAssetRoot(scene_h),
+                                    Transform::IDENTITY,
+                                    Visibility::Hidden,
+                                ))
+                                .id();
+                            commands.entity(root_entity).add_child(child_e);
+                            comp.action_slots.insert(
+                                slug.clone(),
+                                ActionSubtreeSlot {
+                                    rel_path: rel_path.clone(),
+                                    child_entity: child_e,
+                                    gltf_handle: gltf_h,
+                                    anim_graph: None,
+                                    base_auto_scale: None,
+                                    applied_scale: 1.0,
+                                },
+                            );
+                        }
+
+                        let idle_child_opt = comp.idle_child;
+                        if let Some(slot) = comp.action_slots.get_mut(&slug) {
+                            let child_e = slot.child_entity;
+                            let calibrated = calibrate_and_apply_action_slot_scale(
+                                &mut commands,
+                                slot,
+                                idle_child_opt,
+                                user_scale_mult,
+                                &children_q,
+                                &mesh_aabb_q,
+                            );
+
+                            if let Some(gltf) = gltfs.get(&slot.gltf_handle)
+                                && let Some(clip_h) = gltf.animations.first().cloned()
+                            {
+                                let clip_dur = anim_clips
+                                    .get(&clip_h)
+                                    .map(|c| c.duration())
+                                    .unwrap_or(1.0)
+                                    .max(0.05);
+                                state
+                                    .action_clip_durations
+                                    .insert(rel_path.clone(), clip_dur);
+
+                                let (graph_h, node_idx) = slot
+                                    .anim_graph
+                                    .get_or_insert_with(|| {
+                                        let (graph, node) = AnimationGraph::from_clip(clip_h.clone());
+                                        (anim_graphs.add(graph), node)
+                                    })
+                                    .clone();
+
+                                let max_seek = (clip_dur - 0.004).max(0.0);
+                                let seek_opt = match &req {
+                                    PoseRequest::ShootPlayback(cfg, elapsed_sec) => {
+                                        cfg.evaluate_clip_seek_sec(*elapsed_sec, clip_dur)
+                                    }
+                                    PoseRequest::ShootEditor(cfg) => {
+                                        Some((cfg.trigger_clip_time_sec() as f32).min(max_seek))
+                                    }
+                                    PoseRequest::ModelActionEditor(_) => Some(0.0),
+                                };
+
+                                if let Some(seek_t) = seek_opt {
+                                    if drive_action_subtree_seek(
+                                        &mut commands,
+                                        child_e,
+                                        &graph_h,
+                                        node_idx,
+                                        seek_t,
+                                        &children_q,
+                                        &mut anim_player_q,
+                                    ) && calibrated
+                                    {
+                                        comp.active_action_key = Some(slug);
+                                        action_applied = true;
+                                        want_compare_idle = is_editor_compare;
+                                    }
+                                } else {
+                                    comp.active_action_key = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update side-by-side Idle reference pose transform when comparing scales in Plot Editor
+        if want_compare_idle != comp.compare_idle_active {
+            comp.compare_idle_active = want_compare_idle;
+            if let Some(idle_e) = comp.idle_child {
+                if want_compare_idle {
+                    let marker_scale_x = state
+                        .markers
+                        .iter()
+                        .find(|m| m.id == marker_id)
+                        .map(|m| m.scale_x.max(0.01) as f32)
+                        .unwrap_or(0.1);
+                    let idle_local_span = measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q)
+                        .map(|ws| ws / marker_scale_x)
+                        .unwrap_or(100.0);
+                    let side_offset = (idle_local_span * 0.65).clamp(0.5, 500.0);
+                    commands
+                        .entity(idle_e)
+                        .insert(Transform::from_xyz(side_offset, 0.0, 0.0));
+                } else {
+                    commands.entity(idle_e).insert(Transform::IDENTITY);
                 }
             }
         }
