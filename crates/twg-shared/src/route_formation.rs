@@ -1187,6 +1187,8 @@ pub fn anim_bound_marker_ids(anim: &Anim) -> Vec<Uuid> {
         parse_multi_route_config(anim).marker_ids
     } else if crate::spawn_hide_anim::is_spawn_hide_anim(anim) {
         crate::spawn_hide_anim::parse_spawn_hide_config(anim).marker_ids
+    } else if crate::dialog_anim::is_dialog_anim(anim) {
+        crate::dialog_anim::parse_dialog_anim_config(anim).unique_marker_ids()
     } else {
         anim.marker_id.into_iter().collect()
     }
@@ -1226,6 +1228,9 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
             && cfg
                 .marker_id
                 .is_some_and(|id| markers.iter().any(|m| m.id == id));
+    }
+    if crate::dialog_anim::is_dialog_anim(anim) {
+        return crate::dialog_anim::parse_dialog_anim_config(anim).has_playable_setup(markers);
     }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();

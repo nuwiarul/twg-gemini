@@ -1013,6 +1013,7 @@ pub enum ToolMode {
     PickSpawnHideMarker,
     PickCameraFollowMarker,
     PickModelActionMarker,
+    PickDialogSpeaker,
     PlaceParticle,
     Measure,
 }
@@ -1043,6 +1044,7 @@ impl ToolMode {
             Self::PickSpawnHideMarker => "Pilih Objek Spawn/Hide",
             Self::PickCameraFollowMarker => "Pilih Objek Kamera",
             Self::PickModelActionMarker => "Pilih Objek Aksi 3D",
+            Self::PickDialogSpeaker => "Pilih Pembicara Dialog",
             Self::PlaceParticle => "Letakkan Partikel",
             Self::Measure => "Measure",
         }
@@ -1111,7 +1113,7 @@ impl AnimCategory {
             "play_sound" | "billboard" => Self::Audio,
             "camera_static" | "camera_follow" => Self::Camera,
             "water_sim" | "rain_sim" => Self::Environment,
-            "model_action" => Self::Other,
+            "model_action" | "dialog" => Self::Other,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1522,6 +1524,10 @@ impl PlaybackState {
             } else if twg_shared::model_action_anim::is_model_action_anim(a) {
                 let cfg = twg_shared::model_action_anim::parse_model_action_config(a);
                 a.marker_id.is_some() && !cfg.action_slug.trim().is_empty()
+            } else if twg_shared::dialog_anim::is_dialog_anim(a) {
+                !twg_shared::dialog_anim::parse_dialog_anim_config(a)
+                    .playable_lines()
+                    .is_empty()
             } else if twg_shared::spawn_hide_anim::is_spawn_hide_anim(a) {
                 let cfg = twg_shared::spawn_hide_anim::parse_spawn_hide_config(a);
                 cfg.include_in_play_all && !cfg.marker_ids.is_empty()
@@ -1724,6 +1730,9 @@ pub struct AppState {
     pub picking_spawn_hide_for_anim_id: Option<Uuid>,
     pub picking_camera_follow_for_anim_id: Option<Uuid>,
     pub picking_model_action_for_anim_id: Option<Uuid>,
+    /// `None` = creating a new Dialog anim starting with the clicked speaker;
+    /// `Some((anim_id, line_idx))` = assigning the clicked speaker to that dialog line.
+    pub picking_dialog_speaker: Option<(Uuid, usize)>,
     pub route_target_marker_id: Option<Uuid>,
     pub new_route_is_multi: bool,
     pub new_route_formation: twg_shared::route_formation::RouteFormationKind,
@@ -1790,6 +1799,9 @@ pub struct AppState {
     pub camera_status: HashMap<Uuid, String>,
     pub new_model_action_name: String,
     pub model_action_status: HashMap<Uuid, String>,
+    pub new_dialog_name: String,
+    pub dialog_preview_line_idx: Option<(Uuid, usize)>,
+    pub dialog_status: HashMap<Uuid, String>,
     /// Whether scrubbing/selecting a Shoot animation with a character action clip shows its live pose at `trigger_frame` on the 3D map.
     pub shoot_pose_preview_enabled: bool,
     /// Whether the bound marker's `Idle` pose is displayed side-by-side in the Plot Editor for visual scale comparison.
@@ -2018,6 +2030,7 @@ impl AppState {
             picking_spawn_hide_for_anim_id: None,
             picking_camera_follow_for_anim_id: None,
             picking_model_action_for_anim_id: None,
+            picking_dialog_speaker: None,
             route_target_marker_id: None,
             new_route_is_multi: false,
             new_route_formation: twg_shared::route_formation::RouteFormationKind::Grid,
@@ -2049,6 +2062,9 @@ impl AppState {
             camera_status: HashMap::new(),
             new_model_action_name: "Aksi Model 1".to_string(),
             model_action_status: HashMap::new(),
+            new_dialog_name: "Dialog 1".to_string(),
+            dialog_preview_line_idx: None,
+            dialog_status: HashMap::new(),
             shoot_pose_preview_enabled: true,
             shoot_pose_compare_idle: false,
             action_clip_durations: HashMap::new(),

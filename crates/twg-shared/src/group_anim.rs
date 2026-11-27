@@ -380,6 +380,9 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::model_action_anim::is_model_action_anim(anim) {
         return crate::model_action_anim::parse_model_action_config(anim).is_continuous();
     }
+    if crate::dialog_anim::is_dialog_anim(anim) {
+        return false;
+    }
     if crate::shoot_anim::is_shoot_anim(anim) {
         return crate::shoot_anim::shoot_anim_is_continuous(anim);
     }

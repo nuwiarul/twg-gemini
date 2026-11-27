@@ -3,6 +3,7 @@ mod assets_page;
 mod audio_anim;
 mod billboard_anim;
 pub(crate) mod camera_anim;
+pub(crate) mod dialog_anim;
 pub(crate) mod environment_anim;
 pub(crate) mod model_action_anim;
 mod bottom_bar;
@@ -586,6 +587,7 @@ pub fn egui_root_system(
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
                 | ToolMode::PickModelActionMarker
+                | ToolMode::PickDialogSpeaker
                 | ToolMode::PlaceParticle
                 | ToolMode::DrawWaterPolygon
                 | ToolMode::PlaceRainZone

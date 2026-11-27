@@ -2927,6 +2927,7 @@ pub fn selection_gizmo_system(
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
                 | ToolMode::PickModelActionMarker
+                | ToolMode::PickDialogSpeaker
         );
 
     // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold
@@ -2957,6 +2958,10 @@ pub fn selection_gizmo_system(
         state
             .picking_model_action_for_anim_id
             .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickDialogSpeaker {
+        state
+            .picking_dialog_speaker
+            .and_then(|(aid, _)| state.anims.iter().find(|a| a.id == aid))
     } else if !playback.play_test_mode
         && let SelectedEntity::Anim(aid) = state.selected
     {
@@ -3584,6 +3589,12 @@ pub fn map_interaction_system(
                 state.status_banner = Some("Pemilihan objek target Aksi Model 3D dibatalkan.".into());
                 return;
             }
+            if state.tool_mode == ToolMode::PickDialogSpeaker {
+                state.picking_dialog_speaker = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Pemilihan pembicara Dialog 3D dibatalkan.".into());
+                return;
+            }
             if state.tool_mode == ToolMode::PickSpawnHideMarker {
                 let picked_anim = state
                     .picking_spawn_hide_for_anim_id
@@ -4125,6 +4136,7 @@ pub fn map_interaction_system(
                     | ToolMode::PickSpawnHideMarker
                     | ToolMode::PickCameraFollowMarker
                     | ToolMode::PickModelActionMarker
+                    | ToolMode::PickDialogSpeaker
             ))
         && gizmo_state.hovered_handle.is_none()
     {
@@ -4147,6 +4159,7 @@ pub fn map_interaction_system(
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
                 | ToolMode::PickModelActionMarker
+                | ToolMode::PickDialogSpeaker
         ) {
             match picked {
                 Some(SelectedEntity::Marker(mid)) => Some(SelectedEntity::Marker(mid)),
@@ -5613,6 +5626,69 @@ pub fn map_interaction_system(
                         &api,
                         Some(marker_id),
                     );
+                }
+                state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
+        ToolMode::PickDialogSpeaker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some(marker_name) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| m.name.clone())
+            {
+                if let Some((anim_id, line_idx)) = state.picking_dialog_speaker.take() {
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        let mut cfg = twg_shared::dialog_anim::parse_dialog_anim_config(anim);
+                        if let Some(line) = cfg.lines.get_mut(line_idx) {
+                            line.marker_id = Some(marker_id);
+                        }
+                        if anim.marker_id.is_none() || line_idx == 0 {
+                            anim.marker_id = Some(marker_id);
+                        }
+                        twg_shared::dialog_anim::write_dialog_anim_config(anim, &cfg);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.dialog_preview_line_idx = Some((anim_id, line_idx));
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name.clone(),
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+                        state.status_banner = Some(format!(
+                            "Baris #{} pada Dialog '{}' sekarang menunjuk ke '{marker_name}'.",
+                            line_idx + 1,
+                            updated.name
+                        ));
+                    }
+                } else {
+                    crate::ui::dialog_anim::create_dialog_anim(&mut state, &api, Some(marker_id));
                 }
                 state.tool_mode = ToolMode::Select;
                 gizmo_state.suppress_camera_pan = true;

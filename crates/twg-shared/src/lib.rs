@@ -2,6 +2,7 @@ pub mod api;
 pub mod audio_anim;
 pub mod billboard_anim;
 pub mod camera_anim;
+pub mod dialog_anim;
 pub mod environment_anim;
 pub mod geo;
 pub mod glb_skin;

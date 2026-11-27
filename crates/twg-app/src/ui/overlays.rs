@@ -128,6 +128,111 @@ pub fn draw_projected_labels(
         }
     }
 
+    // Active 3D Speech Bubble Dialogs (Play Skenario / Preview AND Plot Editor live line preview)
+    {
+        use twg_shared::dialog_anim::{is_dialog_anim, parse_dialog_anim_config};
+        let playback_active = playback.is_playback_active();
+        let mut bubbles_to_draw: Vec<(
+            twg_shared::dialog_anim::DialogAnimConfig,
+            twg_shared::dialog_anim::ActiveDialogSample,
+        )> = Vec::new();
+
+        if playback_active {
+            for anim in &state.anims {
+                if !is_dialog_anim(anim) || state.hidden_entity_ids.contains(&anim.id) {
+                    continue;
+                }
+                let status = playback.track_status(anim.id);
+                if status != AnimRunStatus::Playing && status != AnimRunStatus::Paused {
+                    continue;
+                }
+                let elapsed = playback
+                    .tracks
+                    .get(&anim.id)
+                    .map(|t| t.distance_m)
+                    .unwrap_or(0.0);
+                let cfg = parse_dialog_anim_config(anim);
+                if let Some(sample) = cfg.evaluate_at(elapsed) {
+                    bubbles_to_draw.push((cfg, sample));
+                }
+            }
+        } else if let Some(edit_anim) = state.anim_edit.as_ref()
+            && state.selected == crate::SelectedEntity::Anim(edit_anim.id)
+            && is_dialog_anim(edit_anim)
+            && !state.hidden_entity_ids.contains(&edit_anim.id)
+        {
+            let cfg = parse_dialog_anim_config(edit_anim);
+            let idx = state
+                .dialog_preview_line_idx
+                .filter(|(aid, _)| *aid == edit_anim.id)
+                .map(|(_, i)| i)
+                .unwrap_or(0);
+            if let Some(sample) = cfg
+                .preview_sample_for_line(idx)
+                .or_else(|| cfg.preview_sample_for_line(0))
+            {
+                bubbles_to_draw.push((cfg, sample));
+            }
+        }
+
+        for (cfg, sample) in bubbles_to_draw {
+            let Some(marker) = state.markers.iter().find(|m| m.id == sample.marker_id) else {
+                continue;
+            };
+            if !overrides.is_marker_visible(marker, playback_active) {
+                continue;
+            }
+            let head_world = if let Some(b) = marker_bounds.bounds.get(&marker.id) {
+                Vec3::new(
+                    b.footprint_center.x,
+                    b.world_max.y + cfg.height_offset_m as f32,
+                    b.footprint_center.z,
+                )
+            } else {
+                let (lng, lat, alt) = if let Some(ov) = overrides.markers.get(&marker.id) {
+                    (ov.lng, ov.lat, ov.altitude)
+                } else {
+                    (marker.lng, marker.lat, marker.altitude)
+                };
+                Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(
+                    lng,
+                    lat,
+                    alt + 2.2 + cfg.height_offset_m,
+                ))
+            };
+
+            if let Ok(screen) = camera.world_to_viewport(cam_gtf, head_world) {
+                let anchor_pos = egui::pos2(screen.x, screen.y);
+                if clip_rect.expand(120.0).contains(anchor_pos) {
+                    let speaker_name = if cfg.show_speaker_name {
+                        let nm = if !sample.speaker_override.is_empty() {
+                            sample.speaker_override.clone()
+                        } else {
+                            marker.name.clone()
+                        };
+                        Some(nm)
+                    } else {
+                        None
+                    };
+                    draw_speech_bubble(
+                        &painter,
+                        clip_rect,
+                        anchor_pos,
+                        speaker_name.as_deref(),
+                        &sample.visible_text,
+                        &sample.text_color,
+                        &sample.bg_color,
+                        cfg.bg_opacity,
+                        &sample.border_color,
+                        cfg.font_size,
+                        cfg.max_width_px,
+                        sample.alpha,
+                    );
+                }
+            }
+        }
+    }
+
     // Play Skenario Mode viewport border & floating HUD badge (omitted on clean fullscreen Layar Besar)
     if playback.play_test_mode && !state.is_big_screen() {
         let playing_cnt = playback
@@ -301,7 +406,8 @@ pub fn draw_projected_labels(
             | ToolMode::PickPointerMarker
             | ToolMode::PickSpawnHideMarker
             | ToolMode::PickCameraFollowMarker
-            | ToolMode::PickModelActionMarker => String::new(),
+            | ToolMode::PickModelActionMarker
+            | ToolMode::PickDialogSpeaker => String::new(),
             ToolMode::PlaceParticle => format!(
                 "Mode Letakkan Partikel ({}): Klik lokasi di peta untuk menempatkan (Esc batal)",
                 state.new_particle_kind.label()
@@ -876,4 +982,127 @@ fn draw_telemetry_row(ui: &mut egui::Ui, label: &str, value: &str, value_col: eg
                 .color(value_col),
         );
     });
+}
+
+/// Draws a crisp 3D-projected speech bubble above a speaking marker with drop shadow,
+/// rounded background, colored border, optional speaker header, wrapped dialog text,
+/// and a downward-pointing speech tail pointing straight toward `anchor_pos`.
+#[allow(clippy::too_many_arguments)]
+fn draw_speech_bubble(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    anchor_pos: egui::Pos2,
+    speaker_name: Option<&str>,
+    text: &str,
+    text_color_hex: &str,
+    bg_color_hex: &str,
+    bg_opacity: f32,
+    border_color_hex: &str,
+    font_size: f32,
+    max_width_px: f32,
+    alpha: f32,
+) {
+    let a = alpha.clamp(0.0, 1.0);
+    if a <= 0.01 {
+        return;
+    }
+
+    let parse_rgba = |hex: &str, op: f32| {
+        let c = parse_hex_color(hex, 1.0).to_srgba();
+        egui::Color32::from_rgba_unmultiplied(
+            (c.red * 255.0) as u8,
+            (c.green * 255.0) as u8,
+            (c.blue * 255.0) as u8,
+            ((op.clamp(0.0, 1.0) * a) * 255.0).round() as u8,
+        )
+    };
+
+    let text_col = parse_rgba(text_color_hex, 1.0);
+    let bg_col = parse_rgba(bg_color_hex, bg_opacity);
+    let border_col = parse_rgba(border_color_hex, 0.95);
+    let shadow_col = egui::Color32::from_rgba_unmultiplied(0, 0, 0, (110.0 * a) as u8);
+
+    let wrap_w = max_width_px.clamp(140.0, 600.0);
+    let body_font = egui::FontId::proportional(font_size.clamp(10.0, 36.0));
+    let body_galley = painter.layout(text.to_string(), body_font, text_col, wrap_w);
+
+    let header_galley = speaker_name.map(|name| {
+        let hdr_font = egui::FontId::proportional((font_size * 0.84).clamp(9.5, 24.0));
+        painter.layout(name.to_string(), hdr_font, border_col, wrap_w)
+    });
+
+    let pad_x = 12.0_f32;
+    let pad_y = 8.0_f32;
+    let header_gap = if header_galley.is_some() { 3.0 } else { 0.0 };
+    let header_h = header_galley.as_ref().map(|g| g.size().y).unwrap_or(0.0);
+    let header_w = header_galley.as_ref().map(|g| g.size().x).unwrap_or(0.0);
+
+    let content_w = body_galley.size().x.max(header_w).max(40.0);
+    let content_h = header_h + header_gap + body_galley.size().y;
+    let box_w = content_w + pad_x * 2.0;
+    let box_h = content_h + pad_y * 2.0;
+
+    let tail_h = 11.0_f32;
+    let tail_half_w = 8.0_f32;
+    let tip_y = anchor_pos.y - 4.0;
+    let box_bottom = tip_y - tail_h;
+    let box_top = box_bottom - box_h;
+
+    // Keep bubble inside viewport horizontally while keeping tail tip pointing at speaker
+    let desired_left = anchor_pos.x - box_w * 0.5;
+    let min_left = clip_rect.left() + 8.0;
+    let max_left = (clip_rect.right() - 8.0 - box_w).max(min_left);
+    let box_left = desired_left.clamp(min_left, max_left);
+    let bubble_rect = egui::Rect::from_min_size(
+        egui::pos2(box_left, box_top),
+        egui::vec2(box_w, box_h),
+    );
+
+    let corner_r = 9.0_f32;
+    let tail_base_x = anchor_pos
+        .x
+        .clamp(bubble_rect.left() + corner_r + tail_half_w, bubble_rect.right() - corner_r - tail_half_w);
+    let tail_tip = egui::pos2(
+        anchor_pos.x.clamp(clip_rect.left() + 6.0, clip_rect.right() - 6.0),
+        tip_y,
+    );
+    let tail_left = egui::pos2(tail_base_x - tail_half_w, bubble_rect.bottom() - 1.0);
+    let tail_right = egui::pos2(tail_base_x + tail_half_w, bubble_rect.bottom() - 1.0);
+
+    // 1. Drop shadow
+    painter.rect_filled(
+        bubble_rect.translate(egui::vec2(0.0, 3.0)),
+        corner_r,
+        shadow_col,
+    );
+
+    // 2. Main bubble box + border
+    painter.rect_filled(bubble_rect, corner_r, bg_col);
+    painter.rect_stroke(
+        bubble_rect,
+        corner_r,
+        egui::Stroke::new(1.6, border_col),
+        egui::StrokeKind::Outside,
+    );
+
+    // 3. Seamless downward speech tail pointing at speaker's head
+    painter.add(egui::Shape::convex_polygon(
+        vec![tail_left, tail_right, tail_tip],
+        bg_col,
+        egui::Stroke::NONE,
+    ));
+    painter.line_segment([tail_left, tail_tip], egui::Stroke::new(1.6, border_col));
+    painter.line_segment([tail_right, tail_tip], egui::Stroke::new(1.6, border_col));
+
+    // 4. Speaker name header + wrapped dialog text
+    let mut text_y = bubble_rect.top() + pad_y;
+    if let Some(hg) = header_galley {
+        painter.galley(egui::pos2(bubble_rect.left() + pad_x, text_y), hg, border_col);
+        text_y += header_h + header_gap;
+    }
+    painter.galley(
+        egui::pos2(bubble_rect.left() + pad_x, text_y),
+        body_galley,
+        text_col,
+    );
 }

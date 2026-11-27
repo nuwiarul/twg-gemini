@@ -1134,6 +1134,7 @@ fn process_net_events_system(
                 let is_shoot = twg_shared::shoot_anim::is_shoot_anim(&a);
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let is_model_action = twg_shared::model_action_anim::is_model_action_anim(&a);
+                let is_dialog = twg_shared::dialog_anim::is_dialog_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
                 let is_spawn_hide = spawn_hide_act.is_some();
                 let group_mode_opt = twg_shared::group_anim::group_anim_mode(&a);
@@ -1152,6 +1153,7 @@ fn process_net_events_system(
                     && !is_shoot
                     && !is_pointer
                     && !is_model_action
+                    && !is_dialog
                     && !is_spawn_hide
                     && !is_group
                     && bound_empty;
@@ -1166,6 +1168,11 @@ fn process_net_events_system(
                 state.sort_anims_by_order();
                 if is_audio {
                     state.status_banner = Some(format!("Play Suara '{anim_name}' dibuat — pilih Sound dari Assets di Inspector."));
+                } else if is_dialog {
+                    state.dialog_preview_line_idx = Some((anim_id, 0));
+                    state.status_banner = Some(format!(
+                        "Animasi Dialog '{anim_name}' dibuat — atur baris percakapan, durasi, jeda & gaya balon di Inspector!"
+                    ));
                 } else if is_model_action {
                     state.status_banner = Some(format!(
                         "Aksi Model 3D '{anim_name}' dibuat — pilih klip aksi & mode putar (Loop / Tahan Pose / Kembali Idle) di Inspector!"

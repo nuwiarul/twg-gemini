@@ -1841,7 +1841,10 @@ fn draw_layers_tab(
                             || "panah".contains(&filter)
                             || "pointer".contains(&filter)
                             || "aksi".contains(&filter)
-                            || "model".contains(&filter))
+                            || "model".contains(&filter)
+                            || "dialog".contains(&filter)
+                            || "bicara".contains(&filter)
+                            || "bubble".contains(&filter))
                 })
                 .count();
             let other_header = if has_active_filter {
@@ -1871,6 +1874,9 @@ fn draw_layers_tab(
                         && !"pointer".contains(&filter)
                         && !"aksi".contains(&filter)
                         && !"model".contains(&filter)
+                        && !"dialog".contains(&filter)
+                        && !"bicara".contains(&filter)
+                        && !"bubble".contains(&filter)
                     {
                         continue;
                     }
@@ -1901,6 +1907,8 @@ fn draw_layers_tab(
                                 let (tag_txt, tag_col) =
                                     if twg_shared::model_action_anim::is_model_action_anim(a) {
                                         ("[AKSI 3D]", egui::Color32::from_rgb(251, 191, 36))
+                                    } else if twg_shared::dialog_anim::is_dialog_anim(a) {
+                                        ("[DIALOG]", egui::Color32::from_rgb(56, 189, 248))
                                     } else if is_pointer_arrow_anim(a) {
                                         ("[PANAH]", egui::Color32::from_rgb(250, 204, 21))
                                     } else {
@@ -3641,6 +3649,8 @@ fn draw_animations_tab(
         AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
         AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
         AnimCategory::Other => {
+            super::dialog_anim::draw_create(ui, state, api, editable);
+            ui.add_space(6.0);
             super::model_action_anim::draw_create(ui, state, api, editable);
             ui.add_space(6.0);
             draw_other_create_card(ui, state, editable);
@@ -5270,6 +5280,8 @@ fn draw_ordered_animation_list(
                     AnimCategory::Other => {
                         if twg_shared::model_action_anim::is_model_action_anim(a) {
                             ("AKSI 3D", egui::Color32::from_rgb(217, 119, 6))
+                        } else if twg_shared::dialog_anim::is_dialog_anim(a) {
+                            ("DIALOG", egui::Color32::from_rgb(2, 132, 199))
                         } else if is_pointer_arrow_anim(a) {
                             ("PANAH 3D", egui::Color32::from_rgb(180, 83, 9))
                         } else {
@@ -5549,6 +5561,8 @@ fn draw_ordered_animation_list(
                             )
                         } else if twg_shared::model_action_anim::is_model_action_anim(a) {
                             super::model_action_anim::anim_summary(state, a)
+                        } else if twg_shared::dialog_anim::is_dialog_anim(a) {
+                            super::dialog_anim::anim_summary(state, a)
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a

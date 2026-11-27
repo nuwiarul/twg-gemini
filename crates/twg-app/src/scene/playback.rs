@@ -132,6 +132,7 @@ pub fn playback_system(
                 | ToolMode::PickSpawnHideMarker
                 | ToolMode::PickCameraFollowMarker
                 | ToolMode::PickModelActionMarker
+                | ToolMode::PickDialogSpeaker
                 | ToolMode::PlaceParticle
                 | ToolMode::DrawWaterPolygon
                 | ToolMode::PlaceRainZone
@@ -200,6 +201,7 @@ pub fn playback_system(
     advance_group_animations(&state.anims, &mut playback, step_dt);
 
     // Phase B: Tick all leaf animations (Spawn/Hide, Particle, Pointer, Shoot, Route)
+    let mut dialog_status_updates: Vec<(Uuid, Option<String>)> = Vec::new();
     for anim in &state.anims {
         // Audio, Billboard video, and Camera animations manage their own playback loops.
         if twg_shared::audio_anim::is_audio_anim(anim)
@@ -388,6 +390,63 @@ pub fn playback_system(
             continue;
         }
 
+        // 3D Speech Bubble Dialog animations (`dialog`) advance elapsed seconds in `track.distance_m`
+        // without overriding marker movement — so speaking units can talk even while walking on a Route!
+        if twg_shared::dialog_anim::is_dialog_anim(anim) {
+            let cfg = twg_shared::dialog_anim::parse_dialog_anim_config(anim);
+            let total_dur = cfg.total_duration_sec(anim.replay);
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = total_dur;
+
+            if track.status == AnimRunStatus::Playing {
+                if total_dur <= 1e-4 || cfg.playable_lines().is_empty() {
+                    track.status = AnimRunStatus::Stopped;
+                    track.trigger_seq = 0;
+                    dialog_status_updates.push((anim.id, None));
+                } else {
+                    track.distance_m += step_dt;
+                    if track.distance_m >= total_dur {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= total_dur.max(0.1);
+                        } else {
+                            track.distance_m = total_dur;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                    if let Some(sample) = cfg.evaluate_at(track.distance_m) {
+                        let speaker = if !sample.speaker_override.is_empty() {
+                            sample.speaker_override
+                        } else {
+                            state
+                                .markers
+                                .iter()
+                                .find(|m| m.id == sample.marker_id)
+                                .map(|m| m.name.clone())
+                                .unwrap_or_else(|| "Pembicara".into())
+                        };
+                        dialog_status_updates.push((
+                            anim.id,
+                            Some(format!(
+                                "Baris {}/{} · {speaker}",
+                                sample.line_index + 1,
+                                sample.total_lines
+                            )),
+                        ));
+                    } else if track.status == AnimRunStatus::Finished {
+                        dialog_status_updates.push((anim.id, Some("Dialog selesai".into())));
+                    } else if track.distance_m < cfg.delay_sec {
+                        dialog_status_updates.push((anim.id, Some("Jeda awal...".into())));
+                    } else {
+                        dialog_status_updates.push((anim.id, Some("Jeda antar dialog...".into())));
+                    }
+                }
+            } else if track.status == AnimRunStatus::Stopped {
+                dialog_status_updates.push((anim.id, None));
+            }
+            continue;
+        }
+
         // Pointer Arrow highlight animations advance elapsed time in `track.distance_m` without
         // overriding marker position — so a highlighted unit can simultaneously follow a Route!
         if is_pointer_arrow_anim(anim) {
@@ -502,6 +561,16 @@ pub fn playback_system(
                 if replace {
                     overrides.markers.insert(marker_id, pose);
                 }
+            }
+        }
+    }
+    for (aid, status_opt) in dialog_status_updates {
+        match status_opt {
+            Some(msg) => {
+                state.dialog_status.insert(aid, msg);
+            }
+            None => {
+                state.dialog_status.remove(&aid);
             }
         }
     }

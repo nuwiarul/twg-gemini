@@ -706,6 +706,33 @@ pub fn draw_play_animation_panel(
                             }
                             continue;
                         }
+                        if twg_shared::dialog_anim::is_dialog_anim(anim) {
+                            use super::dialog_anim::DialogPlayAction;
+                            match super::dialog_anim::draw_play_card(
+                                ui,
+                                state,
+                                playback,
+                                anim,
+                                *global_idx,
+                                true,
+                            ) {
+                                Some(DialogPlayAction::Play) => action_play = Some(anim.id),
+                                Some(DialogPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(DialogPlayAction::Resume) => action_resume = Some(anim.id),
+                                Some(DialogPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(DialogPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        fly_to = Some((lng, lat));
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
                         if twg_shared::model_action_anim::is_model_action_anim(anim) {
                             use super::model_action_anim::ModelActionPlayAction;
                             match super::model_action_anim::draw_play_card(
@@ -2744,6 +2771,19 @@ fn anim_matches_play_search(
         haystack.push_str(&cfg.action_slug);
         haystack.push(' ');
         haystack.push_str(cfg.play_mode.label());
+    } else if twg_shared::dialog_anim::is_dialog_anim(anim) {
+        let cfg = twg_shared::dialog_anim::parse_dialog_anim_config(anim);
+        haystack.push_str(" dialog bicara percakapan bubble teks ");
+        for line in &cfg.lines {
+            if !line.speaker_override.is_empty() {
+                haystack.push(' ');
+                haystack.push_str(&line.speaker_override);
+            }
+            if !line.text.is_empty() {
+                haystack.push(' ');
+                haystack.push_str(&line.text);
+            }
+        }
     } else if twg_shared::billboard_anim::is_billboard_anim(anim) {
         haystack.push_str(" billboard videotron layar video gambar media ");
         let cfg = twg_shared::billboard_anim::parse_billboard_anim_config(anim);
