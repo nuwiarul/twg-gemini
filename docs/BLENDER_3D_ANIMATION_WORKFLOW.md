@@ -29,7 +29,7 @@ Pada aplikasi lama (Web / MapTalks), prosesnya cukup panjang karena keterbatasan
    - **Skin**: **`With Skin`** *(wajib untuk setiap file agar tekstur, mesh, dan skeleton konsisten)*
    - **Frames per Second**: `30`
    - **Keyframe Reduction**: `none`
-   - **In Place**: **CENTANG (`ON`)** khusus untuk animasi jalan (`Walk`) agar karakter berjalan di tempat (perpindahan posisi dikendalikan oleh sistem Rute TWG).
+   - **In Place**: **CENTANG (`ON`)** khusus untuk animasi jalan (`Walk`) dan animasi lari (`Run` / `Lari`) agar karakter bergerak di tempat (perpindahan posisi dikendalikan oleh sistem Rute TWG).
    - Untuk animasi aksi di tempat seperti *Melambai*, *Menembak*, *Pingsan*, *Hormat*: biarkan posisi karakter tetap di sekitar titik origin `(0, 0, 0)`.
 
 Contoh hasil download dari Mixamo:

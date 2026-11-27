@@ -1960,8 +1960,13 @@ pub fn draw_play_animation_panel(
                                         }
                                     }
                                 } else {
+                                    let move_tag =
+                                        twg_shared::route_formation::parse_route_move_anim_config(anim)
+                                            .badge_label()
+                                            .map(|b| format!("  •  {b}"))
+                                            .unwrap_or_default();
                                     format!(
-                                        "Speed: {:.1} m/s  •  Jarak: {:.1} / {:.1} m  •  Repeat: {}",
+                                        "Speed: {:.1} m/s{move_tag}  •  Jarak: {:.1} / {:.1} m  •  Repeat: {}",
                                         anim.speed,
                                         dist_m,
                                         total_m,

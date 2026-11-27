@@ -1022,6 +1022,7 @@ pub fn play_rts_movement_system(
                     altitude: alt,
                     rot_y: m.rot_y,
                     moving: false,
+                    move_anim: Default::default(),
                 },
             );
         }
@@ -1215,6 +1216,7 @@ pub fn play_rts_movement_system(
                 altitude: order.altitude,
                 rot_y: order.rot_y,
                 moving: order.moving,
+                move_anim: Default::default(),
             },
         );
     }

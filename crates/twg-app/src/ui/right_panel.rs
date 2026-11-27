@@ -3862,6 +3862,160 @@ fn draw_anim_inspector(
             });
             ui.add_space(3.0);
             ui.checkbox(&mut a.replay, "Repeat / Ulangi dari Awal");
+            ui.add_space(6.0);
+
+            // Locomotion / Move Animation (Walk default, Auto Run/Lari, or Custom Action Clip)
+            {
+                use twg_shared::route_formation::{
+                    RouteMoveAnimMode, parse_route_move_anim_config,
+                    resolve_route_move_action_slug, write_route_move_anim_config,
+                };
+                let mut mcfg = parse_route_move_anim_config(&a);
+                let orig_mcfg = mcfg.clone();
+
+                ui.label(
+                    egui::RichText::new("Gaya Gerak Saat Melaju (Walk / Lari):")
+                        .size(11.0)
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+                egui::ComboBox::from_id_salt(("route_move_anim_mode", a.id))
+                    .selected_text(mcfg.mode.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for &mode in RouteMoveAnimMode::ALL {
+                            ui.selectable_value(&mut mcfg.mode, mode, mode.label());
+                        }
+                    });
+
+                // Collect bound markers and their available extra_animations from catalog
+                let bound_ids = anim_bound_marker_ids(&a);
+                let mut clip_options: Vec<(String, String, usize)> = Vec::new();
+                for &mid in &bound_ids {
+                    if let Some(m) = state.markers.iter().find(|x| x.id == mid)
+                        && let Some(cat) = state.catalog.iter().find(|c| c.model_path == m.model_path)
+                    {
+                        for act in &cat.extra_animations {
+                            if let Some(ex) = clip_options.iter_mut().find(|(s, _, _)| s == &act.slug) {
+                                ex.2 += 1;
+                            } else {
+                                clip_options.push((act.slug.clone(), act.name.clone(), 1));
+                            }
+                        }
+                    }
+                }
+
+                if mcfg.mode == RouteMoveAnimMode::ActionClip {
+                    ui.add_space(3.0);
+                    if clip_options.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Belum ada klip aksi tambahan pada unit rute ini. Upload di Assets -> 3D Models -> + Tambah Aksi.",
+                            )
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(253, 230, 138)),
+                        );
+                    } else {
+                        if mcfg.action_slug.is_empty() {
+                            mcfg.action_slug = clip_options[0].0.clone();
+                        }
+                        let sel_lbl = clip_options
+                            .iter()
+                            .find(|(s, _, _)| s == &mcfg.action_slug)
+                            .map(|(_, n, cnt)| {
+                                if bound_ids.len() > 1 {
+                                    format!("{n} ({cnt}/{} unit)", bound_ids.len())
+                                } else {
+                                    n.clone()
+                                }
+                            })
+                            .unwrap_or_else(|| mcfg.action_slug.clone());
+                        egui::ComboBox::from_id_salt(("route_move_anim_clip", a.id))
+                            .selected_text(sel_lbl)
+                            .width(ui.available_width())
+                            .show_ui(ui, |ui| {
+                                for (slug, name, cnt) in &clip_options {
+                                    let lbl = if bound_ids.len() > 1 {
+                                        format!("{name} ({cnt}/{} unit)", bound_ids.len())
+                                    } else {
+                                        name.clone()
+                                    };
+                                    ui.selectable_value(&mut mcfg.action_slug, slug.clone(), lbl);
+                                }
+                            });
+                    }
+                }
+
+                // Live coverage hint for RunAuto / ActionClip / Per-unit overrides
+                if (mcfg.mode != RouteMoveAnimMode::Walk || !mcfg.per_marker_overrides.is_empty())
+                    && !bound_ids.is_empty()
+                {
+                    let mut matched = 0usize;
+                    for &mid in &bound_ids {
+                        let eff = mcfg.effective_for_marker(mid);
+                        if let Some(m) = state.markers.iter().find(|x| x.id == mid)
+                            && let Some(cat) =
+                                state.catalog.iter().find(|c| c.model_path == m.model_path)
+                            && resolve_route_move_action_slug(&eff, &cat.extra_animations)
+                                .is_some()
+                        {
+                            matched += 1;
+                        }
+                    }
+                    let (hint_txt, hint_col) = if matched == 0 {
+                        (
+                            "Belum ada unit dengan klip Lari/Aksi cocok — fallback ke Walk (upload klip 'Lari' di Assets -> 3D Models).".to_string(),
+                            egui::Color32::from_rgb(253, 230, 138),
+                        )
+                    } else if matched == bound_ids.len() {
+                        (
+                            format!(
+                                "Siap: {matched}/{} unit memakai klip gerak ({}).",
+                                bound_ids.len(),
+                                mcfg.badge_label().unwrap_or_else(|| "Klip".into())
+                            ),
+                            egui::Color32::from_rgb(110, 231, 183),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "{matched}/{} unit memakai klip gerak, {} unit lainnya pakai Walk.",
+                                bound_ids.len(),
+                                bound_ids.len() - matched
+                            ),
+                            egui::Color32::from_rgb(125, 211, 252),
+                        )
+                    };
+                    ui.label(egui::RichText::new(hint_txt).size(9.8).color(hint_col));
+                }
+
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Kecepatan Klip:")
+                            .size(10.5)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    numeric_spinner_w(
+                        ui,
+                        ("route_move_anim_speed", a.id),
+                        &mut mcfg.anim_speed,
+                        82.0,
+                        SpinnerConfig {
+                            min: 0.25,
+                            max: 3.0,
+                            step: 0.1,
+                            drag_speed: 0.05,
+                            decimals: 2,
+                            suffix: "×",
+                            wrap_around: false,
+                        },
+                    );
+                });
+
+                if mcfg != orig_mcfg {
+                    write_route_move_anim_config(&mut a, &mcfg);
+                }
+            }
             ui.add_space(3.0);
             let order_pos = state
                 .anims
@@ -4010,11 +4164,35 @@ fn draw_anim_inspector(
                     let mut move_action: Option<(Uuid, bool)> = None;
                     let mut remove_mid: Option<Uuid> = None;
                     let mut role_update: Option<(Uuid, PatwalUnitRole)> = None;
+                    let mut unit_move_override_update: Option<(
+                        Uuid,
+                        twg_shared::route_formation::RouteUnitMoveOverride,
+                    )> = None;
+                    let mut route_move_cfg =
+                        twg_shared::route_formation::parse_route_move_anim_config(&a);
                     let unit_cnt = cfg.marker_ids.len();
                     let ids_snapshot = cfg.marker_ids.clone();
+                    let has_any_anim_units = ids_snapshot.iter().any(|mid| {
+                        state
+                            .markers
+                            .iter()
+                            .find(|m| m.id == *mid)
+                            .and_then(|m| {
+                                state.catalog.iter().find(|c| c.model_path == m.model_path)
+                            })
+                            .is_some_and(|c| {
+                                !c.extra_animations.is_empty()
+                                    || c.model_type
+                                        == twg_shared::models::ModelAssetType::Animated
+                            })
+                    });
                     egui::ScrollArea::vertical()
                         .id_salt(("multi_route_units_list", a.id))
-                        .max_height(if is_patwal_formation { 185.0 } else { 135.0 })
+                        .max_height(if is_patwal_formation || has_any_anim_units {
+                            235.0
+                        } else {
+                            135.0
+                        })
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (idx, mid) in ids_snapshot.iter().enumerate() {
@@ -4151,11 +4329,157 @@ fn draw_anim_inspector(
                                     });
                                     ui.add_space(2.0);
                                 }
+                                // Per-unit locomotion override (shown for every Animated unit or any unit with extra_animations / override)
+                                {
+                                    use twg_shared::route_formation::{
+                                        RouteUnitMoveOverride, resolve_route_move_action_slug,
+                                    };
+                                    let cat_opt = state
+                                        .markers
+                                        .iter()
+                                        .find(|m| m.id == *mid)
+                                        .and_then(|m| {
+                                            state
+                                                .catalog
+                                                .iter()
+                                                .find(|c| c.model_path == m.model_path)
+                                        });
+                                    let is_animated_unit = cat_opt.is_some_and(|c| {
+                                        c.model_type
+                                            == twg_shared::models::ModelAssetType::Animated
+                                    });
+                                    let unit_clips: Vec<(String, String)> = cat_opt
+                                        .map(|cat| {
+                                            cat.extra_animations
+                                                .iter()
+                                                .map(|act| (act.slug.clone(), act.name.clone()))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let cur_ov = route_move_cfg.marker_override(*mid);
+                                    if is_animated_unit
+                                        || !unit_clips.is_empty()
+                                        || cur_ov != RouteUnitMoveOverride::Inherit
+                                    {
+                                        // Show what "Ikut Rute" actually resolves to for this unit
+                                        let inherited_desc = cat_opt
+                                            .and_then(|cat| {
+                                                let base_only =
+                                                    twg_shared::route_formation::RouteMoveAnimConfig {
+                                                        mode: route_move_cfg.mode,
+                                                        action_slug: route_move_cfg
+                                                            .action_slug
+                                                            .clone(),
+                                                        anim_speed: route_move_cfg.anim_speed,
+                                                        per_marker_overrides: Default::default(),
+                                                    };
+                                                let slug = resolve_route_move_action_slug(
+                                                    &base_only,
+                                                    &cat.extra_animations,
+                                                )?;
+                                                cat.extra_animations
+                                                    .iter()
+                                                    .find(|a| a.slug == slug)
+                                                    .map(|a| a.name.clone())
+                                            })
+                                            .unwrap_or_else(|| "Walk".to_string());
+                                        let inherit_lbl = format!("Ikut Rute ({inherited_desc})");
+
+                                        let (sel_txt, sel_col) = match &cur_ov {
+                                            RouteUnitMoveOverride::Inherit => (
+                                                inherit_lbl.clone(),
+                                                egui::Color32::from_rgb(148, 163, 184),
+                                            ),
+                                            RouteUnitMoveOverride::Walk => (
+                                                "Walk (Paksa Jalan)".to_string(),
+                                                egui::Color32::from_rgb(125, 211, 252),
+                                            ),
+                                            RouteUnitMoveOverride::ActionClip { slug } => {
+                                                let cname = unit_clips
+                                                    .iter()
+                                                    .find(|(s, _)| s == slug)
+                                                    .map(|(_, n)| n.clone())
+                                                    .unwrap_or_else(|| slug.clone());
+                                                (
+                                                    format!("Klip: {cname}"),
+                                                    egui::Color32::from_rgb(251, 191, 36),
+                                                )
+                                            }
+                                        };
+
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(12.0);
+                                            ui.label(
+                                                egui::RichText::new("Gerak:")
+                                                    .size(9.5)
+                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                            let mut chosen_ov = cur_ov.clone();
+                                            egui::ComboBox::from_id_salt((
+                                                "multi_unit_move_ov",
+                                                a.id,
+                                                *mid,
+                                            ))
+                                            .selected_text(
+                                                egui::RichText::new(sel_txt)
+                                                    .size(9.5)
+                                                    .color(sel_col),
+                                            )
+                                            .width((ui.available_width() - 18.0).max(110.0))
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut chosen_ov,
+                                                    RouteUnitMoveOverride::Inherit,
+                                                    &inherit_lbl,
+                                                );
+                                                ui.selectable_value(
+                                                    &mut chosen_ov,
+                                                    RouteUnitMoveOverride::Walk,
+                                                    "Walk (Paksa Jalan)",
+                                                );
+                                                if unit_clips.is_empty() {
+                                                    ui.separator();
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "Belum ada klip tambahan (upload di Assets -> 3D Models -> + Tambah Aksi)",
+                                                        )
+                                                        .size(9.5)
+                                                        .color(egui::Color32::from_rgb(
+                                                            253, 230, 138,
+                                                        )),
+                                                    );
+                                                } else {
+                                                    for (slug, name) in &unit_clips {
+                                                        ui.selectable_value(
+                                                            &mut chosen_ov,
+                                                            RouteUnitMoveOverride::ActionClip {
+                                                                slug: slug.clone(),
+                                                            },
+                                                            format!("Klip: {name}"),
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                            if chosen_ov != cur_ov {
+                                                unit_move_override_update =
+                                                    Some((*mid, chosen_ov));
+                                            }
+                                        });
+                                        ui.add_space(2.0);
+                                    }
+                                }
                             }
                         });
                     if let Some((mid, role)) = role_update {
                         cfg.set_patwal_role(mid, role);
                         cfg_changed = true;
+                    }
+                    if let Some((mid, ov)) = unit_move_override_update {
+                        route_move_cfg.set_marker_override(mid, ov);
+                        twg_shared::route_formation::write_route_move_anim_config(
+                            &mut a,
+                            &route_move_cfg,
+                        );
                     }
                     if let Some((mid, up)) = move_action
                         && cfg.move_marker_order(mid, up)
@@ -4164,6 +4488,12 @@ fn draw_anim_inspector(
                     }
                     if let Some(mid) = remove_mid {
                         cfg.toggle_marker(mid);
+                        if route_move_cfg.per_marker_overrides.remove(&mid).is_some() {
+                            twg_shared::route_formation::write_route_move_anim_config(
+                                &mut a,
+                                &route_move_cfg,
+                            );
+                        }
                         cfg_changed = true;
                     }
                 }

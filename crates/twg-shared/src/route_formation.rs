@@ -5,11 +5,260 @@ use uuid::Uuid;
 
 use crate::{
     geo::GeoAnchor,
-    models::{Anim, Marker},
+    models::{Anim, Marker, ModelCatalogActionClip},
 };
 
 pub const ANIM_TYPE_ROUTE_SINGLE: &str = "route";
 pub const ANIM_TYPE_ROUTE_MULTI: &str = "route_multi";
+
+/// Locomotion animation clip mode while unit(s) move along a Single or Multi-Unit Route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteMoveAnimMode {
+    /// Standard `*_walk.glb` / default Walk clip (backward-compatible default).
+    #[default]
+    Walk,
+    /// Automatically selects any uploaded action clip named `lari` / `run` / `sprint` / `jog`
+    /// on each unit (units without a Run clip gracefully fall back to `Walk`).
+    RunAuto,
+    /// Uses a specific uploaded action clip slug (units without that clip fall back to `Walk`).
+    ActionClip,
+}
+
+impl RouteMoveAnimMode {
+    pub const ALL: &'static [Self] = &[Self::Walk, Self::RunAuto, Self::ActionClip];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Walk => "Walk / Jalan (Default)",
+            Self::RunAuto => "Lari / Run (Otomatis)",
+            Self::ActionClip => "Klip Aksi Khusus...",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Walk => "Jalan",
+            Self::RunAuto => "Lari",
+            Self::ActionClip => "Klip Khusus",
+        }
+    }
+}
+
+/// Optional per-unit locomotion override inside a Multi-Route / Formation.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteUnitMoveOverride {
+    /// Follow the route's default locomotion mode (`Walk` / `RunAuto` / `ActionClip`).
+    #[default]
+    Inherit,
+    /// Force this specific unit to use its standard `Walk` clip.
+    Walk,
+    /// Force this specific unit to use one of its uploaded `extra_animations` clips.
+    ActionClip { slug: String },
+}
+
+/// Optional locomotion animation settings stored under `anim.data["route_move_anim"]`
+/// for both Single Route and Multi-Route / Formation animations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteMoveAnimConfig {
+    #[serde(default)]
+    pub mode: RouteMoveAnimMode,
+    /// Used when `mode == RouteMoveAnimMode::ActionClip`.
+    #[serde(default)]
+    pub action_slug: String,
+    /// Clip playback speed multiplier while moving (`0.25..=3.0`, default `1.0`).
+    #[serde(default = "default_route_move_anim_speed")]
+    pub anim_speed: f64,
+    /// Optional per-marker overrides in Multi-Route / Formation animations.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub per_marker_overrides: std::collections::HashMap<Uuid, RouteUnitMoveOverride>,
+}
+
+fn default_route_move_anim_speed() -> f64 {
+    1.0
+}
+
+impl Default for RouteMoveAnimConfig {
+    fn default() -> Self {
+        Self {
+            mode: RouteMoveAnimMode::Walk,
+            action_slug: String::new(),
+            anim_speed: 1.0,
+            per_marker_overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl RouteMoveAnimConfig {
+    pub fn sanitized(mut self) -> Self {
+        self.action_slug = self.action_slug.trim().to_string();
+        if !self.anim_speed.is_finite() {
+            self.anim_speed = 1.0;
+        }
+        self.anim_speed = self.anim_speed.clamp(0.25, 3.0);
+        self.per_marker_overrides.retain(|_, ov| match ov {
+            RouteUnitMoveOverride::Inherit => false,
+            RouteUnitMoveOverride::Walk => true,
+            RouteUnitMoveOverride::ActionClip { slug } => {
+                *slug = slug.trim().to_string();
+                !slug.is_empty()
+            }
+        });
+        self
+    }
+
+    pub fn marker_override(&self, marker_id: Uuid) -> RouteUnitMoveOverride {
+        self.per_marker_overrides
+            .get(&marker_id)
+            .cloned()
+            .unwrap_or(RouteUnitMoveOverride::Inherit)
+    }
+
+    pub fn set_marker_override(&mut self, marker_id: Uuid, ov: RouteUnitMoveOverride) {
+        match ov {
+            RouteUnitMoveOverride::Inherit => {
+                self.per_marker_overrides.remove(&marker_id);
+            }
+            RouteUnitMoveOverride::Walk => {
+                self.per_marker_overrides
+                    .insert(marker_id, RouteUnitMoveOverride::Walk);
+            }
+            RouteUnitMoveOverride::ActionClip { slug } => {
+                let s = slug.trim().to_string();
+                if s.is_empty() {
+                    self.per_marker_overrides.remove(&marker_id);
+                } else {
+                    self.per_marker_overrides
+                        .insert(marker_id, RouteUnitMoveOverride::ActionClip { slug: s });
+                }
+            }
+        }
+    }
+
+    /// Resolves the effective single-unit locomotion config for `marker_id`, applying any
+    /// per-marker override on top of the route default.
+    pub fn effective_for_marker(&self, marker_id: Uuid) -> Self {
+        match self.per_marker_overrides.get(&marker_id) {
+            Some(RouteUnitMoveOverride::Walk) => Self {
+                mode: RouteMoveAnimMode::Walk,
+                action_slug: String::new(),
+                anim_speed: self.anim_speed,
+                per_marker_overrides: std::collections::HashMap::new(),
+            },
+            Some(RouteUnitMoveOverride::ActionClip { slug }) if !slug.trim().is_empty() => Self {
+                mode: RouteMoveAnimMode::ActionClip,
+                action_slug: slug.trim().to_string(),
+                anim_speed: self.anim_speed,
+                per_marker_overrides: std::collections::HashMap::new(),
+            },
+            _ => Self {
+                mode: self.mode,
+                action_slug: self.action_slug.clone(),
+                anim_speed: self.anim_speed,
+                per_marker_overrides: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    pub fn badge_label(&self) -> Option<String> {
+        let base = match self.mode {
+            RouteMoveAnimMode::Walk => None,
+            RouteMoveAnimMode::RunAuto => Some("Lari".to_string()),
+            RouteMoveAnimMode::ActionClip => {
+                if self.action_slug.is_empty() {
+                    None
+                } else {
+                    Some(format!("Aksi: {}", self.action_slug))
+                }
+            }
+        };
+        if !self.per_marker_overrides.is_empty() {
+            match base {
+                Some(b) => Some(format!("{b} (+{} kustom)", self.per_marker_overrides.len())),
+                None => Some(format!("{} Unit Khusus", self.per_marker_overrides.len())),
+            }
+        } else {
+            base
+        }
+    }
+}
+
+pub fn parse_route_move_anim_config(anim: &Anim) -> RouteMoveAnimConfig {
+    anim.data
+        .get("route_move_anim")
+        .and_then(|v| serde_json::from_value::<RouteMoveAnimConfig>(v.clone()).ok())
+        .map(RouteMoveAnimConfig::sanitized)
+        .unwrap_or_default()
+}
+
+pub fn write_route_move_anim_config(anim: &mut Anim, cfg: &RouteMoveAnimConfig) {
+    let clean = cfg.clone().sanitized();
+    if !anim.data.is_object() {
+        anim.data = serde_json::json!({});
+    }
+    if let Some(obj) = anim.data.as_object_mut() {
+        if clean.mode == RouteMoveAnimMode::Walk
+            && (clean.anim_speed - 1.0).abs() < 1e-4
+            && clean.per_marker_overrides.is_empty()
+        {
+            obj.remove("route_move_anim");
+        } else if let Ok(v) = serde_json::to_value(&clean) {
+            obj.insert("route_move_anim".to_string(), v);
+        }
+    }
+}
+
+/// Resolves which `extra_animations` slug (if any) a unit should play while moving on a Route.
+/// Returns `None` when the unit should use its standard `Walk` animation (either because
+/// `mode == Walk`, or because this unit does not own a matching Run/Action clip and falls back).
+pub fn resolve_route_move_action_slug(
+    cfg: &RouteMoveAnimConfig,
+    extra_animations: &[ModelCatalogActionClip],
+) -> Option<String> {
+    match cfg.mode {
+        RouteMoveAnimMode::Walk => None,
+        RouteMoveAnimMode::RunAuto => {
+            // Priority 1: exact slug/name match for `lari` or `run`
+            for act in extra_animations {
+                let s = act.slug.to_lowercase();
+                let n = act.name.to_lowercase();
+                if matches!(s.as_str(), "lari" | "run" | "running" | "sprint")
+                    || matches!(n.as_str(), "lari" | "run" | "running" | "sprint")
+                {
+                    return Some(act.slug.clone());
+                }
+            }
+            // Priority 2: substring match (`lari`, `run`, `sprint`, `jog`)
+            for act in extra_animations {
+                let s = act.slug.to_lowercase();
+                let n = act.name.to_lowercase();
+                if s.contains("lari")
+                    || n.contains("lari")
+                    || s.contains("run")
+                    || n.contains("run")
+                    || s.contains("sprint")
+                    || n.contains("sprint")
+                    || s.contains("jog")
+                    || n.contains("jog")
+                {
+                    return Some(act.slug.clone());
+                }
+            }
+            None
+        }
+        RouteMoveAnimMode::ActionClip => {
+            let needle = cfg.action_slug.trim().to_lowercase();
+            if needle.is_empty() {
+                return None;
+            }
+            extra_animations
+                .iter()
+                .find(|a| a.slug.to_lowercase() == needle || a.name.to_lowercase() == needle)
+                .map(|a| a.slug.clone())
+        }
+    }
+}
 
 /// Tactical formation presets supported by `Rute Unit Multiple`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1485,5 +1734,100 @@ mod tests {
             assert_eq!(a.0, b.0);
             assert!((a.1 - b.1).abs() < 0.06 && (a.2 - b.2).abs() < 0.06);
         }
+    }
+
+    #[test]
+    fn route_move_anim_config_roundtrips_and_resolves_run_auto_with_fallback() {
+        let now = chrono::Utc::now();
+        let mut anim = Anim {
+            id: Uuid::new_v4(),
+            operasi_id: Uuid::new_v4(),
+            skenario_id: Uuid::new_v4(),
+            marker_id: Some(Uuid::new_v4()),
+            name: "Rute Lari 1".into(),
+            anim_type: ANIM_TYPE_ROUTE_SINGLE.into(),
+            sort_order: 1,
+            speed: 5.0,
+            duration_sec: 10.0,
+            replay: false,
+            autoplay: false,
+            geom: vec![[106.8, -6.2, 0.0], [106.81, -6.2, 0.0]],
+            data: serde_json::json!({"existing_key": 42}),
+            created_at: now,
+            updated_at: now,
+        };
+
+        // Default is Walk
+        let def = parse_route_move_anim_config(&anim);
+        assert_eq!(def.mode, RouteMoveAnimMode::Walk);
+        assert_eq!(def.anim_speed, 1.0);
+
+        // Write RunAuto and verify existing data key is preserved
+        let mut run_cfg = RouteMoveAnimConfig {
+            mode: RouteMoveAnimMode::RunAuto,
+            action_slug: String::new(),
+            anim_speed: 1.35,
+            per_marker_overrides: std::collections::HashMap::new(),
+        };
+        let u_walk = Uuid::new_v4();
+        let u_custom = Uuid::new_v4();
+        let u_inherit = Uuid::new_v4();
+        run_cfg.set_marker_override(u_walk, RouteUnitMoveOverride::Walk);
+        run_cfg.set_marker_override(
+            u_custom,
+            RouteUnitMoveOverride::ActionClip {
+                slug: "melambai".into(),
+            },
+        );
+        write_route_move_anim_config(&mut anim, &run_cfg);
+        assert_eq!(anim.data["existing_key"], 42);
+        let parsed = parse_route_move_anim_config(&anim);
+        assert_eq!(parsed, run_cfg);
+
+        // RunAuto resolves `lari` / `run` clips and falls back to None when absent
+        let clips = vec![
+            ModelCatalogActionClip {
+                slug: "melambai".into(),
+                name: "Melambai".into(),
+                model_path: "models/units/u_act_melambai.glb".into(),
+                lod2_path: None,
+                clip_names: vec![],
+            },
+            ModelCatalogActionClip {
+                slug: "lari_cepat".into(),
+                name: "Lari Cepat".into(),
+                model_path: "models/units/u_act_lari_cepat.glb".into(),
+                lod2_path: None,
+                clip_names: vec![],
+            },
+        ];
+        assert_eq!(
+            resolve_route_move_action_slug(&parsed.effective_for_marker(u_inherit), &clips)
+                .as_deref(),
+            Some("lari_cepat")
+        );
+        assert_eq!(
+            resolve_route_move_action_slug(&parsed.effective_for_marker(u_walk), &clips),
+            None
+        );
+        assert_eq!(
+            resolve_route_move_action_slug(&parsed.effective_for_marker(u_custom), &clips)
+                .as_deref(),
+            Some("melambai")
+        );
+        assert_eq!(resolve_route_move_action_slug(&run_cfg, &clips[..1]), None);
+
+        // ActionClip mode matches explicit slug and falls back to None if missing
+        let explicit = RouteMoveAnimConfig {
+            mode: RouteMoveAnimMode::ActionClip,
+            action_slug: "melambai".into(),
+            anim_speed: 1.0,
+            per_marker_overrides: std::collections::HashMap::new(),
+        };
+        assert_eq!(
+            resolve_route_move_action_slug(&explicit, &clips).as_deref(),
+            Some("melambai")
+        );
+        assert_eq!(resolve_route_move_action_slug(&explicit, &[]), None);
     }
 }

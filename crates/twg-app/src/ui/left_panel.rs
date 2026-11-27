@@ -5622,9 +5622,13 @@ fn draw_ordered_animation_list(
                             }
                         } else if is_multi {
                             let cfg = parse_multi_route_config(a);
+                            let move_tag = twg_shared::route_formation::parse_route_move_anim_config(a)
+                                .badge_label()
+                                .map(|b| format!("  •  {b}"))
+                                .unwrap_or_default();
                             if has_units {
                                 format!(
-                                    "{} ({} unit)  •  {len_m:.0}m  •  {:.1} m/s{}",
+                                    "{} ({} unit)  •  {len_m:.0}m  •  {:.1} m/s{move_tag}{}",
                                     cfg.formation.short_label(),
                                     bound_ids.len(),
                                     a.speed,
@@ -5637,13 +5641,17 @@ fn draw_ordered_animation_list(
                                 )
                             }
                         } else {
+                            let move_tag = twg_shared::route_formation::parse_route_move_anim_config(a)
+                                .badge_label()
+                                .map(|b| format!("  •  {b}"))
+                                .unwrap_or_default();
                             let unit_name = a
                                 .marker_id
                                 .and_then(|mid| state.markers.iter().find(|m| m.id == mid))
                                 .map(|m| m.name.clone());
                             match &unit_name {
                                 Some(u) => format!(
-                                    "Unit: {u}  •  {len_m:.0}m  •  {:.1} m/s{}",
+                                    "Unit: {u}  •  {len_m:.0}m  •  {:.1} m/s{move_tag}{}",
                                     a.speed,
                                     if a.replay { "  •  Repeat" } else { "" }
                                 ),

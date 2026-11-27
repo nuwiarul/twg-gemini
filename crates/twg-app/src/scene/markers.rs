@@ -172,6 +172,7 @@ pub struct TacticalMarkerEntity {
     pub action_slots: HashMap<String, ActionSubtreeSlot>,
     pub embedded_action_graphs: HashMap<String, (Handle<AnimationGraph>, AnimationNodeIndex)>,
     pub active_action_key: Option<String>,
+    pub route_move_anim: twg_shared::route_formation::RouteMoveAnimConfig,
     pub is_walking_now: bool,
     pub basic_mesh_child: Option<Entity>,
     pub basic_geom_sig: u64,
@@ -1164,8 +1165,14 @@ pub fn sync_markers_system(
         }
 
         let (lng, lat, base_alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
+            comp.route_move_anim = if ov.moving {
+                ov.move_anim.clone()
+            } else {
+                Default::default()
+            };
             (ov.lng, ov.lat, ov.altitude, ov.rot_y)
         } else {
+            comp.route_move_anim = Default::default();
             (marker.lng, marker.lat, marker.altitude, marker.rot_y)
         };
         let vis_ov = overrides.visibility.get(&marker.id).copied();
@@ -1207,11 +1214,23 @@ pub fn sync_markers_system(
         let is_moving = *is_moving;
         let render_path = marker.model_path.clone();
 
-        let (lng, lat, base_alt, rot_y) = if let Some(ov) = overrides.markers.get(&marker.id) {
-            (ov.lng, ov.lat, ov.altitude, ov.rot_y)
-        } else {
-            (marker.lng, marker.lat, marker.altitude, marker.rot_y)
-        };
+        let (lng, lat, base_alt, rot_y, route_move_anim) =
+            if let Some(ov) = overrides.markers.get(&marker.id) {
+                let ma = if ov.moving {
+                    ov.move_anim.clone()
+                } else {
+                    Default::default()
+                };
+                (ov.lng, ov.lat, ov.altitude, ov.rot_y, ma)
+            } else {
+                (
+                    marker.lng,
+                    marker.lat,
+                    marker.altitude,
+                    marker.rot_y,
+                    Default::default(),
+                )
+            };
         let vis_ov = overrides.visibility.get(&marker.id).copied();
         let is_visible = vis_ov.map(|v| v.visible).unwrap_or(marker.is_spawn);
         let scale_mult = vis_ov
@@ -1279,6 +1298,7 @@ pub fn sync_markers_system(
                         action_slots: HashMap::new(),
                         embedded_action_graphs: HashMap::new(),
                         active_action_key: None,
+                        route_move_anim,
                         is_walking_now: is_moving,
                         basic_mesh_child: Some(child_id),
                         basic_geom_sig: geom_sig,
@@ -1360,6 +1380,7 @@ pub fn sync_markers_system(
                     action_slots: HashMap::new(),
                     embedded_action_graphs: HashMap::new(),
                     active_action_key: None,
+                    route_move_anim,
                     is_walking_now: is_moving,
                     basic_mesh_child: None,
                     basic_geom_sig: 0,
@@ -1976,6 +1997,145 @@ pub fn animate_markers_system(
             comp.active_action_key = None;
         }
 
+        // Route Locomotion Override (e.g. Run / Lari or custom move clip on Single/Multi Route):
+        // When the unit is actively moving along a Route whose `route_move_anim` resolves to an
+        // uploaded action clip on this model, lazily spawn + auto-calibrate + loop that clip
+        // instead of Walk. Units without a matching clip gracefully fall back to Walk!
+        if !action_applied
+            && playback_active
+            && comp.is_walking_now
+            && comp.route_move_anim.mode != twg_shared::route_formation::RouteMoveAnimMode::Walk
+        {
+            let resolved_move: Option<(String, String)> = state
+                .catalog
+                .iter()
+                .find(|c| c.model_path == comp.model_path)
+                .and_then(|cat| {
+                    let slug = twg_shared::route_formation::resolve_route_move_action_slug(
+                        &comp.route_move_anim,
+                        &cat.extra_animations,
+                    )?;
+                    let rel = cat
+                        .extra_animations
+                        .iter()
+                        .find(|a| a.slug == slug)
+                        .map(|a| a.model_path.clone())?;
+                    Some((slug, rel))
+                });
+
+            if let Some((slug, rel_path)) = resolved_move {
+                let file_ready = state.available_model_paths.contains(&rel_path)
+                    || state.assets_root.join(&rel_path).exists();
+                if file_ready {
+                    let needs_spawn = comp
+                        .action_slots
+                        .get(&slug)
+                        .is_none_or(|s| s.rel_path != rel_path);
+                    if needs_spawn {
+                        if let Some(old) = comp.action_slots.remove(&slug) {
+                            commands.entity(old.child_entity).despawn();
+                        }
+                        let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
+                        let scene_h = asset_server
+                            .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                        let child_e = commands
+                            .spawn((
+                                WorldAssetRoot(scene_h),
+                                Transform::IDENTITY,
+                                Visibility::Hidden,
+                            ))
+                            .id();
+                        commands.entity(root_entity).add_child(child_e);
+                        comp.action_slots.insert(
+                            slug.clone(),
+                            ActionSubtreeSlot {
+                                rel_path,
+                                child_entity: child_e,
+                                gltf_handle: gltf_h,
+                                anim_graph: None,
+                                scale_calibrated: false,
+                            },
+                        );
+                    }
+
+                    let idle_child_opt = comp.idle_child;
+                    let move_speed =
+                        speed * (comp.route_move_anim.anim_speed as f32).clamp(0.25, 3.0);
+                    if let Some(slot) = comp.action_slots.get_mut(&slug) {
+                        let child_e = slot.child_entity;
+                        if !slot.scale_calibrated {
+                            if let Some(idle_e) = idle_child_opt {
+                                if let (Some(idle_span), Some(act_span)) = (
+                                    measure_subtree_max_span(idle_e, &children_q, &mesh_aabb_q),
+                                    measure_subtree_max_span(child_e, &children_q, &mesh_aabb_q),
+                                ) {
+                                    let ratio = (idle_span / act_span).clamp(0.001, 1000.0);
+                                    if (ratio - 1.0).abs() > 0.08 {
+                                        commands
+                                            .entity(child_e)
+                                            .insert(Transform::from_scale(Vec3::splat(ratio)));
+                                    }
+                                    slot.scale_calibrated = true;
+                                }
+                            } else {
+                                slot.scale_calibrated = true;
+                            }
+                        }
+
+                        if let Some(gltf) = gltfs.get(&slot.gltf_handle)
+                            && let Some(clip_h) = gltf.animations.first().cloned()
+                        {
+                            let (graph_h, node_idx) = slot
+                                .anim_graph
+                                .get_or_insert_with(|| {
+                                    let (graph, node) = AnimationGraph::from_clip(clip_h.clone());
+                                    (anim_graphs.add(graph), node)
+                                })
+                                .clone();
+
+                            let mut stack = vec![child_e];
+                            let mut found_player = false;
+                            while let Some(e) = stack.pop() {
+                                if let Ok((_, mut player, existing_graph_h)) =
+                                    anim_player_q.get_mut(e)
+                                {
+                                    found_player = true;
+                                    let needs_graph = existing_graph_h
+                                        .is_none_or(|gh| gh.0.id() != graph_h.id());
+                                    if needs_graph {
+                                        commands
+                                            .entity(e)
+                                            .insert(AnimationGraphHandle(graph_h.clone()));
+                                    }
+                                    let needs_start = !player.is_playing_animation(node_idx)
+                                        || player.playing_animations().count() != 1;
+                                    if needs_graph || needs_start {
+                                        player.stop_all();
+                                        player.play(node_idx).repeat().set_speed(move_speed);
+                                    } else if let Some(active) = player.animation_mut(node_idx) {
+                                        active.set_speed(move_speed);
+                                        if active.is_paused() {
+                                            active.resume();
+                                        }
+                                    }
+                                }
+                                if let Ok(children) = children_q.get(e) {
+                                    for child in children.iter() {
+                                        stack.push(child);
+                                    }
+                                }
+                            }
+
+                            if found_player && slot.scale_calibrated {
+                                comp.active_action_key = Some(slug);
+                                action_applied = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Auto-calibrate Walk subtree scale to match Idle height once both meshes finish loading
         // (prevents 100x size mismatch if mixing cm-scale Assimp Idle with metric Blender Walk).
         if !comp.walk_scale_calibrated {
@@ -2032,6 +2192,7 @@ pub fn animate_markers_system(
         }
 
         let has_walk_variant = comp.walk_child.is_some() && comp.walk_gltf_handle.is_some();
+        let walk_speed = speed * (comp.route_move_anim.anim_speed as f32).clamp(0.25, 3.0);
 
         // 1. Dedicated Walk subtree (`*_walk.glb`): plays ONLY while actively moving on a route
         if let (Some(walk_root), Some(walk_gltf)) = (comp.walk_child, comp.walk_gltf_handle.clone())
@@ -2044,7 +2205,7 @@ pub fn animate_markers_system(
                 &mut comp.walk_anim_graph,
                 true,
                 play_walk,
-                speed,
+                walk_speed,
                 &gltfs,
                 &mut anim_graphs,
                 &children_q,

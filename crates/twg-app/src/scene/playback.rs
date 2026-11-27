@@ -12,8 +12,8 @@ use twg_shared::{
     particle_anim::{is_particle_anim, parse_particle_anim_config},
     pointer_anim::{is_pointer_arrow_anim, parse_pointer_arrow_config},
     route_formation::{
-        anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
-        sample_multi_route_poses,
+        RouteMoveAnimConfig, anim_bound_marker_ids, is_multi_route_anim, parse_multi_route_config,
+        parse_route_move_anim_config, sample_multi_route_poses,
     },
     shoot_anim::{is_shoot_anim, shoot_anim_effective_duration_sec, shoot_anim_is_continuous},
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
@@ -25,13 +25,14 @@ use uuid::Uuid;
 
 use crate::state::{AnimRunStatus, AppState, PlaybackState, SelectedEntity, ToolMode};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MarkerPlaybackPose {
     pub lng: f64,
     pub lat: f64,
     pub altitude: f64,
     pub rot_y: f64,
     pub moving: bool,
+    pub move_anim: RouteMoveAnimConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -469,6 +470,7 @@ pub fn playback_system(
         if track.has_pose_override && has_targets {
             let is_moving = track.status == AnimRunStatus::Playing;
             let dist = track.distance_m.clamp(0.0, total_len);
+            let move_anim = parse_route_move_anim_config(anim);
             if is_multi_route_anim(anim) {
                 let cfg = parse_multi_route_config(anim);
                 let poses = sample_multi_route_poses(&anim.geom, &cfg, dist);
@@ -479,6 +481,7 @@ pub fn playback_system(
                         altitude: p.altitude,
                         rot_y: p.rot_y,
                         moving: is_moving,
+                        move_anim: move_anim.effective_for_marker(p.marker_id),
                     };
                     let replace = overrides
                         .markers
@@ -969,6 +972,7 @@ pub fn sample_route_at_distance(
                 altitude: alt,
                 rot_y,
                 moving,
+                move_anim: parse_route_move_anim_config(anim),
             });
         }
         acc += seg_len;
