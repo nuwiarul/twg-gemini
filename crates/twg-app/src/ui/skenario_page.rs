@@ -94,18 +94,28 @@ pub fn draw_skenario_form_screen(
 
                 ui.separator();
 
-                // Quick base layer switcher in top subbar
-                for (layer, mode, text) in [
-                    (BaseLayer::Osm, MapMode::Outdoor, "OSM"),
-                    (BaseLayer::Satellite, MapMode::Outdoor, "Satellite"),
-                    (BaseLayer::GridDark, MapMode::Indoor, "Indoor Dark"),
-                    (BaseLayer::GridLight, MapMode::Indoor, "Indoor Light"),
-                ] {
-                    let active = state.skenario_table.form_base_layer == layer
-                        && state.skenario_table.form_map_mode == mode;
-                    if ui.selectable_label(active, text).clicked() {
+                // Quick base layer switcher in top subbar (scoped to active Map Mode)
+                let quick_layers: &[(BaseLayer, &str)] = match state.skenario_table.form_map_mode {
+                    MapMode::Outdoor => &[
+                        (BaseLayer::Osm, "OSM"),
+                        (BaseLayer::Satellite, "Satellite"),
+                    ],
+                    MapMode::Indoor => &[
+                        (BaseLayer::GridDark, "Grid Dark"),
+                        (BaseLayer::GridLight, "Grid Light"),
+                        (BaseLayer::BlankDark, "Blank Dark"),
+                        (BaseLayer::BlankLight, "Blank Light"),
+                        (BaseLayer::FloorPlan, "Floor Plan"),
+                    ],
+                };
+                for &(layer, text) in quick_layers {
+                    let active = state.skenario_table.form_base_layer == layer;
+                    if ui
+                        .selectable_label(active, text)
+                        .on_hover_text(layer.label())
+                        .clicked()
+                    {
                         state.skenario_table.form_base_layer = layer;
-                        state.skenario_table.form_map_mode = mode;
                         state.skenario_table.map_preview_dirty = true;
                     }
                 }
@@ -549,8 +559,350 @@ pub fn draw_skenario_form_screen(
                                     wrap_around: false,
                                 },
                             );
+
+                            if state.skenario_table.form_base_layer == BaseLayer::FloorPlan {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Pengaturan Gambar Floor Plan")
+                                        .size(11.5)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                );
+                                ui.add_space(4.0);
+
+                                let current_url = state
+                                    .skenario_table
+                                    .form_floor_plan_url
+                                    .clone()
+                                    .filter(|s| !s.trim().is_empty());
+                                if let Some(url) = &current_url {
+                                    let short_name = url.rsplit('/').next().unwrap_or(url);
+                                    ui.label(
+                                        egui::RichText::new(format!("Gambar: {short_name}"))
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(134, 239, 172)),
+                                    );
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Belum ada gambar — upload PNG/JPG/WebP untuk denah lantai.",
+                                        )
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                                    );
+                                }
+
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    let uploading = state.skenario_table.form_floor_plan_uploading;
+                                    let btn_lbl = if uploading {
+                                        "Mengunggah..."
+                                    } else if current_url.is_some() {
+                                        "Ganti Gambar Floor Plan..."
+                                    } else {
+                                        "Upload Gambar Floor Plan..."
+                                    };
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new(btn_lbl)
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(14, 116, 144));
+                                    if ui.add_enabled(!uploading, btn).clicked()
+                                        && let Some(path) = rfd::FileDialog::new()
+                                            .set_title("Pilih Gambar Floor Plan (PNG / JPG / WebP)")
+                                            .add_filter(
+                                                "Gambar Floor Plan",
+                                                &["png", "jpg", "jpeg", "webp"],
+                                            )
+                                            .pick_file()
+                                    {
+                                        if let Some(auth) = current_auth(state) {
+                                            state.skenario_table.form_floor_plan_uploading = true;
+                                            state.skenario_table.form_floor_plan_error = None;
+                                            api.send(ApiCommand::UploadFloorPlan {
+                                                auth,
+                                                file_path: path,
+                                                target: crate::net::client::FloorPlanUploadTarget::SkenarioForm,
+                                            });
+                                        } else {
+                                            state.skenario_table.form_floor_plan_error = Some(
+                                                "Login terlebih dahulu untuk mengunggah gambar."
+                                                    .into(),
+                                            );
+                                        }
+                                    }
+
+                                    if current_url.is_some()
+                                        && ui
+                                            .add_enabled(
+                                                !uploading,
+                                                egui::Button::new(
+                                                    egui::RichText::new("Hapus")
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(252, 165, 165)),
+                                                ),
+                                            )
+                                            .clicked()
+                                    {
+                                        state.skenario_table.form_floor_plan_url = None;
+                                        state.skenario_table.map_preview_dirty = true;
+                                    }
+                                });
+
+                                if let Some(err) = &state.skenario_table.form_floor_plan_error {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(252, 165, 165),
+                                        egui::RichText::new(err).size(10.5),
+                                    );
+                                }
+
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new("Lebar Gambar (X, meter):")
+                                        .size(11.0)
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                                numeric_spinner(
+                                    ui,
+                                    "sk_form_fp_width",
+                                    &mut state.skenario_table.form_floor_plan_width_m,
+                                    SpinnerConfig {
+                                        min: 5.0,
+                                        max: 4000.0,
+                                        step: 1.0,
+                                        drag_speed: 0.5,
+                                        decimals: 1,
+                                        suffix: " m",
+                                        wrap_around: false,
+                                    },
+                                );
+
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Panjang Gambar (Z, meter):")
+                                        .size(11.0)
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                                numeric_spinner(
+                                    ui,
+                                    "sk_form_fp_height",
+                                    &mut state.skenario_table.form_floor_plan_height_m,
+                                    SpinnerConfig {
+                                        min: 5.0,
+                                        max: 4000.0,
+                                        step: 1.0,
+                                        drag_speed: 0.5,
+                                        decimals: 1,
+                                        suffix: " m",
+                                        wrap_around: false,
+                                    },
+                                );
+
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Rotasi Gambar (°):")
+                                        .size(11.0)
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                                if numeric_spinner(
+                                    ui,
+                                    "sk_form_fp_rot",
+                                    &mut state.skenario_table.form_floor_plan_rotation_deg,
+                                    SpinnerConfig {
+                                        min: 0.0,
+                                        max: 360.0,
+                                        step: 5.0,
+                                        drag_speed: 0.5,
+                                        decimals: 1,
+                                        suffix: "°",
+                                        wrap_around: true,
+                                    },
+                                ) {
+                                    state.skenario_table.form_floor_plan_rotation_deg = state
+                                        .skenario_table
+                                        .form_floor_plan_rotation_deg
+                                        .rem_euclid(360.0);
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    for (lbl, delta) in [("-90°", -90.0), ("0°", 0.0), ("+90°", 90.0)] {
+                                        if ui.small_button(lbl).clicked() {
+                                            state.skenario_table.form_floor_plan_rotation_deg =
+                                                if delta == 0.0 {
+                                                    0.0
+                                                } else {
+                                                    (state
+                                                        .skenario_table
+                                                        .form_floor_plan_rotation_deg
+                                                        + delta)
+                                                        .rem_euclid(360.0)
+                                                };
+                                        }
+                                    }
+                                });
+
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Opasitas:")
+                                            .size(11.0)
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut state.skenario_table.form_floor_plan_opacity,
+                                            0.1..=1.0,
+                                        )
+                                        .fixed_decimals(2),
+                                    );
+                                });
+                            }
                         }
                     });
+
+                    // Card 2b: Nominatim OSM Geocoder (khusus Map Mode Outdoor di Tambah/Edit Skenario)
+                    if state.skenario_table.form_map_mode == MapMode::Outdoor {
+                        form_section_card(ui, "Cari Lokasi Peta (Nominatim OSM)", |ui| {
+                            let mut trigger_search = false;
+                            ui.horizontal(|ui| {
+                                let input_w = (ui.available_width() - 88.0).max(120.0);
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut state.skenario_table.geocode_query,
+                                    )
+                                    .hint_text("Cari alamat, jalan, gedung, kota...")
+                                    .desired_width(input_w),
+                                );
+                                if resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    && !state.skenario_table.geocode_loading
+                                {
+                                    trigger_search = true;
+                                }
+
+                                let search_btn = egui::Button::new(
+                                    egui::RichText::new(if state.skenario_table.geocode_loading {
+                                        "..."
+                                    } else {
+                                        "Cari"
+                                    })
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                                )
+                                .fill(egui::Color32::from_rgb(14, 116, 144));
+                                if ui
+                                    .add_enabled(!state.skenario_table.geocode_loading, search_btn)
+                                    .clicked()
+                                {
+                                    trigger_search = true;
+                                }
+
+                                if (!state.skenario_table.geocode_query.is_empty()
+                                    || !state.skenario_table.geocode_results.is_empty()
+                                    || state.skenario_table.geocode_error.is_some())
+                                    && ui
+                                        .small_button("×")
+                                        .on_hover_text("Bersihkan pencarian lokasi")
+                                        .clicked()
+                                {
+                                    state.skenario_table.geocode_query.clear();
+                                    state.skenario_table.geocode_results.clear();
+                                    state.skenario_table.geocode_error = None;
+                                }
+                            });
+
+                            if trigger_search {
+                                let q = state.skenario_table.geocode_query.trim().to_string();
+                                if q.len() < 2 {
+                                    state.skenario_table.geocode_error = Some(
+                                        "Masukkan minimal 2 karakter nama tempat/alamat.".into(),
+                                    );
+                                } else {
+                                    state.skenario_table.geocode_loading = true;
+                                    state.skenario_table.geocode_error = None;
+                                    api.send(ApiCommand::GeocodeNominatim { query: q });
+                                }
+                            }
+
+                            if state.skenario_table.geocode_loading {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Mencari lokasi di Nominatim OpenStreetMap...")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                );
+                            }
+
+                            if let Some(err) = &state.skenario_table.geocode_error {
+                                ui.add_space(4.0);
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(252, 165, 165),
+                                    egui::RichText::new(err).size(10.5),
+                                );
+                            }
+
+                            if !state.skenario_table.geocode_results.is_empty() {
+                                ui.add_space(5.0);
+                                let results_snapshot = state.skenario_table.geocode_results.clone();
+                                let mut picked: Option<crate::state::NominatimPlace> = None;
+                                egui::ScrollArea::vertical()
+                                    .id_salt("sk_form_nominatim_results")
+                                    .max_height(150.0)
+                                    .show(ui, |ui| {
+                                        for item in &results_snapshot {
+                                            let row = egui::Frame::new()
+                                                .fill(egui::Color32::from_rgb(20, 30, 48))
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_rgb(42, 56, 80),
+                                                ))
+                                                .corner_radius(4.0)
+                                                .inner_margin(egui::Margin::symmetric(7, 5))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(ui.available_width());
+                                                    ui.label(
+                                                        egui::RichText::new(&item.display_name)
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(226, 232, 240)),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "Lat {:.5}, Lng {:.5}  •  Klik untuk lompat ke lokasi",
+                                                            item.lat, item.lng
+                                                        ))
+                                                        .size(9.5)
+                                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                                    );
+                                                });
+                                            if row
+                                                .response
+                                                .interact(egui::Sense::click())
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                picked = Some(item.clone());
+                                            }
+                                            ui.add_space(3.0);
+                                        }
+                                    });
+                                if let Some(p) = picked {
+                                    state.skenario_table.form_center_lat = p.lat;
+                                    state.skenario_table.form_center_lng = p.lng;
+                                    state.skenario_table.form_zoom = p.zoom_hint.clamp(
+                                        state.skenario_table.form_min_zoom,
+                                        state.skenario_table.form_max_zoom,
+                                    );
+                                    state.skenario_table.form_preset_id = None;
+                                    state.skenario_table.map_preview_dirty = true;
+                                    state.skenario_table.map_preview_snap = true;
+                                }
+                            }
+                        });
+                    }
 
                     // Card 3: Zoom Sekarang, Minimal Zoom, Maximal Zoom (up to 26, Custom Up/Down Spinner)
                     form_section_card(ui, "Pengaturan Zoom (Maks 26 • Sinkron Live)", |ui| {
@@ -847,6 +1199,35 @@ pub fn draw_skenario_form_screen(
             state.skenario_table.form_error = None;
             let indoor_config = IndoorConfig {
                 grid_size_m: state.skenario_table.form_grid_size_m.max(1.0),
+                floor_plan_url: state
+                    .skenario_table
+                    .form_floor_plan_url
+                    .clone()
+                    .filter(|s| !s.trim().is_empty()),
+                floor_plan_width_m: Some(
+                    state
+                        .skenario_table
+                        .form_floor_plan_width_m
+                        .clamp(5.0, 4000.0),
+                ),
+                floor_plan_height_m: Some(
+                    state
+                        .skenario_table
+                        .form_floor_plan_height_m
+                        .clamp(5.0, 4000.0),
+                ),
+                floor_plan_rotation_deg: Some(
+                    state
+                        .skenario_table
+                        .form_floor_plan_rotation_deg
+                        .rem_euclid(360.0),
+                ),
+                floor_plan_opacity: Some(
+                    state
+                        .skenario_table
+                        .form_floor_plan_opacity
+                        .clamp(0.1, 1.0),
+                ),
                 ..Default::default()
             };
             if let Some(id) = editing_id {

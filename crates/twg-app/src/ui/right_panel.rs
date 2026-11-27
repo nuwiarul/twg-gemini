@@ -71,8 +71,8 @@ use crate::{
         traffic::measured_vehicle_scaled_dims,
     },
     state::{
-        AnimRunStatus, AppState, PlaybackState, SelectedEntity, SkyboxPreset, ToolMode,
-        TrafficPreviewLayout, TrafficScalePreviewState,
+        AnimCategory, AnimRunStatus, AppState, PlaybackState, SelectedEntity, SkyboxPreset,
+        ToolMode, TrafficPreviewLayout, TrafficScalePreviewState,
     },
     ui::{
         formation_pad::draw_formation_pad,
@@ -14286,8 +14286,8 @@ fn draw_skenario_inspector(
         ui.label(
             egui::RichText::new(format!(
                 "Mode: {} • Layer: {}",
-                sk.map_mode.as_str(),
-                sk.base_layer.label()
+                state.active_map_mode.as_str(),
+                state.active_base_layer.label()
             ))
             .size(11.5)
             .color(egui::Color32::from_rgb(148, 163, 184)),
@@ -14303,20 +14303,43 @@ fn draw_skenario_inspector(
                 ui.selectable_value(&mut state.active_map_mode, MapMode::Outdoor, "Outdoor");
                 ui.selectable_value(&mut state.active_map_mode, MapMode::Indoor, "Indoor");
             });
+            // Keep Base Layer valid for the active Map Mode
+            match state.active_map_mode {
+                MapMode::Outdoor => {
+                    if !matches!(state.active_base_layer, BaseLayer::Osm | BaseLayer::Satellite) {
+                        state.active_base_layer = BaseLayer::Osm;
+                    }
+                }
+                MapMode::Indoor => {
+                    if !matches!(
+                        state.active_base_layer,
+                        BaseLayer::GridDark
+                            | BaseLayer::GridLight
+                            | BaseLayer::BlankDark
+                            | BaseLayer::BlankLight
+                            | BaseLayer::FloorPlan
+                    ) {
+                        state.active_base_layer = BaseLayer::GridDark;
+                    }
+                }
+            }
+            let allowed_layers: &[BaseLayer] = match state.active_map_mode {
+                MapMode::Outdoor => &[BaseLayer::Osm, BaseLayer::Satellite],
+                MapMode::Indoor => &[
+                    BaseLayer::GridDark,
+                    BaseLayer::GridLight,
+                    BaseLayer::BlankDark,
+                    BaseLayer::BlankLight,
+                    BaseLayer::FloorPlan,
+                ],
+            };
             ui.horizontal(|ui| {
                 ui.label("Base Layer:");
                 egui::ComboBox::from_id_salt("inspector_sk_layer")
                     .selected_text(state.active_base_layer.label())
                     .width(155.0)
                     .show_ui(ui, |ui| {
-                        for layer in [
-                            BaseLayer::Osm,
-                            BaseLayer::Satellite,
-                            BaseLayer::GridDark,
-                            BaseLayer::GridLight,
-                            BaseLayer::BlankDark,
-                            BaseLayer::BlankLight,
-                        ] {
+                        for &layer in allowed_layers {
                             ui.selectable_value(&mut state.active_base_layer, layer, layer.label());
                         }
                     });
@@ -14397,18 +14420,321 @@ fn draw_skenario_inspector(
                         }
                     }
                 });
+
+                if state.active_base_layer == BaseLayer::FloorPlan {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Pengaturan Floor Plan")
+                            .size(11.5)
+                            .strong()
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
+                    ui.add_space(3.0);
+
+                    let current_url = sk
+                        .indoor_config
+                        .floor_plan_url
+                        .clone()
+                        .filter(|s| !s.trim().is_empty());
+                    if let Some(url) = &current_url {
+                        let short_name = url.rsplit('/').next().unwrap_or(url);
+                        ui.label(
+                            egui::RichText::new(format!("Gambar: {short_name}"))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(134, 239, 172)),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Belum ada gambar Floor Plan.")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(251, 191, 36)),
+                        );
+                    }
+
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
+                        let btn_text = if state.floor_plan_uploading {
+                            "Mengunggah..."
+                        } else if current_url.is_some() {
+                            "Ganti Gambar..."
+                        } else {
+                            "Upload Gambar..."
+                        };
+                        let upload_btn = egui::Button::new(
+                            egui::RichText::new(btn_text)
+                                .size(11.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(14, 116, 144));
+                        if ui
+                            .add_enabled(!state.floor_plan_uploading, upload_btn)
+                            .clicked()
+                            && let Some(path) = rfd::FileDialog::new()
+                                .set_title("Pilih Gambar Floor Plan (PNG / JPG / WebP)")
+                                .add_filter("Gambar Floor Plan", &["png", "jpg", "jpeg", "webp"])
+                                .pick_file()
+                        {
+                            if let Some(auth) = current_auth(state)
+                                && !state.offline_preview
+                            {
+                                state.floor_plan_uploading = true;
+                                state.floor_plan_error = None;
+                                api.send(ApiCommand::UploadFloorPlan {
+                                    auth,
+                                    file_path: path,
+                                    target: crate::net::client::FloorPlanUploadTarget::ActiveSkenario,
+                                });
+                            } else {
+                                // Offline fallback: use local file path directly
+                                let p_str = path.to_string_lossy().to_string();
+                                let dims = image::image_dimensions(&path).ok();
+                                sk.indoor_config.floor_plan_url = Some(p_str.clone());
+                                if let Some((w_px, h_px)) = dims
+                                    && w_px > 0
+                                    && h_px > 0
+                                {
+                                    let w_m = sk
+                                        .indoor_config
+                                        .floor_plan_width_m
+                                        .unwrap_or(100.0)
+                                        .clamp(5.0, 4000.0);
+                                    let h_m = (w_m * (h_px as f64 / w_px as f64)).clamp(5.0, 4000.0);
+                                    sk.indoor_config.floor_plan_width_m = Some(w_m);
+                                    sk.indoor_config.floor_plan_height_m = Some(h_m);
+                                }
+                                state.skenario_dirty = true;
+                                if let Some(active) = &mut state.active_skenario {
+                                    active.indoor_config = sk.indoor_config.clone();
+                                }
+                            }
+                        }
+
+                        if current_url.is_some()
+                            && ui
+                                .add_enabled(
+                                    !state.floor_plan_uploading,
+                                    egui::Button::new(
+                                        egui::RichText::new("Hapus")
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(252, 165, 165)),
+                                    ),
+                                )
+                                .clicked()
+                        {
+                            sk.indoor_config.floor_plan_url = None;
+                            state.skenario_dirty = true;
+                            if let Some(active) = &mut state.active_skenario {
+                                active.indoor_config.floor_plan_url = None;
+                            }
+                        }
+                    });
+
+                    if let Some(err) = &state.floor_plan_error {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(252, 165, 165),
+                            egui::RichText::new(err).size(10.5),
+                        );
+                    }
+
+                    ui.add_space(4.0);
+                    let mut fp_w = sk
+                        .indoor_config
+                        .floor_plan_width_m
+                        .unwrap_or(100.0)
+                        .clamp(5.0, 4000.0);
+                    let mut fp_h = sk
+                        .indoor_config
+                        .floor_plan_height_m
+                        .unwrap_or(100.0)
+                        .clamp(5.0, 4000.0);
+                    let mut fp_rot = sk
+                        .indoor_config
+                        .floor_plan_rotation_deg
+                        .unwrap_or(0.0)
+                        .rem_euclid(360.0);
+                    let mut fp_op = sk
+                        .indoor_config
+                        .floor_plan_opacity
+                        .unwrap_or(1.0)
+                        .clamp(0.1, 1.0);
+                    let mut fp_changed = false;
+
+                    ui.horizontal(|ui| {
+                        ui.label("Lebar (X):");
+                        if numeric_spinner(
+                            ui,
+                            "inspector_fp_width",
+                            &mut fp_w,
+                            SpinnerConfig {
+                                min: 5.0,
+                                max: 4000.0,
+                                step: 1.0,
+                                drag_speed: 0.5,
+                                decimals: 1,
+                                suffix: " m",
+                                wrap_around: false,
+                            },
+                        ) {
+                            fp_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Panjang (Z):");
+                        if numeric_spinner(
+                            ui,
+                            "inspector_fp_height",
+                            &mut fp_h,
+                            SpinnerConfig {
+                                min: 5.0,
+                                max: 4000.0,
+                                step: 1.0,
+                                drag_speed: 0.5,
+                                decimals: 1,
+                                suffix: " m",
+                                wrap_around: false,
+                            },
+                        ) {
+                            fp_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Rotasi:");
+                        if numeric_spinner(
+                            ui,
+                            "inspector_fp_rot",
+                            &mut fp_rot,
+                            SpinnerConfig {
+                                min: 0.0,
+                                max: 360.0,
+                                step: 5.0,
+                                drag_speed: 0.5,
+                                decimals: 1,
+                                suffix: "°",
+                                wrap_around: true,
+                            },
+                        ) {
+                            fp_rot = fp_rot.rem_euclid(360.0);
+                            fp_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (lbl, delta) in [("-90°", -90.0), ("0°", 0.0), ("+90°", 90.0)] {
+                            if ui.small_button(lbl).clicked() {
+                                fp_rot = if delta == 0.0 {
+                                    0.0
+                                } else {
+                                    (fp_rot + delta).rem_euclid(360.0)
+                                };
+                                fp_changed = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Opasitas:");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut fp_op, 0.1..=1.0)
+                                    .fixed_decimals(2),
+                            )
+                            .changed()
+                        {
+                            fp_changed = true;
+                        }
+                    });
+
+                    if fp_changed {
+                        sk.indoor_config.floor_plan_width_m = Some(fp_w);
+                        sk.indoor_config.floor_plan_height_m = Some(fp_h);
+                        sk.indoor_config.floor_plan_rotation_deg = Some(fp_rot);
+                        sk.indoor_config.floor_plan_opacity = Some(fp_op);
+                        state.skenario_dirty = true;
+                        if let Some(active) = &mut state.active_skenario {
+                            active.indoor_config.floor_plan_width_m = Some(fp_w);
+                            active.indoor_config.floor_plan_height_m = Some(fp_h);
+                            active.indoor_config.floor_plan_rotation_deg = Some(fp_rot);
+                            active.indoor_config.floor_plan_opacity = Some(fp_op);
+                        }
+                    }
+                }
             }
         });
     });
 
     inspector_card(ui, "Scene Statistics", true, |ui| {
+        // Mirror exact grouping & counts shown in Left Panel -> Layers
+        let unit_count = state
+            .markers
+            .iter()
+            .filter(|m| !is_basic_mesh_marker(m))
+            .count();
+        let mesh_count = state.markers.len().saturating_sub(unit_count);
+        let bldg_mesh_count = mesh_count + state.buildings.len();
+        let line_count = state.lines.len();
+        let text_count = state.text_markers.len();
+
+        let mut route_count = 0usize;
+        let mut shoot_count = 0usize;
+        let mut particle_count = 0usize;
+        let mut other_count = 0usize;
+        let mut spawn_hide_count = 0usize;
+        let mut media_count = 0usize;
+        let mut camera_count = 0usize;
+        let mut env_count = 0usize;
+        let mut group_count = 0usize;
+        for a in &state.anims {
+            match AnimCategory::from_anim_type(&a.anim_type) {
+                AnimCategory::Route => route_count += 1,
+                AnimCategory::Shoot => shoot_count += 1,
+                AnimCategory::Particle => particle_count += 1,
+                AnimCategory::Other => other_count += 1,
+                AnimCategory::SpawnHide => spawn_hide_count += 1,
+                AnimCategory::Audio => media_count += 1,
+                AnimCategory::Camera => camera_count += 1,
+                AnimCategory::Environment => env_count += 1,
+                AnimCategory::Group => group_count += 1,
+            }
+        }
+
+        let total_objects = unit_count + bldg_mesh_count + line_count + text_count;
+        let total_anims = state.anims.len();
+
+        ui.label(
+            egui::RichText::new(format!("Objek Peta ({total_objects})"))
+                .size(10.5)
+                .strong()
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
         ui.columns(2, |cols| {
-            cols[0].label(format!("3D Units: {}", state.markers.len()));
-            cols[1].label(format!("Buildings: {}", state.buildings.len()));
-            cols[0].label(format!("Plot Lines: {}", state.lines.len()));
-            cols[1].label(format!("Text Labels: {}", state.text_markers.len()));
-            cols[0].label(format!("Route Anims: {}", state.anims.len()));
-            cols[1].label(format!("Particles: {}", state.particles.len()));
+            cols[0].label(format!("3D Units: {unit_count}"));
+            cols[1].label(format!("Buildings/Mesh: {bldg_mesh_count}"));
+            cols[0].label(format!("Plot Lines: {line_count}"));
+            cols[1].label(format!("Text Labels: {text_count}"));
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(2.0);
+
+        ui.label(
+            egui::RichText::new(format!("Animasi ({total_anims})"))
+                .size(10.5)
+                .strong()
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
+        ui.columns(2, |cols| {
+            cols[0].label(format!("Route: {route_count}"));
+            cols[1].label(format!("Shoot: {shoot_count}"));
+            cols[0].label(format!("Particle: {particle_count}"));
+            cols[1].label(format!("Penanda/Lainnya: {other_count}"));
+            cols[0].label(format!("Spawn & Hide: {spawn_hide_count}"));
+            cols[1].label(format!("Media: {media_count}"));
+            cols[0].label(format!("Kamera: {camera_count}"));
+            cols[1].label(format!("Lingkungan: {env_count}"));
+            cols[0].label(format!("Grup Animasi: {group_count}"));
         });
     });
 

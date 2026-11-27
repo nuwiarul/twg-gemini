@@ -15,6 +15,7 @@ use twg_shared::{
         UpdateAnimRequest, UpdateBuildingRequest, UpdateLocationPresetRequest, UpdateMarkerRequest,
         UpdateModelCategoryRequest, UpdateOperasiRequest, UpdatePlotLineRequest,
         UpdateSatkerRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest, UpdateUserRequest,
+        UploadResponse,
     },
     models::{
         Anim, Building, LocationPreset, Marker, MediaAssetDto, MediaAssetType, ModelAssetDto,
@@ -316,6 +317,20 @@ pub enum ApiCommand {
         auth: AuthCredentials,
         id: Uuid,
     },
+    UploadFloorPlan {
+        auth: AuthCredentials,
+        file_path: PathBuf,
+        target: FloorPlanUploadTarget,
+    },
+    GeocodeNominatim {
+        query: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorPlanUploadTarget {
+    SkenarioForm,
+    ActiveSkenario,
 }
 
 #[derive(Debug)]
@@ -395,6 +410,19 @@ pub enum ApiEvent {
     MediaAssetUpdated(MediaAssetDto),
     MediaAssetDeleted(Uuid),
     MediaAssetError(String),
+    FloorPlanUploaded {
+        target: FloorPlanUploadTarget,
+        url: String,
+        filename: String,
+        width_px: Option<u32>,
+        height_px: Option<u32>,
+    },
+    FloorPlanUploadError {
+        target: FloorPlanUploadTarget,
+        message: String,
+    },
+    NominatimResults(Vec<crate::state::NominatimPlace>),
+    NominatimError(String),
     Error(String),
 }
 
@@ -1110,6 +1138,136 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
             match authed_delete(client, &auth, &url).await {
                 Ok(()) => ApiEvent::MediaAssetDeleted(id),
                 Err(e) => ApiEvent::MediaAssetError(e),
+            }
+        }
+        ApiCommand::UploadFloorPlan {
+            auth,
+            file_path,
+            target,
+        } => {
+            let dims = image::image_dimensions(&file_path).ok();
+            let part = match read_file_part(&file_path).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return ApiEvent::FloorPlanUploadError { target, message: e };
+                }
+            };
+            let form = multipart::Form::new().part("file", part);
+            let url = format!("{}/api/v1/uploads", base(&auth));
+            match client
+                .post(&url)
+                .bearer_auth(&auth.access_token)
+                .header("X-Device-ID", &auth.device_id)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(resp) => match parse_api_json::<UploadResponse>(resp).await {
+                    Ok(up) => ApiEvent::FloorPlanUploaded {
+                        target,
+                        url: up.url,
+                        filename: up.filename,
+                        width_px: dims.map(|(w, _)| w),
+                        height_px: dims.map(|(_, h)| h),
+                    },
+                    Err(e) => ApiEvent::FloorPlanUploadError { target, message: e },
+                },
+                Err(e) => ApiEvent::FloorPlanUploadError {
+                    target,
+                    message: format!("Gagal mengunggah Floor Plan: {e}"),
+                },
+            }
+        }
+        ApiCommand::GeocodeNominatim { query } => {
+            #[derive(serde::Deserialize)]
+            struct NominatimRawItem {
+                display_name: String,
+                lat: String,
+                lon: String,
+                #[serde(default)]
+                boundingbox: Option<Vec<String>>,
+            }
+
+            let url = {
+                let mut qs = url::form_urlencoded::Serializer::new(String::new());
+                qs.append_pair("q", query.as_str());
+                qs.append_pair("format", "jsonv2");
+                qs.append_pair("limit", "6");
+                qs.append_pair("addressdetails", "0");
+                format!("https://nominatim.openstreetmap.org/search?{}", qs.finish())
+            };
+            let resp = client
+                .get(&url)
+                .header(
+                    reqwest::header::USER_AGENT,
+                    "TacticalWallGameRust/0.1 (Desktop Tactical Map Editor)",
+                )
+                .header(reqwest::header::ACCEPT_LANGUAGE, "id,en;q=0.8")
+                .timeout(std::time::Duration::from_secs(12))
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) => {
+                    if !r.status().is_success() {
+                        return ApiEvent::NominatimError(format!(
+                            "Nominatim mengembalikan HTTP {}",
+                            r.status()
+                        ));
+                    }
+                    match r.json::<Vec<NominatimRawItem>>().await {
+                        Ok(raw_items) => {
+                            let places: Vec<crate::state::NominatimPlace> = raw_items
+                                .into_iter()
+                                .filter_map(|item| {
+                                    let lat: f64 = item.lat.parse().ok()?;
+                                    let lng: f64 = item.lon.parse().ok()?;
+                                    let zoom_hint = item
+                                        .boundingbox
+                                        .as_deref()
+                                        .and_then(|bb| {
+                                            if bb.len() < 4 {
+                                                return None;
+                                            }
+                                            let s: f64 = bb[0].parse().ok()?;
+                                            let n: f64 = bb[1].parse().ok()?;
+                                            let w: f64 = bb[2].parse().ok()?;
+                                            let e: f64 = bb[3].parse().ok()?;
+                                            let span = (n - s).abs().max((e - w).abs());
+                                            let z = if span <= 0.002 {
+                                                18.0
+                                            } else if span <= 0.008 {
+                                                16.8
+                                            } else if span <= 0.03 {
+                                                15.5
+                                            } else if span <= 0.12 {
+                                                13.8
+                                            } else if span <= 0.5 {
+                                                11.8
+                                            } else {
+                                                10.0
+                                            };
+                                            Some(z)
+                                        })
+                                        .unwrap_or(16.5);
+                                    Some(crate::state::NominatimPlace {
+                                        display_name: item.display_name,
+                                        lat,
+                                        lng,
+                                        zoom_hint,
+                                    })
+                                })
+                                .collect();
+                            ApiEvent::NominatimResults(places)
+                        }
+                        Err(e) => {
+                            ApiEvent::NominatimError(format!("Gagal membaca respons Nominatim: {e}"))
+                        }
+                    }
+                }
+                Err(e) => ApiEvent::NominatimError(format!(
+                    "Tidak dapat terhubung ke Nominatim OSM (cek koneksi internet): {e}"
+                )),
             }
         }
     }

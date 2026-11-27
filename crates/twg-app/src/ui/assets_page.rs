@@ -10,7 +10,7 @@ use crate::{
     net::{
         asset_sync::{AssetSyncBridge, AssetSyncCommand},
         client::{ApiClientBridge, ApiCommand, ModelAssetUploadPayload},
-        ws_client::{WsClientBridge, WsOutCommand},
+        ws_client::WsClientBridge,
     },
     scene::{
         asset_preview::{AssetPreviewStage, resolve_preview_file_path},
@@ -18,7 +18,7 @@ use crate::{
         media_preview::MediaPreviewPlayer,
     },
     state::{
-        AppScreen, AppState, AssetFormMode, AssetPreviewLod, AssetPreviewVariant, AssetsSection,
+        AppState, AssetFormMode, AssetPreviewLod, AssetPreviewVariant, AssetsSection,
         PlaybackState,
     },
     ui::{
@@ -119,93 +119,85 @@ fn draw_assets_top_bar(
                 .inner_margin(egui::Margin::symmetric(12, 7)),
         )
         .show(viewport_ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                draw_app_brand_icon(ui, 18.0);
-                ui.label(
-                    egui::RichText::new("TWG-RUST 3D")
-                        .strong()
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
-                );
-                ui.separator();
+            let total_w = ui.available_width();
+            let right_reserve = 148.0_f32.min((total_w * 0.32).max(96.0));
+            let left_max_w = (total_w - right_reserve - 8.0).max(160.0);
 
-                draw_screen_nav_tabs(ui, state, playback, api, ws);
+            ui.horizontal_top(|ui| {
+                ui.scope(|ui| {
+                    ui.set_min_width(left_max_w);
+                    ui.set_max_width(left_max_w);
+                    ui.horizontal_wrapped(|ui| {
+                        draw_app_brand_icon(ui, 18.0);
+                        ui.label(
+                            egui::RichText::new("TWG-RUST 3D")
+                                .strong()
+                                .color(egui::Color32::from_rgb(56, 189, 248)),
+                        );
+                        ui.separator();
 
-                ui.separator();
+                        draw_screen_nav_tabs(ui, state, playback, api, ws);
 
-                if ui
-                    .add_enabled(
-                        !state.sync_status.is_syncing,
-                        egui::Button::new("Sync Server"),
-                    )
-                    .clicked()
-                {
-                    sync_bridge.send(AssetSyncCommand::SyncWithServer {
-                        server_url: state.server_url.clone(),
-                        local_root: state.assets_root.clone(),
-                    });
-                }
+                        ui.separator();
 
-                if state.sync_status.is_syncing {
-                    let frac = if state.sync_status.total_files > 0 {
-                        state.sync_status.completed_files as f32
-                            / state.sync_status.total_files as f32
-                    } else {
-                        0.0
-                    };
-                    ui.add(egui::ProgressBar::new(frac).desired_width(180.0).text(
-                        if state.sync_status.checking {
-                            "Cek server...".to_string()
-                        } else {
-                            format!(
-                                "Sync {}/{} ({:.1}/{:.1} MB)",
-                                state.sync_status.completed_files,
-                                state.sync_status.total_files,
-                                state.sync_status.downloaded_bytes as f64 / (1024.0 * 1024.0),
-                                state.sync_status.total_bytes as f64 / (1024.0 * 1024.0),
+                        if ui
+                            .add_enabled(
+                                !state.sync_status.is_syncing,
+                                egui::Button::new("Sync Server"),
                             )
-                        },
-                    ));
-                } else {
-                    let col = if state.sync_status.offline_mode {
-                        egui::Color32::from_rgb(250, 204, 21)
-                    } else {
-                        egui::Color32::from_rgb(74, 222, 128)
-                    };
-                    ui.colored_label(col, &state.sync_status.summary_text);
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Logout").clicked() {
-                        ws.send(WsOutCommand::Disconnect);
-                        state.screen = AppScreen::Login;
-                        state.offline_preview = false;
-                        state.auth_token = None;
-                        state.refresh_token = None;
-                        state.current_user = None;
-                        state.active_skenario = None;
-                        state.ws_connected = false;
-                    }
-
-                    if let Some(user) = state.current_user.clone()
-                        && ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!(
-                                        "{} [{}]  •  Profil",
-                                        user.username,
-                                        user.role.label()
-                                    ))
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(203, 213, 225)),
-                                )
-                                .fill(egui::Color32::from_rgb(24, 34, 53)),
-                            )
-                            .on_hover_text("Buka halaman Profil & Ganti Password")
                             .clicked()
-                    {
-                        open_profile_screen(state, playback, ws);
-                    }
+                        {
+                            sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                                server_url: state.server_url.clone(),
+                                local_root: state.assets_root.clone(),
+                            });
+                        }
+
+                        if state.sync_status.is_syncing {
+                            let frac = if state.sync_status.total_files > 0 {
+                                state.sync_status.completed_files as f32
+                                    / state.sync_status.total_files as f32
+                            } else {
+                                0.0
+                            };
+                            ui.add(egui::ProgressBar::new(frac).desired_width(180.0).text(
+                                if state.sync_status.checking {
+                                    "Cek server...".to_string()
+                                } else {
+                                    format!(
+                                        "Sync {}/{} ({:.1}/{:.1} MB)",
+                                        state.sync_status.completed_files,
+                                        state.sync_status.total_files,
+                                        state.sync_status.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                                        state.sync_status.total_bytes as f64 / (1024.0 * 1024.0),
+                                    )
+                                },
+                            ));
+                        } else {
+                            let col = if state.sync_status.offline_mode {
+                                egui::Color32::from_rgb(250, 204, 21)
+                            } else {
+                                egui::Color32::from_rgb(74, 222, 128)
+                            };
+                            ui.colored_label(col, &state.sync_status.summary_text);
+                        }
+                    });
                 });
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_reserve, 24.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| match crate::ui::nav_bar::draw_account_menu_button(ui, state, "assets_nav")
+                    {
+                        crate::ui::nav_bar::AccountMenuAction::OpenProfile => {
+                            open_profile_screen(state, playback, ws);
+                        }
+                        crate::ui::nav_bar::AccountMenuAction::Logout => {
+                            crate::ui::nav_bar::perform_logout(state, playback, ws);
+                        }
+                        crate::ui::nav_bar::AccountMenuAction::None => {}
+                    },
+                );
             });
         })
         .response

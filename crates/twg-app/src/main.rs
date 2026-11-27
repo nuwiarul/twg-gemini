@@ -1492,6 +1492,86 @@ fn process_net_events_system(
                 state.category_form.error = Some(err.clone());
                 state.status_banner = Some(err);
             }
+            ApiEvent::NominatimResults(items) => {
+                state.skenario_table.geocode_loading = false;
+                state.skenario_table.geocode_error = if items.is_empty() {
+                    Some("Lokasi tidak ditemukan di Nominatim OSM.".into())
+                } else {
+                    None
+                };
+                state.skenario_table.geocode_results = items;
+            }
+            ApiEvent::NominatimError(err) => {
+                state.skenario_table.geocode_loading = false;
+                state.skenario_table.geocode_error = Some(err);
+            }
+            ApiEvent::FloorPlanUploaded {
+                target,
+                url,
+                filename,
+                width_px,
+                height_px,
+            } => {
+                use crate::net::client::FloorPlanUploadTarget;
+                let aspect_ratio = match (width_px, height_px) {
+                    (Some(w), Some(h)) if w > 0 && h > 0 => Some((h as f64) / (w as f64)),
+                    _ => None,
+                };
+                match target {
+                    FloorPlanUploadTarget::SkenarioForm => {
+                        state.skenario_table.form_floor_plan_url = Some(url);
+                        if let Some(ratio) = aspect_ratio {
+                            let w_m = state.skenario_table.form_floor_plan_width_m.clamp(5.0, 4000.0);
+                            state.skenario_table.form_floor_plan_height_m =
+                                (w_m * ratio).clamp(5.0, 4000.0);
+                        }
+                        state.skenario_table.form_floor_plan_uploading = false;
+                        state.skenario_table.form_floor_plan_error = None;
+                        state.skenario_table.map_preview_dirty = true;
+                    }
+                    FloorPlanUploadTarget::ActiveSkenario => {
+                        state.floor_plan_uploading = false;
+                        state.floor_plan_error = None;
+                        if let Some(sk) = &mut state.active_skenario {
+                            sk.indoor_config.floor_plan_url = Some(url);
+                            let w_m = sk
+                                .indoor_config
+                                .floor_plan_width_m
+                                .unwrap_or(100.0)
+                                .clamp(5.0, 4000.0);
+                            sk.indoor_config.floor_plan_width_m = Some(w_m);
+                            if let Some(ratio) = aspect_ratio {
+                                sk.indoor_config.floor_plan_height_m =
+                                    Some((w_m * ratio).clamp(5.0, 4000.0));
+                            } else if sk.indoor_config.floor_plan_height_m.is_none() {
+                                sk.indoor_config.floor_plan_height_m = Some(100.0);
+                            }
+                            if sk.indoor_config.floor_plan_rotation_deg.is_none() {
+                                sk.indoor_config.floor_plan_rotation_deg = Some(0.0);
+                            }
+                            if sk.indoor_config.floor_plan_opacity.is_none() {
+                                sk.indoor_config.floor_plan_opacity = Some(1.0);
+                            }
+                            state.skenario_dirty = true;
+                        }
+                    }
+                }
+                state.status_banner = Some(format!("Floor Plan '{filename}' berhasil diunggah."));
+            }
+            ApiEvent::FloorPlanUploadError { target, message } => {
+                use crate::net::client::FloorPlanUploadTarget;
+                match target {
+                    FloorPlanUploadTarget::SkenarioForm => {
+                        state.skenario_table.form_floor_plan_uploading = false;
+                        state.skenario_table.form_floor_plan_error = Some(message.clone());
+                    }
+                    FloorPlanUploadTarget::ActiveSkenario => {
+                        state.floor_plan_uploading = false;
+                        state.floor_plan_error = Some(message.clone());
+                    }
+                }
+                state.status_banner = Some(message);
+            }
             ApiEvent::MediaAssetCreated(dto) => {
                 let id = dto.id;
                 let files: Vec<_> = dto.all_files().into_iter().cloned().collect();

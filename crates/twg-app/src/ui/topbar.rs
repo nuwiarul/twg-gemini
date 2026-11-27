@@ -54,295 +54,294 @@ pub fn draw_top_bar(
                 .inner_margin(egui::Margin::symmetric(10, 5)),
         )
         .show(viewport_ui, |ui| {
-            // Row 1: Navigation Breadcrumb | Centered Godot/Unity Play Test Controls | Session Info
-            ui.horizontal(|ui| {
-                draw_app_brand_icon(ui, 18.0);
-                ui.label(
-                    egui::RichText::new("TWG-RUST 3D")
-                        .size(13.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
-                );
-                ui.separator();
+            // Row 1: Responsive Navigation + Breadcrumb + Save/Play Controls | Compact Account Menu (zero overlap!)
+            let total_w = ui.available_width();
+            let right_reserve = 148.0_f32.min((total_w * 0.32).max(96.0));
+            let left_max_w = (total_w - right_reserve - 8.0).max(180.0);
 
-                // Back to Skenario List
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("< Skenario")
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(186, 230, 253)),
-                        )
-                        .fill(egui::Color32::from_rgb(30, 41, 59)),
-                    )
-                    .clicked()
-                {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Skenarios));
-                }
-
-                if ui.selectable_label(false, "Operasi").clicked() {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Operasis));
-                }
-
-                if ui
-                    .selectable_label(
-                        false,
-                        egui::RichText::new("Tactical")
-                            .color(egui::Color32::from_rgb(110, 231, 183)),
-                    )
-                    .clicked()
-                {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Tactical));
-                }
-
-                if ui
-                    .selectable_label(
-                        false,
-                        egui::RichText::new("Layar Besar")
-                            .color(egui::Color32::from_rgb(253, 224, 71)),
-                    )
-                    .clicked()
-                {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::LayarBesar));
-                }
-
-                if state.can_manage_satkers() && ui.selectable_label(false, "Satkers").clicked() {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Satkers));
-                }
-
-                if state.can_manage_users() && ui.selectable_label(false, "Users").clicked() {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Users));
-                }
-
-                if state.is_super_admin() && ui.selectable_label(false, "Assets 3D").clicked() {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Assets));
-                }
-
-                if ui
-                    .selectable_label(
-                        false,
-                        egui::RichText::new("Grafis")
-                            .color(egui::Color32::from_rgb(125, 211, 252)),
-                    )
-                    .on_hover_text("Pengaturan Grafis & Performa 3D lokal perangkat ini")
-                    .clicked()
-                {
-                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Graphics));
-                }
-
-                ui.separator();
-
-                // Breadcrumb: Operasi / Skenario
-                let op_name = state
-                    .skenario_table
-                    .operasi
-                    .as_ref()
-                    .map(|o| o.name.as_str())
-                    .unwrap_or("Operasi");
-                let sk_name = state
-                    .active_skenario
-                    .as_ref()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("Belum ada skenario");
-                ui.label(
-                    egui::RichText::new(format!("{op_name} /"))
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
-                );
-                ui.label(
-                    egui::RichText::new(sk_name)
-                        .size(12.0)
-                        .strong()
-                        .color(egui::Color32::WHITE),
-                );
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // Prominent Toolbar "Simpan" button (batch-saves all scenario edits, Ctrl+S)
-                {
-                    let dirty_cnt = state.unsaved_change_count();
-                    let is_saving = state.saving_pending_count > 0;
-                    let save_label = if is_saving {
-                        "Menyimpan...".to_string()
-                    } else if dirty_cnt > 0 {
-                        format!("Simpan ({dirty_cnt})*")
-                    } else {
-                        "Simpan".to_string()
-                    };
-                    let save_fill = if is_saving {
-                        egui::Color32::from_rgb(30, 58, 138)
-                    } else if dirty_cnt > 0 {
-                        egui::Color32::from_rgb(217, 119, 6)
-                    } else {
-                        egui::Color32::from_rgb(14, 116, 144)
-                    };
-                    let save_stroke = if dirty_cnt > 0 {
-                        egui::Stroke::new(1.2, egui::Color32::from_rgb(253, 224, 71))
-                    } else {
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248))
-                    };
-                    let save_btn = egui::Button::new(
-                        egui::RichText::new(save_label)
-                            .size(11.5)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(save_fill)
-                    .stroke(save_stroke)
-                    .min_size(egui::vec2(86.0, 24.0));
-                    let tip = if dirty_cnt > 0 {
-                        format!(
-                            "Simpan {dirty_cnt} perubahan skenario (posisi, rotasi, skala, material, dll) ke server (Ctrl+S)"
-                        )
-                    } else {
-                        "Simpan skenario (Ctrl+S) — semua perubahan sudah tersimpan".to_string()
-                    };
-                    if ui
-                        .add_enabled(!is_play_mode && !is_saving, save_btn)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        save_all_scenario_changes(state, api, ws);
-                    }
-                }
-
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-
-                // Prominent Unity / Godot style PLAY / PAUSE / STOP / RESTART transport controls
-                egui::Frame::new()
-                    .fill(if is_play_mode {
-                        egui::Color32::from_rgb(6, 78, 59)
-                    } else {
-                        egui::Color32::from_rgb(23, 32, 48)
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        if is_play_mode {
-                            egui::Color32::from_rgb(16, 185, 129)
-                        } else {
-                            egui::Color32::from_rgb(51, 65, 85)
-                        },
-                    ))
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            if !is_play_mode {
-                                let play_btn = egui::Button::new(
-                                    egui::RichText::new("Play Skenario")
-                                        .size(12.0)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(5, 150, 105))
-                                .min_size(egui::vec2(106.0, 22.0));
-                                if ui
-                                    .add(play_btn)
-                                    .on_hover_text(
-                                        "Masuk Mode Play Skenario (sembunyikan panel editor & buka Panel Animasi)",
-                                    )
-                                    .clicked()
-                                {
-                                    state.draft_points_lnglat.clear();
-                                    state.picking_marker_for_anim_id = None;
-                                    state.tool_mode = ToolMode::Select;
-                                    state.play_session_mode = PlaySessionMode::LocalPreview;
-                                    playback.enter_play_mode();
-                                    state.status_banner = Some(
-                                        "Mode Play Skenario (Lokal Editor) aktif — tidak mempengaruhi app lain / Layar Besar."
-                                            .into(),
-                                    );
-                                }
-                            } else {
-                                let active_cnt = playback
-                                    .tracks
-                                    .values()
-                                    .filter(|t| t.status == crate::state::AnimRunStatus::Playing)
-                                    .count();
-                                ui.label(
-                                    egui::RichText::new(if active_cnt > 0 {
-                                        format!("PLAY MODE ({active_cnt} berjalan)")
-                                    } else {
-                                        "PLAY MODE (SIAP)".to_string()
-                                    })
-                                    .size(11.0)
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(110, 231, 183)),
-                                );
-
-                                let stop_btn = egui::Button::new(
-                                    egui::RichText::new("Keluar Play Mode")
-                                        .size(11.5)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(185, 28, 28))
-                                .min_size(egui::vec2(110.0, 22.0));
-                                if ui
-                                    .add(stop_btn)
-                                    .on_hover_text(
-                                        "Keluar dari Play Skenario, kembalikan semua unit ke posisi editor & tampilkan panel Editor",
-                                    )
-                                    .clicked()
-                                {
-                                    playback.stop_play_test();
-                                    state.status_banner = Some("Kembali ke Mode Editor".into());
-                                    broadcast_playback_cmd(state, playback, ws, "stop_anim");
-                                }
-                            }
-                        });
-                    });
-
-                // Right side: WS status, user, logout
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Logout").clicked() {
-                        state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Login));
-                    }
-
-                    if state.offline_preview {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(250, 204, 21),
-                            "OFFLINE PREVIEW",
+            ui.horizontal_top(|ui| {
+                ui.scope(|ui| {
+                    ui.set_min_width(left_max_w);
+                    ui.set_max_width(left_max_w);
+                    ui.horizontal_wrapped(|ui| {
+                        draw_app_brand_icon(ui, 18.0);
+                        ui.label(
+                            egui::RichText::new("TWG-RUST 3D")
+                                .size(13.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(56, 189, 248)),
                         );
-                    } else {
-                        let ws_color = if state.ws_connected {
-                            egui::Color32::from_rgb(74, 222, 128)
-                        } else {
-                            egui::Color32::from_rgb(248, 113, 113)
-                        };
-                        let ws_text = if state.ws_connected {
-                            format!("WS LIVE ({})", state.online_operators.len())
-                        } else {
-                            "WS OFFLINE".to_string()
-                        };
-                        ui.colored_label(ws_color, ws_text);
-                    }
+                        ui.separator();
 
-                    if let Some(user) = state.current_user.clone()
-                        && ui
+                        // Back to Skenario List
+                        if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new(format!(
-                                        "{} [{}]  •  Profil",
-                                        user.username,
-                                        user.role.label()
-                                    ))
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                                    egui::RichText::new("< Skenario")
+                                        .size(11.5)
+                                        .color(egui::Color32::from_rgb(186, 230, 253)),
                                 )
-                                .fill(egui::Color32::from_rgb(24, 34, 53)),
+                                .fill(egui::Color32::from_rgb(30, 41, 59)),
                             )
-                            .on_hover_text("Buka halaman Profil & Ganti Password")
                             .clicked()
-                    {
-                        state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Profile));
-                    }
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Skenarios));
+                        }
+
+                        if ui.selectable_label(false, "Operasi").clicked() {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Operasis));
+                        }
+
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new("Tactical")
+                                    .color(egui::Color32::from_rgb(110, 231, 183)),
+                            )
+                            .clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Tactical));
+                        }
+
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new("Layar Besar")
+                                    .color(egui::Color32::from_rgb(253, 224, 71)),
+                            )
+                            .clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::LayarBesar));
+                        }
+
+                        if state.can_manage_satkers()
+                            && ui.selectable_label(false, "Satkers").clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Satkers));
+                        }
+
+                        if state.can_manage_users()
+                            && ui.selectable_label(false, "Users").clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Users));
+                        }
+
+                        if state.is_super_admin()
+                            && ui.selectable_label(false, "Assets 3D").clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Assets));
+                        }
+
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new("Grafis")
+                                    .color(egui::Color32::from_rgb(125, 211, 252)),
+                            )
+                            .on_hover_text("Pengaturan Grafis & Performa 3D lokal perangkat ini")
+                            .clicked()
+                        {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Graphics));
+                        }
+
+                        ui.separator();
+
+                        // Breadcrumb: Operasi / Skenario (auto-compact on narrower screens)
+                        let op_name = state
+                            .skenario_table
+                            .operasi
+                            .as_ref()
+                            .map(|o| o.name.as_str())
+                            .unwrap_or("Operasi");
+                        let sk_name = state
+                            .active_skenario
+                            .as_ref()
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("Belum ada skenario");
+                        let op_short = if op_name.chars().count() > 24 {
+                            format!("{}...", op_name.chars().take(22).collect::<String>())
+                        } else {
+                            op_name.to_string()
+                        };
+                        let sk_short = if sk_name.chars().count() > 26 {
+                            format!("{}...", sk_name.chars().take(24).collect::<String>())
+                        } else {
+                            sk_name.to_string()
+                        };
+                        ui.label(
+                            egui::RichText::new(format!("{op_short} /"))
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                        )
+                        .on_hover_text(format!("{op_name} / {sk_name}"));
+                        ui.label(
+                            egui::RichText::new(sk_short)
+                                .size(12.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .on_hover_text(format!("{op_name} / {sk_name}"));
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Prominent Toolbar "Simpan" button (batch-saves all scenario edits, Ctrl+S)
+                        {
+                            let dirty_cnt = state.unsaved_change_count();
+                            let is_saving = state.saving_pending_count > 0;
+                            let save_label = if is_saving {
+                                "Menyimpan...".to_string()
+                            } else if dirty_cnt > 0 {
+                                format!("Simpan ({dirty_cnt})*")
+                            } else {
+                                "Simpan".to_string()
+                            };
+                            let save_fill = if is_saving {
+                                egui::Color32::from_rgb(30, 58, 138)
+                            } else if dirty_cnt > 0 {
+                                egui::Color32::from_rgb(217, 119, 6)
+                            } else {
+                                egui::Color32::from_rgb(14, 116, 144)
+                            };
+                            let save_stroke = if dirty_cnt > 0 {
+                                egui::Stroke::new(1.2, egui::Color32::from_rgb(253, 224, 71))
+                            } else {
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 189, 248))
+                            };
+                            let save_btn = egui::Button::new(
+                                egui::RichText::new(save_label)
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(save_fill)
+                            .stroke(save_stroke)
+                            .min_size(egui::vec2(82.0, 24.0));
+                            let tip = if dirty_cnt > 0 {
+                                format!(
+                                    "Simpan {dirty_cnt} perubahan skenario (posisi, rotasi, skala, material, dll) ke server (Ctrl+S)"
+                                )
+                            } else {
+                                "Simpan skenario (Ctrl+S) — semua perubahan sudah tersimpan"
+                                    .to_string()
+                            };
+                            if ui
+                                .add_enabled(!is_play_mode && !is_saving, save_btn)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                save_all_scenario_changes(state, api, ws);
+                            }
+                        }
+
+                        ui.add_space(4.0);
+
+                        // Prominent Unity / Godot style PLAY / STOP transport control
+                        egui::Frame::new()
+                            .fill(if is_play_mode {
+                                egui::Color32::from_rgb(6, 78, 59)
+                            } else {
+                                egui::Color32::from_rgb(23, 32, 48)
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if is_play_mode {
+                                    egui::Color32::from_rgb(16, 185, 129)
+                                } else {
+                                    egui::Color32::from_rgb(51, 65, 85)
+                                },
+                            ))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(5, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    if !is_play_mode {
+                                        let play_btn = egui::Button::new(
+                                            egui::RichText::new("Play Skenario")
+                                                .size(11.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(5, 150, 105))
+                                        .min_size(egui::vec2(100.0, 22.0));
+                                        if ui
+                                            .add(play_btn)
+                                            .on_hover_text(
+                                                "Masuk Mode Play Skenario (sembunyikan panel editor & buka Panel Animasi)",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.draft_points_lnglat.clear();
+                                            state.picking_marker_for_anim_id = None;
+                                            state.tool_mode = ToolMode::Select;
+                                            state.play_session_mode = PlaySessionMode::LocalPreview;
+                                            playback.enter_play_mode();
+                                            state.status_banner = Some(
+                                                "Mode Play Skenario (Lokal Editor) aktif — tidak mempengaruhi app lain / Layar Besar."
+                                                    .into(),
+                                            );
+                                        }
+                                    } else {
+                                        let active_cnt = playback
+                                            .tracks
+                                            .values()
+                                            .filter(|t| {
+                                                t.status == crate::state::AnimRunStatus::Playing
+                                            })
+                                            .count();
+                                        ui.label(
+                                            egui::RichText::new(if active_cnt > 0 {
+                                                format!("PLAY MODE ({active_cnt} berjalan)")
+                                            } else {
+                                                "PLAY MODE (SIAP)".to_string()
+                                            })
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(110, 231, 183)),
+                                        );
+
+                                        let stop_btn = egui::Button::new(
+                                            egui::RichText::new("Keluar Play Mode")
+                                                .size(11.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(185, 28, 28))
+                                        .min_size(egui::vec2(106.0, 22.0));
+                                        if ui
+                                            .add(stop_btn)
+                                            .on_hover_text(
+                                                "Keluar dari Play Skenario, kembalikan semua unit ke posisi editor & tampilkan panel Editor",
+                                            )
+                                            .clicked()
+                                        {
+                                            playback.stop_play_test();
+                                            state.status_banner =
+                                                Some("Kembali ke Mode Editor".into());
+                                            broadcast_playback_cmd(state, playback, ws, "stop_anim");
+                                        }
+                                    }
+                                });
+                            });
+                    });
                 });
+
+                // Right side: fixed-height compact account dropdown — NEVER stretches panel height or overlaps!
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_reserve, 24.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| match crate::ui::nav_bar::draw_account_menu_button(ui, state, "plot_nav") {
+                        crate::ui::nav_bar::AccountMenuAction::OpenProfile => {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Profile));
+                        }
+                        crate::ui::nav_bar::AccountMenuAction::Logout => {
+                            state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Login));
+                        }
+                        crate::ui::nav_bar::AccountMenuAction::None => {}
+                    },
+                );
             });
 
             ui.add_space(3.0);
@@ -475,21 +474,34 @@ pub fn draw_top_bar(
 
                 ui.separator();
 
-                // Map base layer switchers
-                for (layer, mode, text) in [
-                    (BaseLayer::Osm, MapMode::Outdoor, "OSM"),
-                    (BaseLayer::Satellite, MapMode::Outdoor, "Satellite"),
-                    (BaseLayer::GridDark, MapMode::Indoor, "Indoor Dark"),
-                    (BaseLayer::GridLight, MapMode::Indoor, "Indoor Light"),
-                ] {
-                    let active = state.active_base_layer == layer && state.active_map_mode == mode;
-                    if ui.selectable_label(active, text).clicked() && !active {
+                // Quick base layer switchers (scoped strictly to the active Map Mode)
+                let quick_layers: &[(BaseLayer, &str)] = match state.active_map_mode {
+                    MapMode::Outdoor => &[
+                        (BaseLayer::Osm, "OSM"),
+                        (BaseLayer::Satellite, "Satellite"),
+                    ],
+                    MapMode::Indoor => &[
+                        (BaseLayer::GridDark, "Grid Dark"),
+                        (BaseLayer::GridLight, "Grid Light"),
+                        (BaseLayer::BlankDark, "Blank Dark"),
+                        (BaseLayer::BlankLight, "Blank Light"),
+                        (BaseLayer::FloorPlan, "Floor Plan"),
+                    ],
+                };
+                for &(layer, text) in quick_layers {
+                    let active = state.active_base_layer == layer;
+                    if ui
+                        .selectable_label(active, text)
+                        .on_hover_text(layer.label())
+                        .clicked()
+                        && !active
+                    {
                         state.active_base_layer = layer;
-                        state.active_map_mode = mode;
-                        state.skenario_dirty = true;
+                        if !is_play_mode {
+                            state.skenario_dirty = true;
+                        }
                         if let Some(sk) = &mut state.active_skenario {
                             sk.base_layer = layer;
-                            sk.map_mode = mode;
                         }
                     }
                 }

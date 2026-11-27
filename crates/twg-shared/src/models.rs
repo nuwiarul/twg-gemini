@@ -214,9 +214,9 @@ impl BaseLayer {
             Self::Satellite => "ArcGIS Satellite",
             Self::GridDark => "Indoor Grid Dark",
             Self::GridLight => "Indoor Grid Light",
-            Self::BlankDark => "Blank Dark",
-            Self::BlankLight => "Blank Light",
-            Self::FloorPlan => "Floor Plan",
+            Self::BlankDark => "Indoor Blank Dark",
+            Self::BlankLight => "Indoor Blank Light",
+            Self::FloorPlan => "Indoor Floor Plan",
         }
     }
 
@@ -304,6 +304,8 @@ pub struct IndoorConfig {
     pub floor_plan_width_m: Option<f64>,
     #[serde(default)]
     pub floor_plan_height_m: Option<f64>,
+    #[serde(default)]
+    pub floor_plan_rotation_deg: Option<f64>,
     #[serde(default)]
     pub floor_plan_opacity: Option<f32>,
 }

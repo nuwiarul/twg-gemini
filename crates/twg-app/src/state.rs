@@ -392,6 +392,14 @@ pub enum SkenarioModalMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct NominatimPlace {
+    pub display_name: String,
+    pub lat: f64,
+    pub lng: f64,
+    pub zoom_hint: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct SkenarioTableState {
     pub operasi: Option<Operasi>,
     pub filter_operasi_id: Option<Uuid>,
@@ -420,6 +428,17 @@ pub struct SkenarioTableState {
     pub form_base_layer: BaseLayer,
     pub form_skybox: SkyboxPreset,
     pub form_grid_size_m: f64,
+    pub form_floor_plan_url: Option<String>,
+    pub form_floor_plan_width_m: f64,
+    pub form_floor_plan_height_m: f64,
+    pub form_floor_plan_rotation_deg: f64,
+    pub form_floor_plan_opacity: f32,
+    pub form_floor_plan_uploading: bool,
+    pub form_floor_plan_error: Option<String>,
+    pub geocode_query: String,
+    pub geocode_loading: bool,
+    pub geocode_error: Option<String>,
+    pub geocode_results: Vec<NominatimPlace>,
     pub map_preview_dirty: bool,
     pub map_preview_snap: bool,
     pub submitting: bool,
@@ -456,6 +475,17 @@ impl Default for SkenarioTableState {
             form_base_layer: BaseLayer::Osm,
             form_skybox: SkyboxPreset::DayClear,
             form_grid_size_m: 10.0,
+            form_floor_plan_url: None,
+            form_floor_plan_width_m: 100.0,
+            form_floor_plan_height_m: 100.0,
+            form_floor_plan_rotation_deg: 0.0,
+            form_floor_plan_opacity: 1.0,
+            form_floor_plan_uploading: false,
+            form_floor_plan_error: None,
+            geocode_query: String::new(),
+            geocode_loading: false,
+            geocode_error: None,
+            geocode_results: Vec::new(),
             map_preview_dirty: false,
             map_preview_snap: false,
             submitting: false,
@@ -514,6 +544,17 @@ impl SkenarioTableState {
             self.map_preview_snap = true;
         }
         self.form_skybox = SkyboxPreset::DayClear;
+        self.form_floor_plan_url = None;
+        self.form_floor_plan_width_m = 100.0;
+        self.form_floor_plan_height_m = 100.0;
+        self.form_floor_plan_rotation_deg = 0.0;
+        self.form_floor_plan_opacity = 1.0;
+        self.form_floor_plan_uploading = false;
+        self.form_floor_plan_error = None;
+        self.geocode_query.clear();
+        self.geocode_loading = false;
+        self.geocode_error = None;
+        self.geocode_results.clear();
         self.submitting = false;
         self.form_error = None;
     }
@@ -534,6 +575,37 @@ impl SkenarioTableState {
         self.form_base_layer = sk.base_layer;
         self.form_skybox = sk.skybox;
         self.form_grid_size_m = sk.indoor_config.grid_size_m.max(1.0);
+        self.form_floor_plan_url = sk
+            .indoor_config
+            .floor_plan_url
+            .clone()
+            .filter(|s| !s.trim().is_empty());
+        self.form_floor_plan_width_m = sk
+            .indoor_config
+            .floor_plan_width_m
+            .unwrap_or(100.0)
+            .clamp(5.0, 4000.0);
+        self.form_floor_plan_height_m = sk
+            .indoor_config
+            .floor_plan_height_m
+            .unwrap_or(100.0)
+            .clamp(5.0, 4000.0);
+        self.form_floor_plan_rotation_deg = sk
+            .indoor_config
+            .floor_plan_rotation_deg
+            .unwrap_or(0.0)
+            .rem_euclid(360.0);
+        self.form_floor_plan_opacity = sk
+            .indoor_config
+            .floor_plan_opacity
+            .unwrap_or(1.0)
+            .clamp(0.1, 1.0);
+        self.form_floor_plan_uploading = false;
+        self.form_floor_plan_error = None;
+        self.geocode_query.clear();
+        self.geocode_loading = false;
+        self.geocode_error = None;
+        self.geocode_results.clear();
         self.map_preview_dirty = true;
         self.map_preview_snap = true;
         self.submitting = false;
@@ -1893,6 +1965,8 @@ pub struct AppState {
     pub dirty_anim_ids: HashSet<Uuid>,
     pub skenario_dirty: bool,
     pub saving_pending_count: usize,
+    pub floor_plan_uploading: bool,
+    pub floor_plan_error: Option<String>,
 }
 
 impl AppState {
@@ -2170,6 +2244,8 @@ impl AppState {
             dirty_anim_ids: HashSet::new(),
             skenario_dirty: false,
             saving_pending_count: 0,
+            floor_plan_uploading: false,
+            floor_plan_error: None,
         }
     }
 
