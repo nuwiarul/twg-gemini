@@ -118,6 +118,18 @@ pub fn draw_top_bar(
                     state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Assets));
                 }
 
+                if ui
+                    .selectable_label(
+                        false,
+                        egui::RichText::new("Grafis")
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    )
+                    .on_hover_text("Pengaturan Grafis & Performa 3D lokal perangkat ini")
+                    .clicked()
+                {
+                    state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Graphics));
+                }
+
                 ui.separator();
 
                 // Breadcrumb: Operasi / Skenario
@@ -1048,6 +1060,11 @@ pub(super) fn leave_plot(
             playback.stop_play_test();
             state.play_session_mode = PlaySessionMode::LocalPreview;
             state.screen = AppScreen::Assets;
+        }
+        AppScreen::Graphics => {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.screen = AppScreen::Graphics;
         }
         AppScreen::Login => {
             playback.stop_play_test();

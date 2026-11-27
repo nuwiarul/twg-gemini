@@ -11,6 +11,7 @@ pub(crate) mod tactical_arrow_anim;
 pub(crate) mod video_recorder_ui;
 mod bottom_bar;
 mod formation_pad;
+mod graphics_page;
 mod layar_besar_page;
 mod left_panel;
 mod login;
@@ -112,7 +113,10 @@ pub fn egui_root_system(
     // Enforce role-based screen guards:
     // Dedicated Layar Besar accounts (`layar_besar`, `layar_besar_satker`) can ONLY view Layar Besar or Profile.
     if state.is_big_screen_only_role()
-        && !matches!(state.screen, AppScreen::LayarBesar | AppScreen::Profile)
+        && !matches!(
+            state.screen,
+            AppScreen::LayarBesar | AppScreen::Profile | AppScreen::Graphics
+        )
     {
         nav_bar::enter_layar_besar(&mut state, &mut playback, &ws);
     }
@@ -124,6 +128,22 @@ pub fn egui_root_system(
     }
     if state.screen == AppScreen::Users && !state.can_manage_users() {
         state.screen = AppScreen::Operasis;
+    }
+
+    if state.screen == AppScreen::Graphics {
+        graphics_page::draw_graphics_screen(
+            &mut viewport_ui,
+            &mut state,
+            &mut playback,
+            &mut bench,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        ui_state.wants_pointer = true;
+        ui_state.wants_keyboard = true;
+        ui_state.viewport_rect_logical = None;
+        return Ok(());
     }
 
     if state.screen == AppScreen::Profile {

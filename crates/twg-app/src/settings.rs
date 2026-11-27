@@ -19,6 +19,160 @@ pub fn save_audio_output(enabled: bool) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformancePreset {
+    Low,
+    #[default]
+    Balanced,
+    High,
+    Custom,
+}
+
+impl PerformancePreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Ringan (Laptop / GPU Standar)",
+            Self::Balanced => "Seimbang (Rekomendasi)",
+            Self::High => "Tinggi (PC Layar Besar / RTX)",
+            Self::Custom => "Kustom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalPerformanceSettings {
+    pub preset: PerformancePreset,
+    pub auto_lod_enabled: bool,
+    pub lod_switch_distance_m: f32,
+    pub strip_lod2_skinning: bool,
+    pub lod_far_cull_enabled: bool,
+    pub lod_far_cull_distance_m: f32,
+    pub anim_culling_enabled: bool,
+    pub anim_cull_distance_m: f32,
+    pub lazy_walk_spawn: bool,
+    pub show_corner_fps: bool,
+}
+
+impl Default for LocalPerformanceSettings {
+    fn default() -> Self {
+        Self::for_preset(PerformancePreset::Balanced)
+    }
+}
+
+impl LocalPerformanceSettings {
+    pub fn for_preset(preset: PerformancePreset) -> Self {
+        match preset {
+            PerformancePreset::Low => Self {
+                preset: PerformancePreset::Low,
+                auto_lod_enabled: true,
+                lod_switch_distance_m: 80.0,
+                strip_lod2_skinning: true,
+                lod_far_cull_enabled: true,
+                lod_far_cull_distance_m: 500.0,
+                anim_culling_enabled: true,
+                anim_cull_distance_m: 150.0,
+                lazy_walk_spawn: true,
+                show_corner_fps: false,
+            },
+            PerformancePreset::Balanced | PerformancePreset::Custom => Self {
+                preset: PerformancePreset::Balanced,
+                auto_lod_enabled: true,
+                lod_switch_distance_m: 120.0,
+                strip_lod2_skinning: true,
+                lod_far_cull_enabled: false,
+                lod_far_cull_distance_m: 600.0,
+                anim_culling_enabled: true,
+                anim_cull_distance_m: 260.0,
+                lazy_walk_spawn: true,
+                show_corner_fps: false,
+            },
+            PerformancePreset::High => Self {
+                preset: PerformancePreset::High,
+                auto_lod_enabled: true,
+                lod_switch_distance_m: 220.0,
+                strip_lod2_skinning: true,
+                lod_far_cull_enabled: false,
+                lod_far_cull_distance_m: 900.0,
+                anim_culling_enabled: true,
+                anim_cull_distance_m: 450.0,
+                lazy_walk_spawn: true,
+                show_corner_fps: false,
+            },
+        }
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.lod_switch_distance_m = if self.lod_switch_distance_m.is_finite() {
+            self.lod_switch_distance_m.clamp(30.0, 500.0)
+        } else {
+            120.0
+        };
+        self.lod_far_cull_distance_m = if self.lod_far_cull_distance_m.is_finite() {
+            self.lod_far_cull_distance_m.clamp(150.0, 2000.0)
+        } else {
+            600.0
+        };
+        self.anim_cull_distance_m = if self.anim_cull_distance_m.is_finite() {
+            self.anim_cull_distance_m.clamp(40.0, 1500.0)
+        } else {
+            260.0
+        };
+        self
+    }
+
+    pub fn detect_matching_preset(&self) -> PerformancePreset {
+        for p in [
+            PerformancePreset::Low,
+            PerformancePreset::Balanced,
+            PerformancePreset::High,
+        ] {
+            let ref_s = Self::for_preset(p);
+            if self.auto_lod_enabled == ref_s.auto_lod_enabled
+                && (self.lod_switch_distance_m - ref_s.lod_switch_distance_m).abs() < 0.5
+                && self.strip_lod2_skinning == ref_s.strip_lod2_skinning
+                && self.lod_far_cull_enabled == ref_s.lod_far_cull_enabled
+                && (!self.lod_far_cull_enabled
+                    || (self.lod_far_cull_distance_m - ref_s.lod_far_cull_distance_m).abs() < 0.5)
+                && self.anim_culling_enabled == ref_s.anim_culling_enabled
+                && (self.anim_cull_distance_m - ref_s.anim_cull_distance_m).abs() < 0.5
+                && self.lazy_walk_spawn == ref_s.lazy_walk_spawn
+            {
+                return p;
+            }
+        }
+        PerformancePreset::Custom
+    }
+}
+
+pub fn resolve_performance_settings_path() -> PathBuf {
+    resolve_settings_path().with_file_name("performance-settings.json")
+}
+
+pub fn load_performance_settings() -> LocalPerformanceSettings {
+    let path = resolve_performance_settings_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<LocalPerformanceSettings>(&raw).ok())
+        .map(LocalPerformanceSettings::sanitized)
+        .unwrap_or_default()
+}
+
+pub fn save_performance_settings(settings: &LocalPerformanceSettings) -> Result<PathBuf, String> {
+    let clean = settings.clone().sanitized();
+    let path = resolve_performance_settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Gagal membuat folder konfigurasi lokal: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(&clean)
+        .map_err(|e| format!("Gagal serialisasi pengaturan grafis: {e}"))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Gagal menyimpan pengaturan grafis lokal: {e}"))?;
+    Ok(path)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerProtocol {
     #[default]

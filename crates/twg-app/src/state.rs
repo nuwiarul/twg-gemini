@@ -39,6 +39,7 @@ pub enum AppScreen {
     Satkers,
     Users,
     Assets,
+    Graphics,
     Profile,
 }
 

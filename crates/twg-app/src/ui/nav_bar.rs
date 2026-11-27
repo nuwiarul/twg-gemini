@@ -498,6 +498,36 @@ pub fn draw_screen_nav_tabs(
             });
         }
     }
+
+    // Local Graphics & Performance Settings (saved per-device, available to all roles right beside Assets 3D)
+    {
+        let on_graphics = state.screen == AppScreen::Graphics;
+        if ui
+            .selectable_label(
+                on_graphics,
+                egui::RichText::new("Grafis")
+                    .strong()
+                    .color(if on_graphics {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(125, 211, 252)
+                    }),
+            )
+            .on_hover_text("Pengaturan Grafis & Performa 3D lokal (LOD0/LOD2, Skinning, Culling)")
+            .clicked()
+            && !on_graphics
+        {
+            playback.stop_play_test();
+            state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.skenario_table.close_modal();
+            state.restore_active_skenario_map_state();
+            state.screen = AppScreen::Graphics;
+            ws.send(WsOutCommand::Subscribe {
+                skenario_id: None,
+                client_mode: WsClientMode::Idle,
+            });
+        }
+    }
 }
 
 pub fn draw_global_top_bar(

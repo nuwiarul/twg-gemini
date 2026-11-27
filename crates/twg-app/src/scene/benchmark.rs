@@ -91,9 +91,18 @@ pub struct PerformanceBenchmarkState {
     /// When `true` during Play/Benchmark, every animated GLB plays its clip immediately (even single-clip models).
     pub force_play_all_anims: bool,
     /// Live runtime optimization toggles (can be flipped mid-benchmark to compare before/after!)
+    pub auto_lod_enabled: bool,
+    pub lod_switch_distance_m: f32,
+    pub strip_lod2_skinning: bool,
+    pub lod_far_cull_enabled: bool,
+    pub lod_far_cull_distance_m: f32,
     pub anim_culling_enabled: bool,
     pub anim_cull_distance_m: f32,
     pub lazy_walk_spawn: bool,
+    /// Live LOD tier counters populated by `sync_markers_system`
+    pub lod0_active_count: usize,
+    pub lod2_active_count: usize,
+    pub far_culled_count: usize,
     /// Rolling frame time window (seconds) for smooth FPS + 1% Low calculation.
     frame_dts: VecDeque<f32>,
     pub current_fps: f32,
@@ -121,9 +130,10 @@ pub struct PerformanceBenchmarkState {
 
 impl Default for PerformanceBenchmarkState {
     fn default() -> Self {
+        let saved = crate::settings::load_performance_settings();
         Self {
             panel_open: false,
-            show_corner_fps: false,
+            show_corner_fps: saved.show_corner_fps,
             selected_scenario: BenchmarkScenarioKind::StaticOnly,
             selected_count: 1000,
             prefer_lod2: true,
@@ -131,9 +141,17 @@ impl Default for PerformanceBenchmarkState {
             last_applied_scale_mult: 1.0,
             spacing_m: 8.0,
             force_play_all_anims: true,
-            anim_culling_enabled: true,
-            anim_cull_distance_m: 260.0,
-            lazy_walk_spawn: true,
+            auto_lod_enabled: saved.auto_lod_enabled,
+            lod_switch_distance_m: saved.lod_switch_distance_m,
+            strip_lod2_skinning: saved.strip_lod2_skinning,
+            lod_far_cull_enabled: saved.lod_far_cull_enabled,
+            lod_far_cull_distance_m: saved.lod_far_cull_distance_m,
+            anim_culling_enabled: saved.anim_culling_enabled,
+            anim_cull_distance_m: saved.anim_cull_distance_m,
+            lazy_walk_spawn: saved.lazy_walk_spawn,
+            lod0_active_count: 0,
+            lod2_active_count: 0,
+            far_culled_count: 0,
             frame_dts: VecDeque::with_capacity(240),
             current_fps: 0.0,
             avg_fps: 0.0,
@@ -159,6 +177,39 @@ impl Default for PerformanceBenchmarkState {
 }
 
 impl PerformanceBenchmarkState {
+    pub fn to_local_settings(&self) -> crate::settings::LocalPerformanceSettings {
+        let mut s = crate::settings::LocalPerformanceSettings {
+            preset: crate::settings::PerformancePreset::Custom,
+            auto_lod_enabled: self.auto_lod_enabled,
+            lod_switch_distance_m: self.lod_switch_distance_m,
+            strip_lod2_skinning: self.strip_lod2_skinning,
+            lod_far_cull_enabled: self.lod_far_cull_enabled,
+            lod_far_cull_distance_m: self.lod_far_cull_distance_m,
+            anim_culling_enabled: self.anim_culling_enabled,
+            anim_cull_distance_m: self.anim_cull_distance_m,
+            lazy_walk_spawn: self.lazy_walk_spawn,
+            show_corner_fps: self.show_corner_fps,
+        };
+        s.preset = s.detect_matching_preset();
+        s
+    }
+
+    pub fn apply_local_settings(&mut self, s: &crate::settings::LocalPerformanceSettings) {
+        self.auto_lod_enabled = s.auto_lod_enabled;
+        self.lod_switch_distance_m = s.lod_switch_distance_m;
+        self.strip_lod2_skinning = s.strip_lod2_skinning;
+        self.lod_far_cull_enabled = s.lod_far_cull_enabled;
+        self.lod_far_cull_distance_m = s.lod_far_cull_distance_m;
+        self.anim_culling_enabled = s.anim_culling_enabled;
+        self.anim_cull_distance_m = s.anim_cull_distance_m;
+        self.lazy_walk_spawn = s.lazy_walk_spawn;
+        self.show_corner_fps = s.show_corner_fps;
+    }
+
+    pub fn persist_local_settings(&self) {
+        let _ = crate::settings::save_performance_settings(&self.to_local_settings());
+    }
+
     pub fn has_backup(&self) -> bool {
         self.backup.is_some()
     }
@@ -277,7 +328,10 @@ fn spawn_benchmark_scenario(
         });
     }
 
-    let (static_pool, anim_pool) = pick_benchmark_model_pools(state, bench.prefer_lod2);
+    // When Auto Distance LOD is enabled, always spawn markers with their real LOD0 `model_path`
+    // so Dynamic LOD automatically renders LOD0 (< 120m) and zero-skinning `*_idle_lod2.glb` (>= 120m)!
+    let force_static_lod2_path = !bench.auto_lod_enabled && bench.prefer_lod2;
+    let (static_pool, anim_pool) = pick_benchmark_model_pools(state, force_static_lod2_path);
     let fallback_static = static_pool
         .first()
         .cloned()
@@ -766,13 +820,19 @@ pub fn draw_benchmark_overlay(
                             );
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "Objek 3D: {}  •  Animasi: {}  •  ECS Entities: {}  •  Jarak Cam: {:.0}m",
+                                    "Objek: {} (LOD0: {} | LOD2: {}{})  •  ECS: {}  •  Cam: {:.0}m",
                                     state.markers.len(),
-                                    state.anims.len(),
+                                    bench.lod0_active_count,
+                                    bench.lod2_active_count,
+                                    if bench.far_culled_count > 0 {
+                                        format!(" | Cull: {}", bench.far_culled_count)
+                                    } else {
+                                        String::new()
+                                    },
                                     bench.ecs_entity_count,
                                     tcam.distance_m
                                 ))
-                                .size(10.0)
+                                .size(9.8)
                                 .color(egui::Color32::from_rgb(148, 163, 184)),
                             );
                         });
@@ -905,35 +965,89 @@ pub fn draw_benchmark_overlay(
             ui.separator();
             ui.add_space(4.0);
 
-            // 3. Live Runtime Optimization Switches
+            // 3. Live Runtime Optimization Switches (auto-saved to local performance-settings.json)
             ui.label(
-                egui::RichText::new("Optimasi Runtime Aktif")
+                egui::RichText::new("Optimasi Runtime Aktif (LOD0 / LOD2 / Zero-Skinning)")
                     .size(11.0)
                     .strong()
                     .color(egui::Color32::from_rgb(110, 231, 183)),
             );
-            ui.checkbox(
-                &mut bench.anim_culling_enabled,
-                "Distance Animation Culling (Pause skinning unit di luar jarak kamera)",
-            );
+            let mut perf_changed = false;
+            perf_changed |= ui
+                .checkbox(
+                    &mut bench.auto_lod_enabled,
+                    "Auto Distance LOD (Dekat = LOD0 penuh, Jauh = *_idle_lod2.glb)",
+                )
+                .changed();
+            if bench.auto_lod_enabled {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Batas LOD0 -> LOD2:").size(10.0));
+                    perf_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut bench.lod_switch_distance_m, 40.0..=400.0)
+                                .suffix(" m")
+                                .fixed_decimals(0),
+                        )
+                        .changed();
+                });
+                perf_changed |= ui
+                    .checkbox(
+                        &mut bench.strip_lod2_skinning,
+                        "Tanpa GPU Skinning di LOD2 (Instancing mesh statis)",
+                    )
+                    .changed();
+            }
+            perf_changed |= ui
+                .checkbox(
+                    &mut bench.lod_far_cull_enabled,
+                    "Sembunyikan unit sangat jauh (Far Cull)",
+                )
+                .changed();
+            if bench.lod_far_cull_enabled {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Batas Far Cull:").size(10.0));
+                    perf_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut bench.lod_far_cull_distance_m, 200.0..=1500.0)
+                                .suffix(" m")
+                                .fixed_decimals(0),
+                        )
+                        .changed();
+                });
+            }
+            perf_changed |= ui
+                .checkbox(
+                    &mut bench.anim_culling_enabled,
+                    "Distance Animation Culling (Pause animasi LOD0 jauh)",
+                )
+                .changed();
             if bench.anim_culling_enabled {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Batas Jarak Animasi:").size(10.0));
-                    ui.add(
-                        egui::Slider::new(&mut bench.anim_cull_distance_m, 40.0..=1500.0)
-                            .suffix(" m")
-                            .fixed_decimals(0),
-                    );
+                    perf_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut bench.anim_cull_distance_m, 40.0..=1500.0)
+                                .suffix(" m")
+                                .fixed_decimals(0),
+                        )
+                        .changed();
                 });
             }
-            ui.checkbox(
-                &mut bench.lazy_walk_spawn,
-                "Lazy-Spawn Rig Walk (Hemat 50% tulang saat unit diam)",
-            );
-            ui.checkbox(
-                &mut bench.show_corner_fps,
-                "Tampilkan Mini FPS di Pojok Kanan Atas saat panel ditutup",
-            );
+            perf_changed |= ui
+                .checkbox(
+                    &mut bench.lazy_walk_spawn,
+                    "Lazy-Spawn Rig Walk (Hemat 50% tulang saat unit diam)",
+                )
+                .changed();
+            perf_changed |= ui
+                .checkbox(
+                    &mut bench.show_corner_fps,
+                    "Tampilkan Mini FPS di Pojok Kanan Atas saat panel ditutup",
+                )
+                .changed();
+            if perf_changed {
+                bench.persist_local_settings();
+            }
 
             ui.add_space(6.0);
             ui.separator();
@@ -994,7 +1108,7 @@ pub fn draw_benchmark_overlay(
                             };
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "[{}] {} ({}) → Avg {:.1} FPS | 1% Low {:.1} | {:.1}ms | {} ent",
+                                    "[{}] {} ({}) -> Avg {:.1} FPS | 1% Low {:.1} | {:.1}ms | {} ent",
                                     r.timestamp,
                                     r.scenario,
                                     r.count,

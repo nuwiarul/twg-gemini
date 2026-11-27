@@ -35,6 +35,7 @@ pub fn draw_layar_besar_overlay(
     let is_dedicated_role = state.is_big_screen_only_role();
     let mut exit_big_screen = !is_dedicated_role && ctx.input(|i| i.key_pressed(egui::Key::Escape));
     let mut do_refresh = ctx.input(|i| i.key_pressed(egui::Key::F5));
+    let mut go_graphics = false;
     let mut go_profile = false;
     let mut do_logout = false;
 
@@ -128,6 +129,21 @@ pub fn draw_layar_besar_overlay(
                             .clicked()
                         {
                             do_refresh = true;
+                        }
+
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Grafis")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                                )
+                                .fill(egui::Color32::from_rgb(20, 34, 54)),
+                            )
+                            .on_hover_text("Pengaturan Grafis & Performa 3D perangkat ini")
+                            .clicked()
+                        {
+                            go_graphics = true;
                         }
 
                         if ui
@@ -287,6 +303,15 @@ pub fn draw_layar_besar_overlay(
                 client_mode: WsClientMode::BigScreen,
             });
         }
+    } else if go_graphics {
+        playback.stop_play_test();
+        play_rts.reset_all();
+        state.play_session_mode = PlaySessionMode::LocalPreview;
+        state.screen = AppScreen::Graphics;
+        ws.send(WsOutCommand::Subscribe {
+            skenario_id: None,
+            client_mode: WsClientMode::Idle,
+        });
     } else if go_profile {
         play_rts.reset_all();
         open_profile_screen(state, playback, ws);
