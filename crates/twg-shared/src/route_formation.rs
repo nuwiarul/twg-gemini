@@ -956,6 +956,21 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::billboard_anim::is_billboard_anim(anim) {
         return crate::billboard_anim::parse_billboard_anim_config(anim).is_playable_video();
     }
+    if crate::camera_anim::is_camera_static_anim(anim) {
+        return true;
+    }
+    if crate::camera_anim::is_camera_follow_anim(anim) {
+        let cfg = crate::camera_anim::parse_camera_follow_config(anim);
+        return cfg
+            .target_marker_id
+            .is_some_and(|id| markers.iter().any(|m| m.id == id));
+    }
+    if crate::environment_anim::is_water_anim(anim) {
+        return anim.geom.len() >= 3;
+    }
+    if crate::environment_anim::is_rain_anim(anim) {
+        return crate::environment_anim::parse_rain_anim_config(anim).has_playable_setup(anim);
+    }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }

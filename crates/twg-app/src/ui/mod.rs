@@ -2,6 +2,8 @@ pub mod app_icon;
 mod assets_page;
 mod audio_anim;
 mod billboard_anim;
+pub(crate) mod camera_anim;
+pub(crate) mod environment_anim;
 mod bottom_bar;
 mod formation_pad;
 mod layar_besar_page;
@@ -573,7 +575,10 @@ pub fn egui_root_system(
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
+                | ToolMode::PickCameraFollowMarker
                 | ToolMode::PlaceParticle
+                | ToolMode::DrawWaterPolygon
+                | ToolMode::PlaceRainZone
         )
     {
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);

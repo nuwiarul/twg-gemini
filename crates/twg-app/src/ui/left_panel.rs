@@ -2181,49 +2181,552 @@ fn draw_layers_tab(
 
             ui.add_space(4.0);
 
-            // Audio has no map geometry; select it here or in the Animasi tab.
-            let audio_anims: Vec<_> = state.anims.iter()
-                .filter(|a| twg_shared::audio_anim::is_audio_anim(a))
-                .filter(|a| filter.is_empty() || a.name.to_lowercase().contains(&filter) || "audio play suara".contains(&filter))
-                .cloned().collect();
-            egui::CollapsingHeader::new(egui::RichText::new(format!("Audio ({})", audio_anims.len()))
-                .size(12.0).strong().color(egui::Color32::from_rgb(192, 132, 252)))
-                .id_salt("audio_layers").default_open(true).show(ui, |ui| {
-                    for anim in &audio_anims {
-                        let selected = state.selected == SelectedEntity::Anim(anim.id);
-                        egui::Frame::new()
-                            .fill(if selected { egui::Color32::from_rgb(14, 116, 144) } else { egui::Color32::TRANSPARENT })
-                            .corner_radius(4.0)
-                            .inner_margin(egui::Margin::symmetric(4, 3))
-                            .show(ui, |ui| { ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            let name_width = (ui.available_width() - 38.0).max(50.0);
-                            let name_clicked = ui.allocate_ui_with_layout(
-                                egui::vec2(name_width, 25.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| ui.add(egui::Label::new(egui::RichText::new(&anim.name)
-                                    .size(11.0).color(egui::Color32::from_rgb(226, 232, 240)))
-                                    .truncate().sense(egui::Sense::click())).clicked(),
-                            ).inner;
-                            if name_clicked {
-                                state.selected = SelectedEntity::Anim(anim.id);
-                                state.anim_edit = Some(anim.clone());
-                                state.marker_edit = None;
-                                state.building_edit = None;
-                                state.line_edit = None;
-                                state.text_edit = None;
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_enabled(!is_play_mode, egui::Button::new(egui::RichText::new("×")
-                                    .size(16.0).strong().color(egui::Color32::from_rgb(248, 113, 113)))
-                                    .min_size(egui::vec2(28.0, 25.0)).frame(false))
-                                    .on_hover_text("Hapus animasi Audio").clicked() {
-                                    state.request_delete_entity(SelectedEntity::Anim(anim.id));
-                                }
-                            });
-                        }); });
+            // 7. Media (Play Suara & Billboard / Videotron 3D)
+            let media_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Audio)
+                .cloned()
+                .collect();
+            let media_total = media_anims.len();
+            let media_filtered = media_anims
+                .iter()
+                .filter(|a| {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    state.matches_layer_filters(vis, locked)
+                        && (filter.is_empty()
+                            || a.name.to_lowercase().contains(&filter)
+                            || "media".contains(&filter)
+                            || "audio play suara".contains(&filter)
+                            || "billboard videotron video gambar".contains(&filter))
+                })
+                .count();
+            let media_header = if has_active_filter {
+                format!("Media ({media_filtered}/{media_total})")
+            } else {
+                format!("Media ({media_total})")
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(media_header)
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(192, 132, 252)),
+            )
+            .id_salt("media_layers")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut shown = 0;
+                for a in &media_anims {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    if !state.matches_layer_filters(vis, locked) {
+                        continue;
                     }
-                });
+                    if !filter.is_empty()
+                        && !a.name.to_lowercase().contains(&filter)
+                        && !"media".contains(&filter)
+                        && !"audio play suara".contains(&filter)
+                        && !"billboard videotron video gambar".contains(&filter)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let row_bg = if sel {
+                        egui::Color32::from_rgb(14, 116, 144)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let (tag_txt, tag_col) = if twg_shared::billboard_anim::is_billboard_anim(a) {
+                        if twg_shared::billboard_anim::parse_billboard_anim_config(a).media_mode
+                            == twg_shared::billboard_anim::BillboardMediaMode::Video
+                        {
+                            ("[VIDEO]", egui::Color32::from_rgb(56, 189, 248))
+                        } else {
+                            ("[IMG]", egui::Color32::from_rgb(45, 212, 191))
+                        }
+                    } else {
+                        ("[SUARA]", egui::Color32::from_rgb(192, 132, 252))
+                    };
+                    egui::Frame::new()
+                        .fill(row_bg)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(4, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    toggle_hidden_id = Some(a.id);
+                                }
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                    toggle_locked_id = Some(a.id);
+                                }
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        tag_col
+                                    },
+                                ));
+                                let name_col = if sel {
+                                    egui::Color32::WHITE
+                                } else if !vis {
+                                    egui::Color32::from_rgb(100, 116, 139)
+                                } else if locked {
+                                    egui::Color32::from_rgb(253, 230, 138)
+                                } else {
+                                    egui::Color32::from_rgb(226, 232, 240)
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&a.name).size(11.0).color(name_col),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    state.selected = SelectedEntity::Anim(a.id);
+                                    state.anim_edit = Some(a.clone());
+                                    state.marker_edit = None;
+                                    state.building_edit = None;
+                                    state.line_edit = None;
+                                    state.text_edit = None;
+                                    if let Some(pt) =
+                                        crate::scene::anim_primary_focus_lnglat(a, &state.anims, &state.markers)
+                                    {
+                                        fly_to = Some(pt);
+                                    }
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if !is_play_mode {
+                                            if ui
+                                                .add_enabled(
+                                                    !locked,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x").size(10.5).color(
+                                                            if locked {
+                                                                egui::Color32::from_rgb(71, 85, 105)
+                                                            } else {
+                                                                egui::Color32::from_rgb(
+                                                                    248, 113, 113,
+                                                                )
+                                                            },
+                                                        ),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if locked {
+                                                    "Objek terkunci — buka kunci untuk menghapus"
+                                                } else {
+                                                    "Hapus animasi Media"
+                                                })
+                                                .clicked()
+                                            {
+                                                delete_anim_id = Some(a.id);
+                                            }
+                                        }
+                                        if anim_is_playable(a, &state.markers)
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Play")
+                                                            .size(10.5)
+                                                            .color(tag_col),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text("Play animasi Media di Play Skenario")
+                                                .clicked()
+                                        {
+                                            quick_play_anim_id = Some(a.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if shown == 0 {
+                    ui.label(
+                        egui::RichText::new(if has_active_filter {
+                            "  (tidak ada yg cocok filter)"
+                        } else {
+                            "  (belum ada media — buat di tab Animasi -> Media)"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // 8. Kamera (Static Camera & Camera Follow)
+            let cam_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Camera)
+                .cloned()
+                .collect();
+            let cam_total = cam_anims.len();
+            let cam_filtered = cam_anims
+                .iter()
+                .filter(|a| {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    state.matches_layer_filters(vis, locked)
+                        && (filter.is_empty()
+                            || a.name.to_lowercase().contains(&filter)
+                            || "kamera camera static follow orbit".contains(&filter))
+                })
+                .count();
+            let cam_header = if has_active_filter {
+                format!("Kamera ({cam_filtered}/{cam_total})")
+            } else {
+                format!("Kamera ({cam_total})")
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(cam_header)
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(56, 189, 248)),
+            )
+            .id_salt("camera_layers")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut shown = 0;
+                for a in &cam_anims {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    if !state.matches_layer_filters(vis, locked) {
+                        continue;
+                    }
+                    if !filter.is_empty()
+                        && !a.name.to_lowercase().contains(&filter)
+                        && !"kamera camera static follow orbit".contains(&filter)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let row_bg = if sel {
+                        egui::Color32::from_rgb(14, 116, 144)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let (tag_txt, tag_col) = if twg_shared::camera_anim::is_camera_static_anim(a) {
+                        ("[STATIC]", egui::Color32::from_rgb(56, 189, 248))
+                    } else {
+                        ("[FOLLOW]", egui::Color32::from_rgb(52, 211, 153))
+                    };
+                    egui::Frame::new()
+                        .fill(row_bg)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(4, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    toggle_hidden_id = Some(a.id);
+                                }
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                    toggle_locked_id = Some(a.id);
+                                }
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        tag_col
+                                    },
+                                ));
+                                let name_col = if sel {
+                                    egui::Color32::WHITE
+                                } else if !vis {
+                                    egui::Color32::from_rgb(100, 116, 139)
+                                } else if locked {
+                                    egui::Color32::from_rgb(253, 230, 138)
+                                } else {
+                                    egui::Color32::from_rgb(226, 232, 240)
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&a.name).size(11.0).color(name_col),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    state.selected = SelectedEntity::Anim(a.id);
+                                    state.anim_edit = Some(a.clone());
+                                    state.marker_edit = None;
+                                    state.building_edit = None;
+                                    state.line_edit = None;
+                                    state.text_edit = None;
+                                    if let Some(pt) =
+                                        crate::scene::anim_primary_focus_lnglat(a, &state.anims, &state.markers)
+                                    {
+                                        fly_to = Some(pt);
+                                    }
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if !is_play_mode {
+                                            if ui
+                                                .add_enabled(
+                                                    !locked,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x").size(10.5).color(
+                                                            if locked {
+                                                                egui::Color32::from_rgb(71, 85, 105)
+                                                            } else {
+                                                                egui::Color32::from_rgb(
+                                                                    248, 113, 113,
+                                                                )
+                                                            },
+                                                        ),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if locked {
+                                                    "Objek terkunci — buka kunci untuk menghapus"
+                                                } else {
+                                                    "Hapus animasi Kamera"
+                                                })
+                                                .clicked()
+                                            {
+                                                delete_anim_id = Some(a.id);
+                                            }
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                anim_is_playable(a, &state.markers),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Play")
+                                                        .size(10.5)
+                                                        .color(tag_col),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Play animasi Kamera di Play Skenario")
+                                            .clicked()
+                                        {
+                                            quick_play_anim_id = Some(a.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if shown == 0 {
+                    ui.label(
+                        egui::RichText::new(if has_active_filter {
+                            "  (tidak ada yg cocok filter)"
+                        } else {
+                            "  (belum ada kamera — buat di tab Animasi -> Kamera)"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // 9. Lingkungan (Laut / Sungai / Banjir & Hujan / Badai)
+            let env_anims: Vec<twg_shared::models::Anim> = state
+                .anims
+                .iter()
+                .filter(|a| AnimCategory::from_anim_type(&a.anim_type) == AnimCategory::Environment)
+                .cloned()
+                .collect();
+            let env_total = env_anims.len();
+            let env_filtered = env_anims
+                .iter()
+                .filter(|a| {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    state.matches_layer_filters(vis, locked)
+                        && (filter.is_empty()
+                            || a.name.to_lowercase().contains(&filter)
+                            || "lingkungan air water laut sungai banjir hujan rain badai"
+                                .contains(&filter))
+                })
+                .count();
+            let env_header = if has_active_filter {
+                format!("Lingkungan ({env_filtered}/{env_total})")
+            } else {
+                format!("Lingkungan ({env_total})")
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(env_header)
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(45, 212, 191)),
+            )
+            .id_salt("environment_layers")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut shown = 0;
+                for a in &env_anims {
+                    let vis = !state.hidden_entity_ids.contains(&a.id);
+                    let locked = state.locked_entity_ids.contains(&a.id);
+                    if !state.matches_layer_filters(vis, locked) {
+                        continue;
+                    }
+                    if !filter.is_empty()
+                        && !a.name.to_lowercase().contains(&filter)
+                        && !"lingkungan air water laut sungai banjir hujan rain badai"
+                            .contains(&filter)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+                    let sel = matches!(state.selected, SelectedEntity::Anim(id) if id == a.id);
+                    let row_bg = if sel {
+                        egui::Color32::from_rgb(14, 116, 144)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let (tag_txt, tag_col) = if twg_shared::environment_anim::is_water_anim(a) {
+                        match twg_shared::environment_anim::parse_water_anim_config(a).kind {
+                            twg_shared::environment_anim::WaterSimKind::Ocean => {
+                                ("[LAUT]", egui::Color32::from_rgb(56, 189, 248))
+                            }
+                            twg_shared::environment_anim::WaterSimKind::River => {
+                                ("[SUNGAI]", egui::Color32::from_rgb(45, 212, 191))
+                            }
+                            twg_shared::environment_anim::WaterSimKind::Flood => {
+                                ("[BANJIR]", egui::Color32::from_rgb(251, 191, 36))
+                            }
+                        }
+                    } else {
+                        match twg_shared::environment_anim::parse_rain_anim_config(a).preset {
+                            twg_shared::environment_anim::RainPreset::Storm => {
+                                ("[BADAI]", egui::Color32::from_rgb(192, 132, 252))
+                            }
+                            _ => ("[HUJAN]", egui::Color32::from_rgb(129, 140, 248)),
+                        }
+                    };
+                    egui::Frame::new()
+                        .fill(row_bg)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(4, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                if draw_eye_toggle_btn(ui, vis, !is_play_mode).clicked() {
+                                    toggle_hidden_id = Some(a.id);
+                                }
+                                if draw_lock_toggle_btn(ui, locked, !is_play_mode).clicked() {
+                                    toggle_locked_id = Some(a.id);
+                                }
+                                ui.label(egui::RichText::new(tag_txt).size(8.5).strong().color(
+                                    if !vis {
+                                        egui::Color32::from_rgb(100, 116, 139)
+                                    } else {
+                                        tag_col
+                                    },
+                                ));
+                                let name_col = if sel {
+                                    egui::Color32::WHITE
+                                } else if !vis {
+                                    egui::Color32::from_rgb(100, 116, 139)
+                                } else if locked {
+                                    egui::Color32::from_rgb(253, 230, 138)
+                                } else {
+                                    egui::Color32::from_rgb(226, 232, 240)
+                                };
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&a.name).size(11.0).color(name_col),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    state.selected = SelectedEntity::Anim(a.id);
+                                    state.anim_edit = Some(a.clone());
+                                    state.marker_edit = None;
+                                    state.building_edit = None;
+                                    state.line_edit = None;
+                                    state.text_edit = None;
+                                    if let Some(pt) =
+                                        crate::scene::anim_primary_focus_lnglat(a, &state.anims, &state.markers)
+                                    {
+                                        fly_to = Some(pt);
+                                    }
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if !is_play_mode {
+                                            if ui
+                                                .add_enabled(
+                                                    !locked,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("x").size(10.5).color(
+                                                            if locked {
+                                                                egui::Color32::from_rgb(71, 85, 105)
+                                                            } else {
+                                                                egui::Color32::from_rgb(
+                                                                    248, 113, 113,
+                                                                )
+                                                            },
+                                                        ),
+                                                    )
+                                                    .small()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if locked {
+                                                    "Objek terkunci — buka kunci untuk menghapus"
+                                                } else {
+                                                    "Hapus simulasi Lingkungan"
+                                                })
+                                                .clicked()
+                                            {
+                                                delete_anim_id = Some(a.id);
+                                            }
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                anim_is_playable(a, &state.markers),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Play")
+                                                        .size(10.5)
+                                                        .color(tag_col),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Play simulasi Lingkungan di Play Skenario")
+                                            .clicked()
+                                        {
+                                            quick_play_anim_id = Some(a.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                }
+                if shown == 0 {
+                    ui.label(
+                        egui::RichText::new(if has_active_filter {
+                            "  (tidak ada yg cocok filter)"
+                        } else {
+                            "  (belum ada simulasi — buat di tab Animasi -> Lingkungan)"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
             ui.add_space(4.0);
 
             // 10. Grup Animasi (Combine & Sequence)
@@ -3065,6 +3568,8 @@ fn draw_animations_tab(
                             AnimCategory::Group => egui::Color32::from_rgb(79, 70, 229),
                             AnimCategory::Other => egui::Color32::from_rgb(14, 116, 144),
                             AnimCategory::Audio => egui::Color32::from_rgb(109, 40, 217),
+                            AnimCategory::Camera => egui::Color32::from_rgb(2, 132, 199),
+                            AnimCategory::Environment => egui::Color32::from_rgb(13, 148, 136),
                         }
                     } else {
                         egui::Color32::from_rgb(22, 30, 45)
@@ -3087,7 +3592,11 @@ fn draw_animations_tab(
                 draw_cat_btn(&mut cols[2], state, AnimCategory::Other);
             });
             ui.add_space(3.0);
-            draw_cat_btn(ui, state, AnimCategory::Audio);
+            ui.columns(3, |cols| {
+                draw_cat_btn(&mut cols[0], state, AnimCategory::Audio);
+                draw_cat_btn(&mut cols[1], state, AnimCategory::Camera);
+                draw_cat_btn(&mut cols[2], state, AnimCategory::Environment);
+            });
         });
 
     ui.add_space(6.0);
@@ -3102,6 +3611,12 @@ fn draw_animations_tab(
         AnimCategory::Audio => {
             super::audio_anim::draw_create(ui, state, api, editable);
             super::billboard_anim::draw_create(ui, state, editable);
+        }
+        AnimCategory::Camera => {
+            super::camera_anim::draw_create(ui, state, tcam, api, editable);
+        }
+        AnimCategory::Environment => {
+            super::environment_anim::draw_create(ui, state, api, editable);
         }
     }
 
@@ -4658,6 +5173,35 @@ fn draw_ordered_animation_list(
                         }
                     }
                     AnimCategory::Audio => ("PLAY SUARA", egui::Color32::from_rgb(109, 40, 217)),
+                    AnimCategory::Camera => {
+                        if twg_shared::camera_anim::is_camera_static_anim(a) {
+                            ("STATIC CAM", egui::Color32::from_rgb(2, 132, 199))
+                        } else {
+                            ("FOLLOW CAM", egui::Color32::from_rgb(5, 150, 105))
+                        }
+                    }
+                    AnimCategory::Environment => {
+                        if twg_shared::environment_anim::is_water_anim(a) {
+                            match twg_shared::environment_anim::parse_water_anim_config(a).kind {
+                                twg_shared::environment_anim::WaterSimKind::Ocean => {
+                                    ("LAUT", egui::Color32::from_rgb(2, 132, 199))
+                                }
+                                twg_shared::environment_anim::WaterSimKind::River => {
+                                    ("SUNGAI", egui::Color32::from_rgb(13, 148, 136))
+                                }
+                                twg_shared::environment_anim::WaterSimKind::Flood => {
+                                    ("BANJIR", egui::Color32::from_rgb(180, 83, 9))
+                                }
+                            }
+                        } else {
+                            match twg_shared::environment_anim::parse_rain_anim_config(a).preset {
+                                twg_shared::environment_anim::RainPreset::Storm => {
+                                    ("BADAI", egui::Color32::from_rgb(124, 58, 237))
+                                }
+                                _ => ("HUJAN", egui::Color32::from_rgb(79, 70, 229)),
+                            }
+                        }
+                    }
                     AnimCategory::Shoot => match shoot_anim_kind(a).unwrap_or_default() {
                         ShootAnimKind::WaterCannon => {
                             ("WATER CANNON", egui::Color32::from_rgb(2, 132, 199))
@@ -4794,6 +5338,10 @@ fn draw_ordered_animation_list(
                         let has_units = !bound_ids.is_empty();
                         let is_ready_meta = if is_particle {
                             !a.geom.is_empty()
+                        } else if twg_shared::camera_anim::is_camera_anim(a)
+                            || twg_shared::environment_anim::is_environment_anim(a)
+                        {
+                            twg_shared::route_formation::anim_is_playable(a, &state.markers)
                         } else if is_group {
                             !parse_group_anim_config(a).items.is_empty()
                         } else {
@@ -4801,6 +5349,10 @@ fn draw_ordered_animation_list(
                         };
                         let meta = if twg_shared::audio_anim::is_audio_anim(a) {
                             super::audio_anim::sound_name(state, a)
+                        } else if twg_shared::camera_anim::is_camera_anim(a) {
+                            super::camera_anim::anim_summary(state, a)
+                        } else if twg_shared::environment_anim::is_environment_anim(a) {
+                            super::environment_anim::anim_summary(state, a)
                         } else if is_particle {
                             let cfg = parse_particle_anim_config(a);
                             let alt = particle_anim_position(a)[2];

@@ -129,7 +129,10 @@ pub fn playback_system(
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
+                | ToolMode::PickCameraFollowMarker
                 | ToolMode::PlaceParticle
+                | ToolMode::DrawWaterPolygon
+                | ToolMode::PlaceRainZone
         );
         if !still_selected || !still_exists || editing_tool {
             playback.stop_editor_preview();
@@ -196,13 +199,62 @@ pub fn playback_system(
 
     // Phase B: Tick all leaf animations (Spawn/Hide, Particle, Pointer, Shoot, Route)
     for anim in &state.anims {
-        // Audio & Billboard video use the real device clock, independent of scenario speed.
+        // Audio, Billboard video, and Camera animations manage their own playback loops.
         if twg_shared::audio_anim::is_audio_anim(anim)
             || twg_shared::billboard_anim::is_billboard_anim(anim)
+            || twg_shared::camera_anim::is_camera_anim(anim)
         {
             continue;
         }
         if is_group_anim(anim) {
+            continue;
+        }
+
+        // Water (Ocean/River/Flood) & Rain simulations track elapsed seconds in `track.distance_m`
+        if twg_shared::environment_anim::is_water_anim(anim) {
+            let cfg = twg_shared::environment_anim::parse_water_anim_config(anim);
+            let dur_sec = cfg.delay_sec + cfg.duration_sec;
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = if cfg.continuous { 0.0 } else { dur_sec };
+            if track.status == AnimRunStatus::Playing {
+                if anim.geom.len() < 3 {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += step_dt;
+                    if !cfg.continuous && track.distance_m >= dur_sec {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= dur_sec.max(0.1);
+                        } else {
+                            track.distance_m = dur_sec;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if twg_shared::environment_anim::is_rain_anim(anim) {
+            let cfg = twg_shared::environment_anim::parse_rain_anim_config(anim);
+            let dur_sec = cfg.delay_sec + cfg.duration_sec;
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = if cfg.continuous { 0.0 } else { dur_sec };
+            if track.status == AnimRunStatus::Playing {
+                if !cfg.has_playable_setup(anim) {
+                    track.status = AnimRunStatus::Stopped;
+                } else {
+                    track.distance_m += step_dt;
+                    if !cfg.continuous && track.distance_m >= dur_sec {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= dur_sec.max(0.1);
+                        } else {
+                            track.distance_m = dur_sec;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
+            }
             continue;
         }
 

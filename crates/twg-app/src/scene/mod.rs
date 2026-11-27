@@ -2,6 +2,8 @@ pub mod asset_preview;
 pub mod basic_mesh;
 pub mod billboard;
 pub mod buildings;
+pub mod camera_anim;
+pub mod environment_fx;
 pub mod gizmo;
 pub mod lines;
 pub mod markers;
@@ -145,6 +147,32 @@ pub fn anim_primary_focus_lnglat(
     if twg_shared::billboard_anim::is_billboard_anim(anim) {
         let p = twg_shared::billboard_anim::billboard_anim_position(anim);
         return Some((p[0], p[1]));
+    }
+    if twg_shared::camera_anim::is_camera_static_anim(anim) {
+        let cfg = twg_shared::camera_anim::parse_camera_static_config(anim);
+        return Some((cfg.lng, cfg.lat));
+    }
+    if twg_shared::camera_anim::is_camera_follow_anim(anim) {
+        let cfg = twg_shared::camera_anim::parse_camera_follow_config(anim);
+        return cfg
+            .target_marker_id
+            .and_then(|mid| markers.iter().find(|m| m.id == mid))
+            .map(|m| (m.lng, m.lat));
+    }
+    if twg_shared::environment_anim::is_water_anim(anim) && !anim.geom.is_empty() {
+        let n = anim.geom.len() as f64;
+        let lng = anim.geom.iter().map(|p| p[0]).sum::<f64>() / n;
+        let lat = anim.geom.iter().map(|p| p[1]).sum::<f64>() / n;
+        return Some((lng, lat));
+    }
+    if twg_shared::environment_anim::is_rain_anim(anim) {
+        let cfg = twg_shared::environment_anim::parse_rain_anim_config(anim);
+        if cfg.coverage == twg_shared::environment_anim::RainCoverage::LocalArea
+            && (cfg.lng.abs() > 1e-6 || cfg.lat.abs() > 1e-6)
+        {
+            return Some((cfg.lng, cfg.lat));
+        }
+        return None;
     }
     if twg_shared::traffic_anim::is_traffic_flow_or_signal(anim) {
         let cfg = twg_shared::traffic_anim::parse_traffic_anim_config(anim);

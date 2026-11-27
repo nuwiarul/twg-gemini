@@ -52,6 +52,8 @@ use crate::{
         plot_line_edit::PlotLineEditState,
         route_edit::RouteEditState,
         billboard::{BillboardRuntimePool, billboard_visual_system},
+        camera_anim::{CameraAnimRuntime, camera_anim_system},
+        environment_fx::{EnvironmentFxPool, environment_fx_visual_system},
         scenario_audio::{ScenarioAudio, scenario_audio_system},
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
@@ -149,6 +151,8 @@ fn main() {
         .init_resource::<MediaPreviewPlayer>()
         .init_resource::<ScenarioAudio>()
         .init_resource::<BillboardRuntimePool>()
+        .init_resource::<CameraAnimRuntime>()
+        .init_resource::<EnvironmentFxPool>()
         .insert_resource(ApiClientBridge::start())
         .insert_resource(WsClientBridge::start())
         .insert_resource(sync_bridge)
@@ -201,6 +205,7 @@ fn main() {
                     playback_system,
                     scenario_audio_system,
                     play_rts_movement_system,
+                    camera_anim_system,
                     sync_markers_system,
                     animate_markers_system,
                     selection_gizmo_system,
@@ -213,6 +218,7 @@ fn main() {
                     pointer_arrow_visual_system,
                     traffic_visual_system,
                     billboard_visual_system,
+                    environment_fx_visual_system,
                 )
                     .chain(),
             )
@@ -1115,6 +1121,8 @@ fn process_net_events_system(
                 let anim_name = a.name.clone();
                 let is_audio = twg_shared::audio_anim::is_audio_anim(&a);
                 let is_billboard = twg_shared::billboard_anim::is_billboard_anim(&a);
+                let is_camera = twg_shared::camera_anim::is_camera_anim(&a);
+                let is_environment = twg_shared::environment_anim::is_environment_anim(&a);
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
                 let is_traffic_signal = twg_shared::traffic_anim::is_traffic_signal_anim(&a);
@@ -1134,6 +1142,8 @@ fn process_net_events_system(
                 let needs_marker_pick = !is_particle
                     && !twg_shared::audio_anim::is_audio_anim(&a)
                     && !is_billboard
+                    && !is_camera
+                    && !is_environment
                     && !is_traffic
                     && !is_traffic_signal
                     && !is_traffic_queue
@@ -1157,6 +1167,14 @@ fn process_net_events_system(
                 } else if is_billboard {
                     state.status_banner = Some(format!(
                         "Billboard / Videotron '{anim_name}' dipasang — pilih Gambar/Video di Inspector, atau geser/putar/skala via Gizmo (2: Move, 3: Rotate, 4: Scale)!"
+                    ));
+                } else if is_camera {
+                    state.status_banner = Some(format!(
+                        "Animasi Kamera '{anim_name}' dibuat — atur posisi, zoom, pitch, bearing atau objek target di Inspector!"
+                    ));
+                } else if is_environment {
+                    state.status_banner = Some(format!(
+                        "Simulasi Lingkungan '{anim_name}' dibuat — atur ombak, ketinggian air, intensitas hujan, angin & petir di Inspector!"
                     ));
                 } else if is_particle {
                     state.particle_preview_reset_nonce =
@@ -1822,8 +1840,10 @@ fn apply_remote_camera_payload(
         payload.get("lng").and_then(|v| v.as_f64()),
         payload.get("lat").and_then(|v| v.as_f64()),
     ) {
-        let local = geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0);
+        let alt = payload.get("alt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let local = geo_anchor.lng_lat_alt_to_local(lng, lat, alt);
         tcam.target_local = Vec2::new(local[0], local[2]);
+        tcam.target_alt_m = local[1];
     }
     if let Some(pitch) = payload.get("pitch").and_then(|v| v.as_f64()) {
         tcam.pitch_deg = (pitch as f32).clamp(5.0, 82.0);

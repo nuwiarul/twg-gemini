@@ -597,6 +597,7 @@ pub fn draw_play_card(
     state: &AppState,
     playback: &PlaybackState,
     anim: &Anim,
+    global_idx: usize,
     can_control: bool,
 ) -> Option<BillboardPlayAction> {
     let cfg = parse_billboard_anim_config(anim);
@@ -605,56 +606,68 @@ pub fn draw_play_card(
     let is_video = cfg.media_mode == BillboardMediaMode::Video;
     let playable = cfg.is_playable_video();
 
-    let (badge, bg, fg, border) = if !is_video {
+    let (status_txt, status_bg, status_fg, card_stroke) = if !is_video {
         (
             "GAMBAR STATIS",
             egui::Color32::from_rgb(30, 41, 59),
             egui::Color32::from_rgb(186, 230, 253),
-            egui::Color32::from_rgb(56, 189, 248),
+            egui::Color32::from_rgb(44, 58, 82),
         )
     } else {
         match status {
+            AnimRunStatus::Stopped => (
+                "SIAP",
+                egui::Color32::from_rgb(30, 41, 59),
+                egui::Color32::from_rgb(148, 163, 184),
+                egui::Color32::from_rgb(44, 58, 82),
+            ),
             AnimRunStatus::Playing => (
-                "MEMUTAR VIDEO",
+                "MEMUTAR",
                 egui::Color32::from_rgb(12, 74, 110),
                 egui::Color32::from_rgb(125, 211, 252),
                 egui::Color32::from_rgb(14, 165, 233),
             ),
             AnimRunStatus::Paused => (
                 "DIJEDA",
-                egui::Color32::from_rgb(113, 63, 18),
-                egui::Color32::from_rgb(254, 240, 138),
-                egui::Color32::from_rgb(234, 179, 8),
+                egui::Color32::from_rgb(120, 53, 15),
+                egui::Color32::from_rgb(253, 230, 138),
+                egui::Color32::from_rgb(245, 158, 11),
             ),
             AnimRunStatus::Finished => (
                 "SELESAI",
-                egui::Color32::from_rgb(6, 78, 59),
-                egui::Color32::from_rgb(110, 231, 183),
-                egui::Color32::from_rgb(16, 185, 129),
-            ),
-            AnimRunStatus::Stopped => (
-                "STANDBY",
-                egui::Color32::from_rgb(30, 41, 59),
-                egui::Color32::from_rgb(148, 163, 184),
-                egui::Color32::from_rgb(71, 85, 105),
+                egui::Color32::from_rgb(30, 58, 138),
+                egui::Color32::from_rgb(191, 219, 254),
+                egui::Color32::from_rgb(56, 189, 248),
             ),
         }
     };
 
     let mut action = None;
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(18, 26, 40))
-        .stroke(egui::Stroke::new(1.0, border))
+        .fill(egui::Color32::from_rgb(20, 29, 44))
+        .stroke(egui::Stroke::new(1.2, card_stroke))
         .corner_radius(6.0)
-        .inner_margin(egui::Margin::same(8))
+        .inner_margin(egui::Margin::same(9))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+
+            // Row 1: #Order + [TAG] + Name + Status + Go
             ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("#{}", global_idx + 1))
+                        .size(10.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(125, 211, 252)),
+                );
                 ui.label(
                     egui::RichText::new(if is_video { "[VIDEOTRON]" } else { "[BILLBOARD]" })
                         .size(9.5)
                         .strong()
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                        .color(if is_video {
+                            egui::Color32::from_rgb(56, 189, 248)
+                        } else {
+                            egui::Color32::from_rgb(45, 212, 191)
+                        }),
                 );
                 ui.add(
                     egui::Label::new(
@@ -666,75 +679,199 @@ pub fn draw_play_card(
                     .truncate(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Go")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(125, 211, 252)),
+                            )
+                            .small()
+                            .frame(false),
+                        )
+                        .on_hover_text("Fokus kamera ke lokasi billboard")
+                        .clicked()
+                    {
+                        action = Some(BillboardPlayAction::Focus);
+                    }
                     egui::Frame::new()
-                        .fill(bg)
+                        .fill(status_bg)
                         .corner_radius(3.0)
                         .inner_margin(egui::Margin::symmetric(5, 1))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(badge).size(9.0).strong().color(fg));
+                            ui.label(
+                                egui::RichText::new(status_txt)
+                                    .size(9.0)
+                                    .strong()
+                                    .color(status_fg),
+                            );
                         });
                 });
             });
 
-            let subtitle = state
-                .billboard_status
-                .get(&anim.id)
-                .cloned()
-                .unwrap_or_else(|| asset_summary(state, anim));
-            ui.label(
-                egui::RichText::new(subtitle)
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(186, 230, 253)),
+            ui.add_space(3.0);
+
+            // Info line 1: Media asset summary
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(asset_summary(state, anim))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                )
+                .truncate(),
             );
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if is_video {
-                    if status == AnimRunStatus::Playing {
-                        if ui
-                            .add_enabled(can_control, egui::Button::new("Pause").small())
-                            .clicked()
-                        {
-                            action = Some(BillboardPlayAction::Pause);
+            // Info line 2: Mode / live status
+            let detail_line = if is_video {
+                if status != AnimRunStatus::Stopped
+                    && let Some(live) = state.billboard_status.get(&anim.id)
+                {
+                    live.clone()
+                } else {
+                    let rep_lbl = match cfg.repeat {
+                        BillboardRepeat::Once => "Sekali",
+                        BillboardRepeat::Count => "Ulangi N×",
+                        BillboardRepeat::Forever => "Loop Terus",
+                    };
+                    let audio_lbl = if cfg.play_audio {
+                        format!("Suara {:.0}%", cfg.volume * 100.0)
+                    } else {
+                        "Tanpa suara".to_string()
+                    };
+                    format!("Mode: {rep_lbl}  •  {audio_lbl}")
+                }
+            } else {
+                "Tampil statis di peta (tidak diputar)".to_string()
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(detail_line)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                )
+                .truncate(),
+            );
+
+            if is_video {
+                let progress = if status == AnimRunStatus::Finished {
+                    1.0
+                } else if let Some(tr) = track {
+                    if tr.total_length_m > 0.0 {
+                        (tr.distance_m / tr.total_length_m).clamp(0.0, 1.0) as f32
+                    } else if status == AnimRunStatus::Playing {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                ui.add_space(4.0);
+                super::play_panel::draw_card_progress_bar(ui, status, progress);
+                ui.add_space(7.0);
+
+                match status {
+                    AnimRunStatus::Stopped => {
+                        let play_btn = egui::Button::new(
+                            egui::RichText::new("Play")
+                                .size(12.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(if can_control && playable {
+                            egui::Color32::from_rgb(5, 150, 105)
+                        } else {
+                            egui::Color32::from_rgb(30, 41, 59)
+                        })
+                        .min_size(egui::vec2(ui.available_width(), 28.0));
+                        if ui.add_enabled(can_control && playable, play_btn).clicked() {
+                            action = Some(BillboardPlayAction::Play);
                         }
-                    } else if status == AnimRunStatus::Paused {
-                        if ui
-                            .add_enabled(
-                                can_control,
-                                egui::Button::new("Lanjut")
-                                    .fill(egui::Color32::from_rgb(2, 132, 199))
-                                    .small(),
+                    }
+                    AnimRunStatus::Playing => {
+                        ui.columns(2, |cols| {
+                            let pause_btn = egui::Button::new(
+                                egui::RichText::new("Pause")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
                             )
-                            .clicked()
-                        {
-                            action = Some(BillboardPlayAction::Resume);
-                        }
-                    } else if ui
-                        .add_enabled(
-                            can_control && playable,
-                            egui::Button::new("Play Video")
-                                .fill(egui::Color32::from_rgb(2, 132, 199))
-                                .small(),
-                        )
-                        .clicked()
-                    {
-                        action = Some(BillboardPlayAction::Play);
+                            .fill(egui::Color32::from_rgb(180, 83, 9))
+                            .min_size(egui::vec2(cols[0].available_width(), 28.0));
+                            if cols[0].add_enabled(can_control, pause_btn).clicked() {
+                                action = Some(BillboardPlayAction::Pause);
+                            }
+
+                            let stop_btn = egui::Button::new(
+                                egui::RichText::new("Stop")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(185, 28, 28))
+                            .min_size(egui::vec2(cols[1].available_width(), 28.0));
+                            if cols[1].add_enabled(can_control, stop_btn).clicked() {
+                                action = Some(BillboardPlayAction::Stop);
+                            }
+                        });
                     }
-                    if ui
-                        .add_enabled(
-                            can_control && status != AnimRunStatus::Stopped,
-                            egui::Button::new("Stop").small(),
-                        )
-                        .clicked()
-                    {
-                        action = Some(BillboardPlayAction::Stop);
+                    AnimRunStatus::Paused => {
+                        ui.columns(2, |cols| {
+                            let resume_btn = egui::Button::new(
+                                egui::RichText::new("Resume")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105))
+                            .min_size(egui::vec2(cols[0].available_width(), 28.0));
+                            if cols[0].add_enabled(can_control, resume_btn).clicked() {
+                                action = Some(BillboardPlayAction::Resume);
+                            }
+
+                            let stop_btn = egui::Button::new(
+                                egui::RichText::new("Stop")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(185, 28, 28))
+                            .min_size(egui::vec2(cols[1].available_width(), 28.0));
+                            if cols[1].add_enabled(can_control, stop_btn).clicked() {
+                                action = Some(BillboardPlayAction::Stop);
+                            }
+                        });
+                    }
+                    AnimRunStatus::Finished => {
+                        ui.columns(2, |cols| {
+                            let replay_btn = egui::Button::new(
+                                egui::RichText::new("Play")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105))
+                            .min_size(egui::vec2(cols[0].available_width(), 28.0));
+                            if cols[0].add_enabled(can_control && playable, replay_btn).clicked() {
+                                action = Some(BillboardPlayAction::Play);
+                            }
+
+                            let stop_btn = egui::Button::new(
+                                egui::RichText::new("Stop")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(185, 28, 28))
+                            .min_size(egui::vec2(cols[1].available_width(), 28.0));
+                            if cols[1].add_enabled(can_control, stop_btn).clicked() {
+                                action = Some(BillboardPlayAction::Stop);
+                            }
+                        });
                     }
                 }
-                if ui.small_button("Focus").clicked() {
-                    action = Some(BillboardPlayAction::Focus);
-                }
-            });
+            }
         });
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     action
 }

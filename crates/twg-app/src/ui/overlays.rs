@@ -262,6 +262,15 @@ pub fn draw_projected_labels(
                 "Mode Pasang Billboard / Videotron 3D ({}): Klik lokasi di peta untuk menempatkan — Esc batal",
                 state.new_billboard_name
             ),
+            ToolMode::DrawWaterPolygon => format!(
+                "Mode Gambar Area Air ({}): Klik minimal 3 titik ({} titik) — Klik titik #1 atau Enter selesai, Esc batal",
+                state.new_water_name,
+                state.draft_points_lnglat.len()
+            ),
+            ToolMode::PlaceRainZone => format!(
+                "Mode Zona Hujan Lokal ({}): Klik lokasi pusat hujan di peta — Esc batal",
+                state.new_rain_name
+            ),
             ToolMode::DrawTrafficQueueLane => format!(
                 "Gambar {} ({} titik) — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
                 match state.drawing_traffic_queue_target {
@@ -286,7 +295,8 @@ pub fn draw_projected_labels(
             ToolMode::PickRouteMarker
             | ToolMode::PickShootMarker
             | ToolMode::PickPointerMarker
-            | ToolMode::PickSpawnHideMarker => String::new(),
+            | ToolMode::PickSpawnHideMarker
+            | ToolMode::PickCameraFollowMarker => String::new(),
             ToolMode::PlaceParticle => format!(
                 "Mode Letakkan Partikel ({}): Klik lokasi di peta untuk menempatkan (Esc batal)",
                 state.new_particle_kind.label()

@@ -1702,6 +1702,7 @@ pub fn selection_gizmo_system(
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
+                | ToolMode::PickCameraFollowMarker
         );
 
     // Resolve active Animation whose bound marker(s) should be highlighted in Warm Amber/Gold
@@ -1723,6 +1724,10 @@ pub fn selection_gizmo_system(
     } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickSpawnHideMarker {
         state
             .picking_spawn_hide_for_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+    } else if !playback.play_test_mode && state.tool_mode == ToolMode::PickCameraFollowMarker {
+        state
+            .picking_camera_follow_for_anim_id
             .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
     } else if !playback.play_test_mode
         && let SelectedEntity::Anim(aid) = state.selected
@@ -2089,6 +2094,7 @@ pub fn map_interaction_system(
         state.picking_shoot_for_anim_id = None;
         state.picking_pointer_for_anim_id = None;
         state.picking_spawn_hide_for_anim_id = None;
+        state.picking_camera_follow_for_anim_id = None;
         state.placing_traffic_light_for_anim_id = None;
         state.selected_traffic_light = None;
         state.dragging_catalog_entry = None;
@@ -2279,6 +2285,7 @@ pub fn map_interaction_system(
                 ToolMode::DrawLine
                     | ToolMode::DrawBuilding
                     | ToolMode::DrawBasicPolygon
+                    | ToolMode::DrawWaterPolygon
                     | ToolMode::DrawRoute
                     | ToolMode::DrawTrafficLane
                     | ToolMode::DrawTrafficQueueLane
@@ -2334,6 +2341,12 @@ pub fn map_interaction_system(
                 state.picking_pointer_for_anim_id = None;
                 state.tool_mode = ToolMode::Select;
                 state.status_banner = Some("Pemilihan target Panah Penunjuk 3D dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::PickCameraFollowMarker {
+                state.picking_camera_follow_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Pemilihan objek target Camera Follow dibatalkan.".into());
                 return;
             }
             if state.tool_mode == ToolMode::PickSpawnHideMarker {
@@ -2875,6 +2888,7 @@ pub fn map_interaction_system(
                     | ToolMode::PickShootMarker
                     | ToolMode::PickPointerMarker
                     | ToolMode::PickSpawnHideMarker
+                    | ToolMode::PickCameraFollowMarker
             ))
         && gizmo_state.hovered_handle.is_none()
     {
@@ -2895,6 +2909,7 @@ pub fn map_interaction_system(
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
                 | ToolMode::PickSpawnHideMarker
+                | ToolMode::PickCameraFollowMarker
         ) {
             match picked {
                 Some(SelectedEntity::Marker(mid)) => Some(SelectedEntity::Marker(mid)),
@@ -3539,6 +3554,7 @@ pub fn map_interaction_system(
         ToolMode::DrawLine
         | ToolMode::DrawBuilding
         | ToolMode::DrawBasicPolygon
+        | ToolMode::DrawWaterPolygon
         | ToolMode::DrawRoute
         | ToolMode::DrawTrafficLane
         | ToolMode::DrawTrafficQueueLane
@@ -3547,8 +3563,10 @@ pub fn map_interaction_system(
                 return;
             }
             // Click near Point #1 when drawing a polygon (>= 3 points) to close & extrude immediately!
-            if matches!(state.tool_mode, ToolMode::DrawBasicPolygon | ToolMode::DrawBuilding)
-                && state.draft_points_lnglat.len() >= 3
+            if matches!(
+                state.tool_mode,
+                ToolMode::DrawBasicPolygon | ToolMode::DrawBuilding | ToolMode::DrawWaterPolygon
+            ) && state.draft_points_lnglat.len() >= 3
             {
                 let p0 = state.draft_points_lnglat[0];
                 let p0_local = state.geo_anchor.lng_lat_alt_to_local(p0[0], p0[1], 0.25);
@@ -3716,6 +3734,56 @@ pub fn map_interaction_system(
             }
             state.tool_mode = ToolMode::Select;
             state.new_billboard_name = format!("Billboard {}", bb_cnt + 1);
+        }
+        ToolMode::PlaceRainZone => {
+            if playback.play_test_mode {
+                return;
+            }
+            let Some(hit) = hit_opt else {
+                return;
+            };
+            let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
+            if let Some(anim_id) = state.relocating_rain_anim_id.take() {
+                if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                    let mut cfg = twg_shared::environment_anim::parse_rain_anim_config(anim);
+                    cfg.coverage = twg_shared::environment_anim::RainCoverage::LocalArea;
+                    cfg.lng = lng;
+                    cfg.lat = lat;
+                    twg_shared::environment_anim::write_rain_anim_config(anim, &cfg);
+                    let updated = anim.clone();
+                    state.selected = SelectedEntity::Anim(anim_id);
+                    state.anim_edit = Some(updated.clone());
+                    state.dirty_anim_ids.insert(anim_id);
+                    if !state.offline_preview
+                        && let Some(auth) = current_auth(&state)
+                    {
+                        api.send(ApiCommand::UpdateAnim {
+                            auth,
+                            id: anim_id,
+                            req: UpdateAnimRequest {
+                                marker_id: updated.marker_id,
+                                name: updated.name.clone(),
+                                anim_type: updated.anim_type,
+                                sort_order: updated.sort_order,
+                                speed: updated.speed,
+                                duration_sec: updated.duration_sec,
+                                replay: updated.replay,
+                                autoplay: updated.autoplay,
+                                geom: updated.geom,
+                                data: updated.data,
+                            },
+                        });
+                    }
+                    state.status_banner = Some(format!(
+                        "Lokasi zona hujan '{}' diperbarui.",
+                        updated.name
+                    ));
+                }
+            } else {
+                crate::ui::environment_anim::create_rain_anim(&mut state, &api, Some([lng, lat]));
+            }
+            state.tool_mode = ToolMode::Select;
+            gizmo_state.suppress_camera_pan = true;
         }
         ToolMode::PlaceText => {
             if playback.play_test_mode {
@@ -4178,6 +4246,66 @@ pub fn map_interaction_system(
                 gizmo_state.suppress_camera_pan = true;
             }
         }
+        ToolMode::PickCameraFollowMarker => {
+            if playback.play_test_mode {
+                return;
+            }
+            if let Some(SelectedEntity::Marker(marker_id)) = gizmo_state.hovered_entity
+                && let Some(marker_name) = state
+                    .markers
+                    .iter()
+                    .find(|m| m.id == marker_id)
+                    .map(|m| m.name.clone())
+            {
+                if let Some(anim_id) = state.picking_camera_follow_for_anim_id.take() {
+                    if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                        let mut cfg = twg_shared::camera_anim::parse_camera_follow_config(anim);
+                        cfg.target_marker_id = Some(marker_id);
+                        twg_shared::camera_anim::write_camera_follow_config(anim, &cfg);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(anim_id);
+                        state.anim_edit = Some(updated.clone());
+                        state.marker_edit = None;
+                        state.building_edit = None;
+                        state.line_edit = None;
+                        state.text_edit = None;
+                        state.dirty_anim_ids.insert(anim_id);
+                        if !state.offline_preview
+                            && let Some(auth) = current_auth(&state)
+                        {
+                            api.send(ApiCommand::UpdateAnim {
+                                auth,
+                                id: anim_id,
+                                req: UpdateAnimRequest {
+                                    marker_id: updated.marker_id,
+                                    name: updated.name.clone(),
+                                    anim_type: updated.anim_type,
+                                    sort_order: updated.sort_order,
+                                    speed: updated.speed,
+                                    duration_sec: updated.duration_sec,
+                                    replay: updated.replay,
+                                    autoplay: updated.autoplay,
+                                    geom: updated.geom,
+                                    data: updated.data,
+                                },
+                            });
+                        }
+                        state.status_banner = Some(format!(
+                            "Camera Follow '{}' sekarang mengikuti '{marker_name}'.",
+                            updated.name
+                        ));
+                    }
+                } else {
+                    crate::ui::camera_anim::create_follow_camera_anim(
+                        &mut state,
+                        &api,
+                        Some(marker_id),
+                    );
+                }
+                state.tool_mode = ToolMode::Select;
+                gizmo_state.suppress_camera_pan = true;
+            }
+        }
         ToolMode::PickSpawnHideMarker => {
             if playback.play_test_mode {
                 return;
@@ -4456,6 +4584,120 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         geom: pts,
                     },
                 });
+            }
+            state.tool_mode = ToolMode::Select;
+        }
+        ToolMode::DrawWaterPolygon => {
+            if pts.len() < 3 {
+                state.status_banner =
+                    Some("Area air butuh minimal 3 titik poligon (klik di peta).".into());
+                return;
+            }
+            let geom: Vec<[f64; 3]> = pts.iter().map(|p| [p[0], p[1], 0.0]).collect();
+            if let Some(anim_id) = state.redrawing_water_anim_id.take() {
+                if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                    anim.geom = geom;
+                    let updated = anim.clone();
+                    state.selected = SelectedEntity::Anim(anim_id);
+                    state.anim_edit = Some(updated.clone());
+                    state.dirty_anim_ids.insert(anim_id);
+                    if !state.offline_preview
+                        && let Some(auth) = current_auth(state)
+                    {
+                        api.send(ApiCommand::UpdateAnim {
+                            auth,
+                            id: anim_id,
+                            req: UpdateAnimRequest {
+                                marker_id: updated.marker_id,
+                                name: updated.name.clone(),
+                                anim_type: updated.anim_type,
+                                sort_order: updated.sort_order,
+                                speed: updated.speed,
+                                duration_sec: updated.duration_sec,
+                                replay: updated.replay,
+                                autoplay: updated.autoplay,
+                                geom: updated.geom,
+                                data: updated.data,
+                            },
+                        });
+                    }
+                    state.status_banner = Some(format!(
+                        "Area poligon air '{}' diperbarui ({} titik).",
+                        updated.name,
+                        pts.len()
+                    ));
+                }
+            } else {
+                let kind = state.new_water_kind;
+                let w_cnt = state
+                    .anims
+                    .iter()
+                    .filter(|a| twg_shared::environment_anim::is_water_anim(a))
+                    .count()
+                    + 1;
+                let name = if state.new_water_name.trim().is_empty() {
+                    kind.default_name(w_cnt)
+                } else {
+                    state.new_water_name.trim().to_string()
+                };
+                let cfg = twg_shared::environment_anim::WaterAnimConfig::default_for(kind);
+                let sort_order = (state.anims.len() + 1) as i32;
+                let now = chrono::Utc::now();
+                let mut anim = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: twg_shared::environment_anim::ANIM_TYPE_WATER_SIM.to_string(),
+                    sort_order,
+                    speed: 1.0,
+                    duration_sec: 0.0,
+                    replay: false,
+                    autoplay: false,
+                    geom,
+                    data: serde_json::json!({}),
+                    created_at: now,
+                    updated_at: now,
+                };
+                twg_shared::environment_anim::write_water_anim_config(&mut anim, &cfg);
+
+                if state.offline_preview {
+                    let aid = anim.id;
+                    state.selected = SelectedEntity::Anim(aid);
+                    state.anim_edit = Some(anim.clone());
+                    state.marker_edit = None;
+                    state.building_edit = None;
+                    state.line_edit = None;
+                    state.text_edit = None;
+                    state.anims.push(anim);
+                    state.sort_anims_by_order();
+                    state.status_banner = Some(format!(
+                        "Area {} '{name}' dibuat ({} titik) — atur ombak, arus & ketinggian air di Inspector!",
+                        kind.label(),
+                        pts.len()
+                    ));
+                } else if let Some(auth) = current_auth(state) {
+                    api.send(ApiCommand::CreateAnim {
+                        auth,
+                        req: CreateAnimRequest {
+                            operasi_id: sk.operasi_id,
+                            skenario_id: sk.id,
+                            marker_id: None,
+                            name,
+                            anim_type: twg_shared::environment_anim::ANIM_TYPE_WATER_SIM
+                                .to_string(),
+                            sort_order,
+                            speed: 1.0,
+                            duration_sec: anim.duration_sec,
+                            replay: false,
+                            autoplay: false,
+                            geom: anim.geom,
+                            data: anim.data,
+                        },
+                    });
+                }
+                state.new_water_name = kind.default_name(w_cnt + 1);
             }
             state.tool_mode = ToolMode::Select;
         }

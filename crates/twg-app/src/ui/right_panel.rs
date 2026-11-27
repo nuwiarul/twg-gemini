@@ -985,6 +985,46 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                 }
             });
         }
+        ToolMode::PickCameraFollowMarker => {
+            let rebinding_anim = state
+                .picking_camera_follow_for_anim_id
+                .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                .cloned();
+            let title = if rebinding_anim.is_some() {
+                "Ganti Target Camera Follow"
+            } else {
+                "Buat Camera Follow: Pilih 1 Objek 3D"
+            };
+            inspector_card(ui, title, true, |ui| {
+                if let Some(ra) = rebinding_anim {
+                    ui.label(
+                        egui::RichText::new(format!("Animasi: {}", ra.name))
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(110, 231, 183)),
+                    );
+                } else {
+                    ui.label("Nama Animasi Camera Follow:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_camera_follow_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Klik 1 Objek / Marker 3D di peta yang ingin diikuti kamera.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
+                ui.add_space(6.0);
+                if ui.small_button("Batal (Esc)").clicked() {
+                    state.picking_camera_follow_for_anim_id = None;
+                    state.tool_mode = ToolMode::Select;
+                }
+            });
+        }
         ToolMode::PickPointerMarker => {
             let rebinding_anim = state
                 .picking_pointer_for_anim_id
@@ -2880,6 +2920,12 @@ fn draw_editor_preview_card(
         "Pilih Sound dari Assets terlebih dahulu".into()
     } else if twg_shared::billboard_anim::is_billboard_anim(a) {
         "Pilih Video dari Assets terlebih dahulu".into()
+    } else if twg_shared::camera_anim::is_camera_follow_anim(a) {
+        "Pilih 1 Objek / Marker 3D target terlebih dahulu".into()
+    } else if twg_shared::environment_anim::is_water_anim(a) {
+        "Gambar area poligon air (minimal 3 titik) di peta terlebih dahulu".into()
+    } else if twg_shared::environment_anim::is_rain_anim(a) {
+        "Tentukan lokasi zona hujan lokal di peta terlebih dahulu".into()
     } else if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
     } else if is_traffic_flow_or_signal(a) {
@@ -3396,6 +3442,28 @@ fn draw_editor_preview_card(
                             .size(10.0)
                             .color(egui::Color32::from_rgb(125, 211, 252)),
                     );
+                } else if twg_shared::camera_anim::is_camera_anim(a) {
+                    let status_line = state
+                        .camera_status
+                        .get(&a.id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Kamera aktif · t = {:.1} dtk", track.distance_m));
+                    ui.label(
+                        egui::RichText::new(status_line)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
+                } else if twg_shared::environment_anim::is_environment_anim(a) {
+                    let status_line = state
+                        .environment_status
+                        .get(&a.id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Simulasi aktif · t = {:.1} dtk", track.distance_m));
+                    ui.label(
+                        egui::RichText::new(status_line)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
                 } else if is_traffic_signal_anim(a) {
                     let elapsed = track.distance_m;
                     let (status_line, status_col) =
@@ -3530,6 +3598,12 @@ fn draw_anim_inspector(
             draw_editor_preview_card(ui, state, playback, route_edit, &a);
         }
         super::billboard_anim::draw_inspector(ui, state, tcam, &mut a, editable);
+    } else if twg_shared::camera_anim::is_camera_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::camera_anim::draw_inspector(ui, state, tcam, &mut a, editable);
+    } else if twg_shared::environment_anim::is_environment_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::environment_anim::draw_inspector(ui, state, &mut a, editable);
     } else if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
     } else if is_traffic_flow_or_signal(&a) {
@@ -4767,6 +4841,12 @@ fn draw_anim_inspector(
             "Pilih Sound dari Assets terlebih dahulu"
         } else if twg_shared::billboard_anim::is_billboard_anim(&a) {
             "Mode Gambar tampil statis di peta; pilih Mode Video dan Video dari Assets untuk diputar"
+        } else if twg_shared::camera_anim::is_camera_follow_anim(&a) {
+            "Pilih 1 Objek / Marker 3D target terlebih dahulu"
+        } else if twg_shared::environment_anim::is_water_anim(&a) {
+            "Gambar area poligon air (minimal 3 titik) di peta terlebih dahulu"
+        } else if twg_shared::environment_anim::is_rain_anim(&a) {
+            "Tentukan lokasi zona hujan lokal di peta terlebih dahulu"
         } else if is_particle_anim(&a) {
             "Tentukan posisi partikel di peta terlebih dahulu"
         } else if is_traffic_flow_or_signal(&a) {
@@ -8498,6 +8578,18 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         } else {
             "BILLBOARD"
         }
+    } else if twg_shared::camera_anim::is_camera_static_anim(a) {
+        "STATIC CAM"
+    } else if twg_shared::camera_anim::is_camera_follow_anim(a) {
+        "FOLLOW CAM"
+    } else if twg_shared::environment_anim::is_water_anim(a) {
+        twg_shared::environment_anim::parse_water_anim_config(a)
+            .kind
+            .short_tag()
+    } else if twg_shared::environment_anim::is_rain_anim(a) {
+        twg_shared::environment_anim::parse_rain_anim_config(a)
+            .preset
+            .short_tag()
     } else if is_traffic_signal_anim(a) {
         "LAMPU MERAH"
     } else if is_traffic_anim(a) {

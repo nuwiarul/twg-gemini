@@ -991,10 +991,13 @@ pub enum ToolMode {
     DrawTrafficDiversionLane,
     PlaceTrafficLight,
     PlaceBillboard,
+    DrawWaterPolygon,
+    PlaceRainZone,
     PickRouteMarker,
     PickShootMarker,
     PickPointerMarker,
     PickSpawnHideMarker,
+    PickCameraFollowMarker,
     PlaceParticle,
     Measure,
 }
@@ -1016,10 +1019,13 @@ impl ToolMode {
             Self::DrawTrafficDiversionLane => "Draw Alih Arus",
             Self::PlaceTrafficLight => "Pasang Lampu Merah",
             Self::PlaceBillboard => "Pasang Billboard",
+            Self::DrawWaterPolygon => "Gambar Area Air",
+            Self::PlaceRainZone => "Zona Hujan Lokal",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
             Self::PickPointerMarker => "Pilih Target Panah",
             Self::PickSpawnHideMarker => "Pilih Objek Spawn/Hide",
+            Self::PickCameraFollowMarker => "Pilih Objek Kamera",
             Self::PlaceParticle => "Letakkan Partikel",
             Self::Measure => "Measure",
         }
@@ -1052,6 +1058,8 @@ pub enum AnimCategory {
     Group,
     Other,
     Audio,
+    Camera,
+    Environment,
 }
 
 impl AnimCategory {
@@ -1063,6 +1071,8 @@ impl AnimCategory {
         Self::Group,
         Self::Other,
         Self::Audio,
+        Self::Camera,
+        Self::Environment,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1074,12 +1084,16 @@ impl AnimCategory {
             Self::Group => "Grup",
             Self::Other => "Lainnya",
             Self::Audio => "Media",
+            Self::Camera => "Kamera",
+            Self::Environment => "Lingkungan",
         }
     }
 
     pub fn from_anim_type(anim_type: &str) -> Self {
         match anim_type {
             "play_sound" | "billboard" => Self::Audio,
+            "camera_static" | "camera_follow" => Self::Camera,
+            "water_sim" | "rain_sim" => Self::Environment,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1468,6 +1482,13 @@ impl PlaybackState {
                 twg_shared::audio_anim::parse_audio_anim_config(a).asset_id.is_some()
             } else if twg_shared::billboard_anim::is_billboard_anim(a) {
                 twg_shared::billboard_anim::parse_billboard_anim_config(a).is_playable_video()
+            } else if twg_shared::camera_anim::is_camera_anim(a) {
+                // Camera animations are triggered individually or via Group to avoid camera fights in Play All.
+                false
+            } else if twg_shared::environment_anim::is_water_anim(a) {
+                a.geom.len() >= 3
+            } else if twg_shared::environment_anim::is_rain_anim(a) {
+                twg_shared::environment_anim::parse_rain_anim_config(a).has_playable_setup(a)
             } else if twg_shared::particle_anim::is_particle_anim(a) {
                 !a.geom.is_empty()
             } else if twg_shared::traffic_anim::is_traffic_flow_or_signal(a) {
@@ -1680,6 +1701,7 @@ pub struct AppState {
     pub picking_shoot_for_anim_id: Option<Uuid>,
     pub picking_pointer_for_anim_id: Option<Uuid>,
     pub picking_spawn_hide_for_anim_id: Option<Uuid>,
+    pub picking_camera_follow_for_anim_id: Option<Uuid>,
     pub route_target_marker_id: Option<Uuid>,
     pub new_route_is_multi: bool,
     pub new_route_formation: twg_shared::route_formation::RouteFormationKind,
@@ -1740,6 +1762,18 @@ pub struct AppState {
     pub traffic_model_unit_dims: HashMap<String, [f32; 3]>,
     pub new_billboard_name: String,
     pub billboard_status: HashMap<Uuid, String>,
+    pub new_camera_static_name: String,
+    pub new_camera_follow_name: String,
+    pub new_camera_follow_preset: twg_shared::camera_anim::CameraFollowPreset,
+    pub camera_status: HashMap<Uuid, String>,
+    pub new_water_kind: twg_shared::environment_anim::WaterSimKind,
+    pub new_water_name: String,
+    pub redrawing_water_anim_id: Option<Uuid>,
+    pub new_rain_preset: twg_shared::environment_anim::RainPreset,
+    pub new_rain_coverage: twg_shared::environment_anim::RainCoverage,
+    pub new_rain_name: String,
+    pub relocating_rain_anim_id: Option<Uuid>,
+    pub environment_status: HashMap<Uuid, String>,
     pub new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind,
     pub new_shoot_name: String,
     pub shoot_preview_reset_nonce: u64,
@@ -1952,6 +1986,7 @@ impl AppState {
             picking_shoot_for_anim_id: None,
             picking_pointer_for_anim_id: None,
             picking_spawn_hide_for_anim_id: None,
+            picking_camera_follow_for_anim_id: None,
             route_target_marker_id: None,
             new_route_is_multi: false,
             new_route_formation: twg_shared::route_formation::RouteFormationKind::Grid,
@@ -1977,6 +2012,18 @@ impl AppState {
             traffic_model_unit_dims: HashMap::new(),
             new_billboard_name: "Billboard 1".to_string(),
             billboard_status: HashMap::new(),
+            new_camera_static_name: "Static Camera 1".to_string(),
+            new_camera_follow_name: "Camera Follow 1".to_string(),
+            new_camera_follow_preset: twg_shared::camera_anim::CameraFollowPreset::Rear,
+            camera_status: HashMap::new(),
+            new_water_kind: twg_shared::environment_anim::WaterSimKind::Ocean,
+            new_water_name: "Laut 1".to_string(),
+            redrawing_water_anim_id: None,
+            new_rain_preset: twg_shared::environment_anim::RainPreset::Moderate,
+            new_rain_coverage: twg_shared::environment_anim::RainCoverage::Global,
+            new_rain_name: "Hujan Sedang 1".to_string(),
+            relocating_rain_anim_id: None,
+            environment_status: HashMap::new(),
             drawing_traffic_queue_target: None,
             drawing_traffic_queue_is_gridlock: false,
             drawing_traffic_queue_is_manual: false,

@@ -22,27 +22,36 @@ use crate::{
 #[derive(Component)]
 pub struct TacticalCamera {
     pub target_local: Vec2,
+    pub target_alt_m: f32,
     pub distance_m: f32,
     pub pitch_deg: f32,
     pub bearing_deg: f32,
 
     pub smooth_target: Vec2,
+    pub smooth_alt_m: f32,
     pub smooth_distance: f32,
     pub smooth_pitch: f32,
     pub smooth_bearing: f32,
+
+    /// True on any frame where local mouse/trackpad/keyboard input moved the camera.
+    /// Used by `camera_anim_system` for automatic manual interruption.
+    pub user_interrupted_this_frame: bool,
 }
 
 impl Default for TacticalCamera {
     fn default() -> Self {
         Self {
             target_local: Vec2::ZERO,
+            target_alt_m: 0.0,
             distance_m: 650.0,
             pitch_deg: 48.0,
             bearing_deg: 0.0,
             smooth_target: Vec2::ZERO,
+            smooth_alt_m: 0.0,
             smooth_distance: 650.0,
             smooth_pitch: 48.0,
             smooth_bearing: 0.0,
+            user_interrupted_this_frame: false,
         }
     }
 }
@@ -52,6 +61,8 @@ impl TacticalCamera {
         let dist = camera_distance_for_zoom(zoom, 820.0, 45.0_f32.to_radians(), cos_lat);
         self.target_local = Vec2::ZERO;
         self.smooth_target = Vec2::ZERO;
+        self.target_alt_m = 0.0;
+        self.smooth_alt_m = 0.0;
         self.distance_m = dist;
         self.smooth_distance = dist;
         self.pitch_deg = (pitch as f32).clamp(5.0, 82.0);
@@ -62,6 +73,19 @@ impl TacticalCamera {
 
     pub fn current_zoom(&self, viewport_h: f32, cos_lat: f64) -> f64 {
         zoom_for_camera_distance(self.distance_m, viewport_h, 45.0_f32.to_radians(), cos_lat)
+    }
+
+    /// Computes the Bevy world camera Transform from the current `smooth_*` pose.
+    pub fn apply_transform(&self, tf: &mut Transform) {
+        let tilt = self.smooth_pitch.to_radians();
+        let bearing = self.smooth_bearing.to_radians();
+        let horiz = self.smooth_distance * tilt.sin();
+        let height = (self.smooth_distance * tilt.cos()).max(0.35);
+
+        let offset = Vec3::new(-bearing.sin() * horiz, height, bearing.cos() * horiz);
+        let target3 = Vec3::new(self.smooth_target.x, self.smooth_alt_m, self.smooth_target.y);
+        tf.translation = target3 + offset;
+        tf.look_at(target3, Vec3::Y);
     }
 }
 
@@ -423,6 +447,14 @@ pub fn camera_control_system(
     }
 
     tcam.distance_m = tcam.distance_m.clamp(dist_lo, dist_hi);
+    tcam.user_interrupted_this_frame = camera_changed_by_user;
+    if camera_changed_by_user && tcam.target_alt_m.abs() > 1e-3 {
+        // Gently bring elevated camera focus back to ground level when user manually pans
+        tcam.target_alt_m *= (1.0 - 4.0 * dt).max(0.0);
+        if tcam.target_alt_m.abs() < 0.05 {
+            tcam.target_alt_m = 0.0;
+        }
+    }
 
     // Broadcast throttled camera_sync (~25 Hz) to Layar Besar ONLY when:
     // - Play Skenario was opened from Tactical (`TacticalLive`), AND
@@ -456,6 +488,7 @@ pub fn camera_control_system(
                 payload: serde_json::json!({
                     "lng": lng,
                     "lat": lat,
+                    "alt": tcam.target_alt_m,
                     "zoom": zoom,
                     "pitch": tcam.pitch_deg,
                     "bearing": tcam.bearing_deg,
@@ -502,6 +535,7 @@ pub fn camera_control_system(
     // Smooth exponential damping (with shortest-arc bearing interpolation)
     let alpha = 1.0 - (-14.0 * dt).exp();
     tcam.smooth_target = tcam.smooth_target.lerp(tcam.target_local, alpha);
+    tcam.smooth_alt_m += (tcam.target_alt_m - tcam.smooth_alt_m) * alpha;
     tcam.smooth_distance += (tcam.distance_m - tcam.smooth_distance) * alpha;
     tcam.smooth_pitch += (tcam.pitch_deg - tcam.smooth_pitch) * alpha;
 
@@ -513,13 +547,5 @@ pub fn camera_control_system(
     }
     tcam.smooth_bearing = (tcam.smooth_bearing + bearing_delta * alpha).rem_euclid(360.0);
 
-    let tilt = tcam.smooth_pitch.to_radians();
-    let bearing = tcam.smooth_bearing.to_radians();
-    let horiz = tcam.smooth_distance * tilt.sin();
-    let height = (tcam.smooth_distance * tilt.cos()).max(0.35);
-
-    let offset = Vec3::new(-bearing.sin() * horiz, height, bearing.cos() * horiz);
-    let target3 = Vec3::new(tcam.smooth_target.x, 0.0, tcam.smooth_target.y);
-    tf.translation = target3 + offset;
-    tf.look_at(target3, Vec3::Y);
+    tcam.apply_transform(&mut tf);
 }

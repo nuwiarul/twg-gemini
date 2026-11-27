@@ -790,22 +790,28 @@ pub fn draw_lines_and_routes_system(
         for w in pts.windows(2) {
             gizmos.line(w[0], w[1], color);
         }
+        if state.tool_mode == ToolMode::DrawWaterPolygon && pts.len() >= 3 {
+            gizmos.line(*pts.last().unwrap(), pts[0], Color::srgba(0.12, 0.78, 0.98, 0.55));
+        }
         if let (Some(&last_pt), Some([clng, clat])) = (pts.last(), state.cursor_lnglat) {
             let cur = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.55));
             gizmos.line(last_pt, cur, Color::srgba(0.25, 0.96, 0.68, 0.72));
         }
     }
 
-    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane / DrawTrafficDiversionLane draft
+    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane / DrawTrafficDiversionLane / DrawWaterPolygon draft
     if matches!(
         state.tool_mode,
         ToolMode::DrawRoute
             | ToolMode::DrawTrafficLane
             | ToolMode::DrawTrafficQueueLane
             | ToolMode::DrawTrafficDiversionLane
+            | ToolMode::DrawWaterPolygon
     ) && !state.draft_points_lnglat.is_empty()
     {
-        let color = if state.tool_mode == ToolMode::DrawTrafficDiversionLane {
+        let color = if state.tool_mode == ToolMode::DrawWaterPolygon {
+            Color::srgb(0.12, 0.78, 0.98)
+        } else if state.tool_mode == ToolMode::DrawTrafficDiversionLane {
             match state.drawing_diversion_target {
                 Some((_, Some((_, 1)))) => Color::srgb(0.08, 0.92, 0.58),
                 Some((_, Some((_, 2)))) => Color::srgb(0.98, 0.62, 0.12),
@@ -836,6 +842,9 @@ pub fn draw_lines_and_routes_system(
         }
         for w in pts.windows(2) {
             gizmos.line(w[0], w[1], color);
+        }
+        if state.tool_mode == ToolMode::DrawWaterPolygon && pts.len() >= 3 {
+            gizmos.line(*pts.last().unwrap(), pts[0], Color::srgba(0.12, 0.78, 0.98, 0.55));
         }
         if let (Some(&last_pt), Some([clng, clat])) = (pts.last(), state.cursor_lnglat) {
             let cur = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.55));
@@ -925,6 +934,22 @@ pub fn draw_lines_and_routes_system(
         gizmos.line(br, tr, col);
         gizmos.line(tr, tl, col);
         gizmos.line(tl, bl, col);
+    }
+
+    // Active PlaceRainZone cursor radius preview on the 3D map
+    if state.tool_mode == ToolMode::PlaceRainZone
+        && let Some([clng, clat]) = state.cursor_lnglat
+    {
+        let p = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.25));
+        let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let rad = state
+            .relocating_rain_anim_id
+            .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+            .map(|a| twg_shared::environment_anim::parse_rain_anim_config(a).radius_m as f32)
+            .unwrap_or(160.0);
+        let col = Color::srgb(0.49, 0.55, 0.98);
+        gizmos.circle(Isometry3d::new(p, flat_rot), rad, col);
+        gizmos.circle(Isometry3d::new(p, flat_rot), (rad * 0.12).clamp(2.0, 12.0), col);
     }
 
     // Active Measure tool segments

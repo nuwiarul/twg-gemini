@@ -365,6 +365,18 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::billboard_anim::is_billboard_anim(anim) {
         return crate::billboard_anim::parse_billboard_anim_config(anim).is_continuous();
     }
+    if crate::camera_anim::is_camera_static_anim(anim) {
+        return crate::camera_anim::parse_camera_static_config(anim).is_continuous();
+    }
+    if crate::camera_anim::is_camera_follow_anim(anim) {
+        return crate::camera_anim::parse_camera_follow_config(anim).is_continuous();
+    }
+    if crate::environment_anim::is_water_anim(anim) {
+        return crate::environment_anim::parse_water_anim_config(anim).continuous;
+    }
+    if crate::environment_anim::is_rain_anim(anim) {
+        return crate::environment_anim::parse_rain_anim_config(anim).continuous;
+    }
     if crate::shoot_anim::is_shoot_anim(anim) {
         return crate::shoot_anim::shoot_anim_is_continuous(anim);
     }

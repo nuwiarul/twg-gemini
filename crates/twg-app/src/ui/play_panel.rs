@@ -530,6 +530,8 @@ pub fn draw_play_animation_panel(
                                 | AnimCategory::Group
                                 | AnimCategory::Other
                                 | AnimCategory::Audio
+                                | AnimCategory::Camera
+                                | AnimCategory::Environment
                         )
                     {
                         egui::Frame::new()
@@ -657,6 +659,7 @@ pub fn draw_play_animation_panel(
                                 state,
                                 playback,
                                 anim,
+                                *global_idx,
                                 true,
                             ) {
                                 Some(BillboardPlayAction::Play) => action_play = Some(anim.id),
@@ -669,9 +672,61 @@ pub fn draw_play_animation_panel(
                                         &state.anims,
                                         &state.markers,
                                     ) {
-                                        let local =
-                                            state.geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0);
-                                        tcam.target_local = bevy::math::Vec2::new(local[0], local[2]);
+                                        fly_to = Some((lng, lat));
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
+                        if twg_shared::camera_anim::is_camera_anim(anim) {
+                            use super::camera_anim::CameraPlayAction;
+                            match super::camera_anim::draw_play_card(
+                                ui,
+                                state,
+                                playback,
+                                anim,
+                                *global_idx,
+                                true,
+                            ) {
+                                Some(CameraPlayAction::Play) => action_play = Some(anim.id),
+                                Some(CameraPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(CameraPlayAction::Resume) => action_resume = Some(anim.id),
+                                Some(CameraPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(CameraPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        fly_to = Some((lng, lat));
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
+                        if twg_shared::environment_anim::is_environment_anim(anim) {
+                            use super::environment_anim::EnvPlayAction;
+                            match super::environment_anim::draw_play_card(
+                                ui,
+                                state,
+                                playback,
+                                anim,
+                                *global_idx,
+                                true,
+                            ) {
+                                Some(EnvPlayAction::Play) => action_play = Some(anim.id),
+                                Some(EnvPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(EnvPlayAction::Resume) => action_resume = Some(anim.id),
+                                Some(EnvPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(EnvPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        fly_to = Some((lng, lat));
                                     }
                                 }
                                 None => {}
