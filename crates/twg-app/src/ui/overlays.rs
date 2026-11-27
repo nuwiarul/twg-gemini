@@ -62,9 +62,19 @@ pub fn draw_projected_labels(
         }
     }
 
-    // Hide all unit/object name labels during Play Skenario & Layar Besar (keep placed TextMarkers)
+    // Hide all unit/object name labels during Play Skenario & Layar Besar (keep placed TextMarkers).
+    // Performance cap: when a scenario contains hundreds/thousands of units, only project the nearest
+    // 100 unit badges around the camera so egui doesn't lay out 10,000 overlapping text galleys/frame.
     if state.show_unit_labels && !playback.play_test_mode && !state.is_big_screen() {
+        const MAX_UNIT_LABELS: usize = 100;
+        let cam_pos = cam_gtf.translation();
+        let mut drawn_labels = 0usize;
+        let high_count = state.markers.len() > MAX_UNIT_LABELS;
+        let max_dist_sq = 180.0_f32 * 180.0_f32;
         for m in &state.markers {
+            if drawn_labels >= MAX_UNIT_LABELS {
+                break;
+            }
             if !overrides.is_marker_visible(m, playback.play_test_mode) {
                 continue;
             }
@@ -83,6 +93,9 @@ pub fn draw_projected_labels(
                 };
                 Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(lng, lat, alt + 10.0))
             };
+            if high_count && world_pos.distance_squared(cam_pos) > max_dist_sq {
+                continue;
+            }
             if let Ok(screen) = camera.world_to_viewport(cam_gtf, world_pos) {
                 let pos = egui::pos2(screen.x, screen.y);
                 if clip_rect.contains(pos) {
@@ -94,6 +107,7 @@ pub fn draw_projected_labels(
                         11.5,
                         true,
                     );
+                    drawn_labels += 1;
                 }
             }
         }

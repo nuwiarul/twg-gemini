@@ -40,6 +40,7 @@ use crate::{
     scene::{
         asset_preview::AssetPreviewStage,
         basic_mesh::{BasicMeshConfig, BasicMeshShape},
+        benchmark::{PerformanceBenchmarkState, draw_benchmark_overlay},
         gizmo::{TransformGizmoState, draw_transform_gizmo},
         markers::{
             MarkerWorldBounds, execute_delete_entity, spawn_basic_mesh_marker,
@@ -64,10 +65,11 @@ pub fn egui_root_system(
     mut contexts: EguiContexts,
     time: Res<Time>,
     mut state: ResMut<AppState>,
-    (mut playback, mut play_rts, mut recorder): (
+    (mut playback, mut play_rts, mut recorder, mut bench): (
         ResMut<PlaybackState>,
         ResMut<PlayRtsState>,
         ResMut<VideoRecorderState>,
+        ResMut<PerformanceBenchmarkState>,
     ),
     (overrides, marker_bounds, pointer_pool, tactical_arrow_pool): (
         Res<PlaybackOverrides>,
@@ -333,6 +335,7 @@ pub fn egui_root_system(
             &ws,
             &sync_bridge,
         );
+        draw_benchmark_overlay(ctx, center_rect, &mut bench, &state, &tcam);
 
         ui_state.wants_pointer = true;
         ui_state.wants_keyboard = true;
@@ -415,6 +418,7 @@ pub fn egui_root_system(
         &playback,
         time.elapsed_secs_f64(),
     );
+    draw_benchmark_overlay(ctx, center_rect, &mut bench, &state, &tcam);
 
     draw_transform_gizmo(
         ctx,

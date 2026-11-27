@@ -57,6 +57,7 @@ use crate::{
         scenario_audio::{ScenarioAudio, scenario_audio_system},
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
+        benchmark::{PerformanceBenchmarkState, performance_benchmark_system},
         tactical_arrow::{TacticalArrowVisualPool, tactical_arrow_visual_system},
         traffic::{TrafficVisualPool, traffic_visual_system},
         video_recorder::{VideoRecorderState, video_recorder_system},
@@ -148,6 +149,7 @@ fn main() {
         .init_resource::<TacticalArrowVisualPool>()
         .init_resource::<TrafficVisualPool>()
         .init_resource::<VideoRecorderState>()
+        .init_resource::<PerformanceBenchmarkState>()
         .init_resource::<SkyboxManager>()
         .init_resource::<MarkerWorldBounds>()
         .init_resource::<BasicMeshTextureCache>()
@@ -225,6 +227,7 @@ fn main() {
                     billboard_visual_system,
                     environment_fx_visual_system,
                     video_recorder_system,
+                    performance_benchmark_system,
                 )
                     .chain(),
             )

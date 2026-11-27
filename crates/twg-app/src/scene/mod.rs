@@ -1,5 +1,6 @@
 pub mod asset_preview;
 pub mod basic_mesh;
+pub mod benchmark;
 pub mod billboard;
 pub mod buildings;
 pub mod camera_anim;
