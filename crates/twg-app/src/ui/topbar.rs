@@ -413,6 +413,7 @@ pub fn draw_top_bar(
                     ToolMode::DrawLine
                         | ToolMode::DrawBuilding
                         | ToolMode::DrawBasicPolygon
+                        | ToolMode::DrawGroundPolygon
                         | ToolMode::DrawRoute
                         | ToolMode::DrawTrafficLane
                         | ToolMode::DrawTrafficQueueLane

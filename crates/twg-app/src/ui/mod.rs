@@ -523,6 +523,13 @@ pub fn egui_root_system(
                             "Titik #1 Polygon diletakkan! Klik titik berikutnya di peta, lalu klik titik #1 / Enter untuk selesai."
                                 .into(),
                         );
+                    } else if drag_shape == BasicMeshShape::GroundPolygon {
+                        state.tool_mode = ToolMode::DrawGroundPolygon;
+                        state.draft_points_lnglat = vec![[lng, lat]];
+                        state.status_banner = Some(
+                            "Titik #1 Ground Polygon diletakkan! Klik titik berikutnya di peta, lalu klik titik #1 / Enter untuk selesai."
+                                .into(),
+                        );
                     } else if spawn_basic_mesh_marker(
                         &mut state,
                         &api,
@@ -565,6 +572,7 @@ pub fn egui_root_system(
         || matches!(
             state.tool_mode,
             ToolMode::DrawBasicPolygon
+                | ToolMode::DrawGroundPolygon
                 | ToolMode::DrawBuilding
                 | ToolMode::DrawLine
                 | ToolMode::DrawRoute

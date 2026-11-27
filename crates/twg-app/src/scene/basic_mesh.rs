@@ -21,6 +21,7 @@ pub const BASIC_MESH_PATH_PREFIX: &str = "procedural://";
 #[serde(rename_all = "snake_case")]
 pub enum BasicMeshShape {
     Plane,
+    GroundPolygon,
     #[default]
     Cube,
     Wall,
@@ -36,6 +37,7 @@ pub enum BasicMeshShape {
 impl BasicMeshShape {
     pub const ALL: &'static [BasicMeshShape] = &[
         Self::Plane,
+        Self::GroundPolygon,
         Self::Cube,
         Self::Wall,
         Self::Cylinder,
@@ -50,6 +52,7 @@ impl BasicMeshShape {
     pub fn slug(&self) -> &'static str {
         match self {
             Self::Plane => "plane",
+            Self::GroundPolygon => "ground_polygon",
             Self::Cube => "cube",
             Self::Wall => "wall",
             Self::Cylinder => "cylinder",
@@ -65,6 +68,7 @@ impl BasicMeshShape {
     pub fn tag(&self) -> &'static str {
         match self {
             Self::Plane => "PLN",
+            Self::GroundPolygon => "GPL",
             Self::Cube => "BOX",
             Self::Wall => "WAL",
             Self::Cylinder => "CYL",
@@ -80,6 +84,7 @@ impl BasicMeshShape {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Plane => "Plane / Ground",
+            Self::GroundPolygon => "Ground Polygon (Bebas)",
             Self::Cube => "Kubus / Box",
             Self::Wall => "Wall / Dinding",
             Self::Cylinder => "Silinder",
@@ -94,7 +99,8 @@ impl BasicMeshShape {
 
     pub fn subtitle(&self) -> &'static str {
         match self {
-            Self::Plane => "Lantai, helipad, zona datar",
+            Self::Plane => "Lantai, helipad, zona datar persegi",
+            Self::GroundPolygon => "Ground / lantai datar poligon bebas + warna/tekstur",
             Self::Cube => "Kontainer, blok, bangunan kotak",
             Self::Wall => "Tembok perimeter, partisi indoor",
             Self::Cylinder => "Pilar, tangki, kolom zona",
@@ -105,6 +111,10 @@ impl BasicMeshShape {
             Self::Torus => "Cincin 3D, ring target, perimeter",
             Self::Capsule => "Silinder ujung bulat, bollard",
         }
+    }
+
+    pub fn is_polygon_shape(self) -> bool {
+        matches!(self, Self::Polygon | Self::GroundPolygon)
     }
 
     pub fn is_recommended_extra(&self) -> bool {
@@ -182,6 +192,9 @@ impl BasicMeshConfig {
         let (width, height, depth, radius, tube_radius, segments, color_rgba, double_sided) =
             match shape {
                 BasicMeshShape::Plane => (12.0, 0.05, 12.0, 6.0, 0.5, 24, [71, 85, 105, 235], true),
+                BasicMeshShape::GroundPolygon => {
+                    (12.0, 0.05, 12.0, 6.0, 0.5, 6, [71, 85, 105, 235], true)
+                }
                 BasicMeshShape::Cube => (4.0, 4.0, 4.0, 2.0, 0.5, 24, [56, 189, 248, 255], false),
                 BasicMeshShape::Wall => (12.0, 3.2, 0.45, 2.0, 0.5, 24, [148, 163, 184, 255], false),
                 BasicMeshShape::Cylinder => (4.0, 5.0, 4.0, 2.2, 0.5, 24, [52, 211, 153, 255], false),
@@ -354,8 +367,8 @@ pub fn build_basic_mesh_material(
         base_color,
         base_color_texture,
         uv_transform: Affine2::from_scale(Vec2::new(
-            cfg.uv_scale_x.clamp(0.05, 50.0),
-            cfg.uv_scale_y.clamp(0.05, 50.0),
+            cfg.uv_scale_x.clamp(0.05, 200.0),
+            cfg.uv_scale_y.clamp(0.05, 200.0),
         )),
         perceptual_roughness: cfg.roughness.clamp(0.04, 1.0),
         metallic: cfg.metallic.clamp(0.0, 1.0),
@@ -376,6 +389,7 @@ pub fn build_basic_mesh_material(
 pub fn build_basic_mesh_geometry(cfg: &BasicMeshConfig) -> Mesh {
     match cfg.shape {
         BasicMeshShape::Plane => build_plane_mesh(cfg.width.max(0.2), cfg.depth.max(0.2)),
+        BasicMeshShape::GroundPolygon => build_ground_polygon_mesh(cfg),
         BasicMeshShape::Cube | BasicMeshShape::Wall => build_box_mesh(
             cfg.width.max(0.1),
             cfg.height.max(0.1),
@@ -651,6 +665,100 @@ fn build_cone_mesh(r: f32, h: f32, segs: u32) -> Mesh {
     }
     for i in 0..segs {
         idx.extend_from_slice(&[bot_center, bot_center + 1 + i, bot_center + 1 + i + 1]);
+    }
+
+    assemble_mesh(pos, norm, uv, idx)
+}
+
+fn build_ground_polygon_mesh(cfg: &BasicMeshConfig) -> Mesh {
+    let ring: Vec<[f32; 2]> = if cfg.polygon_points.len() >= 3 {
+        cfg.polygon_points.clone()
+    } else {
+        let sides = cfg.segments.clamp(3, 32);
+        let r = cfg.radius.max(0.2);
+        (0..sides)
+            .map(|i| {
+                let ang = (i as f32 / sides as f32) * TAU - FRAC_PI_2;
+                [ang.cos() * r, ang.sin() * r]
+            })
+            .collect()
+    };
+
+    // Remove consecutive duplicate / near-zero vertices before triangulation
+    let mut cleaned: Vec<[f32; 2]> = Vec::with_capacity(ring.len());
+    for pt in ring {
+        if cleaned
+            .last()
+            .is_none_or(|prev| (pt[0] - prev[0]).hypot(pt[1] - prev[1]) > 1e-3)
+        {
+            cleaned.push(pt);
+        }
+    }
+    if cleaned.len() > 3 {
+        let first = cleaned[0];
+        let last = *cleaned.last().unwrap();
+        if (first[0] - last[0]).hypot(first[1] - last[1]) < 1e-3 {
+            cleaned.pop();
+        }
+    }
+    let mut ring = cleaned;
+    if ring.len() < 3 {
+        return build_plane_mesh(cfg.width.max(1.0), cfg.depth.max(1.0));
+    }
+
+    let signed_area_xz: f32 = ring
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let b = ring[(i + 1) % ring.len()];
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    if signed_area_xz > 0.0 {
+        ring.reverse();
+    }
+
+    let flat_2d: Vec<f64> = ring
+        .iter()
+        .flat_map(|p| [p[0] as f64, p[1] as f64])
+        .collect();
+    let Ok(tris) = earcutr::earcut(&flat_2d, &[], 2) else {
+        return build_plane_mesh(cfg.width.max(1.0), cfg.depth.max(1.0));
+    };
+    if tris.len() < 3 {
+        return build_plane_mesh(cfg.width.max(1.0), cfg.depth.max(1.0));
+    }
+
+    let (mut min_x, mut max_x, mut min_z, mut max_z) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for p in &ring {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_z = min_z.min(p[1]);
+        max_z = max_z.max(p[1]);
+    }
+    // Aspect-preserving planar UVs so square textures never stretch on long or L-shaped ground polygons.
+    let span = (max_x - min_x).max(max_z - min_z).max(0.1);
+    let y = 0.03_f32;
+
+    let mut pos = Vec::with_capacity(ring.len());
+    let mut norm = Vec::with_capacity(ring.len());
+    let mut uv = Vec::with_capacity(ring.len());
+    let mut idx = Vec::with_capacity(tris.len());
+
+    for p in &ring {
+        pos.push([p[0], y, p[1]]);
+        norm.push([0.0, 1.0, 0.0]);
+        uv.push([(p[0] - min_x) / span, (p[1] - min_z) / span]);
+    }
+    for tri in tris.as_chunks::<3>().0 {
+        let p0 = Vec3::from_array(pos[tri[0]]);
+        let p1 = Vec3::from_array(pos[tri[1]]);
+        let p2 = Vec3::from_array(pos[tri[2]]);
+        if (p1 - p0).cross(p2 - p0).y >= 0.0 {
+            idx.extend_from_slice(&[tri[0] as u32, tri[1] as u32, tri[2] as u32]);
+        } else {
+            idx.extend_from_slice(&[tri[0] as u32, tri[2] as u32, tri[1] as u32]);
+        }
     }
 
     assemble_mesh(pos, norm, uv, idx)
@@ -1018,12 +1126,55 @@ mod tests {
                 }
                 signed_vol_6 += v0.dot(v1.cross(v2));
             }
-            if shape != BasicMeshShape::Plane {
+            if !matches!(shape, BasicMeshShape::Plane | BasicMeshShape::GroundPolygon) {
                 assert!(
                     signed_vol_6 > 0.0,
                     "closed shape {shape:?} must have positive outward volume (got {signed_vol_6})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn custom_concave_ground_polygon_is_flat_upward_and_aspect_preserving() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let l_shape = vec![
+            [-10.0, -4.0],
+            [10.0, -4.0],
+            [10.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 6.0],
+            [-10.0, 6.0],
+        ];
+        for reversed in [false, true] {
+            let mut cfg = BasicMeshConfig::default_for(BasicMeshShape::GroundPolygon);
+            cfg.polygon_points = l_shape.clone();
+            if reversed {
+                cfg.polygon_points.reverse();
+            }
+            let mesh = build_basic_mesh_geometry(&cfg);
+            let Some(VertexAttributeValues::Float32x3(pos)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("missing positions");
+            };
+            let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+            else {
+                panic!("missing UVs");
+            };
+            let Some(Indices::U32(idx)) = mesh.indices() else {
+                panic!("missing indices");
+            };
+            assert!(idx.len() >= 12);
+            for p in pos {
+                assert!((p[1] - 0.03).abs() < 1e-4);
+            }
+            // Span X is 20.0, Span Z is 10.0 -> max V should be 0.5 (aspect-preserving, not stretched to 1.0)
+            let max_u = uvs.iter().map(|u| u[0]).fold(0.0_f32, f32::max);
+            let max_v = uvs.iter().map(|u| u[1]).fold(0.0_f32, f32::max);
+            assert!((max_u - 1.0).abs() < 1e-4);
+            assert!((max_v - 0.5).abs() < 1e-4);
         }
     }
 

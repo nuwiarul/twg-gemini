@@ -2213,7 +2213,7 @@ pub fn map_interaction_system(
                 .is_some_and(|m| {
                     !state.is_marker_locked(m)
                         && parse_basic_mesh_config(m)
-                            .is_some_and(|c| c.shape == BasicMeshShape::Polygon)
+                            .is_some_and(|c| c.shape.is_polygon_shape())
                 });
         if !valid {
             poly_edit.clear();
@@ -2285,6 +2285,7 @@ pub fn map_interaction_system(
                 ToolMode::DrawLine
                     | ToolMode::DrawBuilding
                     | ToolMode::DrawBasicPolygon
+                    | ToolMode::DrawGroundPolygon
                     | ToolMode::DrawWaterPolygon
                     | ToolMode::DrawRoute
                     | ToolMode::DrawTrafficLane
@@ -3554,6 +3555,7 @@ pub fn map_interaction_system(
         ToolMode::DrawLine
         | ToolMode::DrawBuilding
         | ToolMode::DrawBasicPolygon
+        | ToolMode::DrawGroundPolygon
         | ToolMode::DrawWaterPolygon
         | ToolMode::DrawRoute
         | ToolMode::DrawTrafficLane
@@ -3565,7 +3567,10 @@ pub fn map_interaction_system(
             // Click near Point #1 when drawing a polygon (>= 3 points) to close & extrude immediately!
             if matches!(
                 state.tool_mode,
-                ToolMode::DrawBasicPolygon | ToolMode::DrawBuilding | ToolMode::DrawWaterPolygon
+                ToolMode::DrawBasicPolygon
+                    | ToolMode::DrawGroundPolygon
+                    | ToolMode::DrawBuilding
+                    | ToolMode::DrawWaterPolygon
             ) && state.draft_points_lnglat.len() >= 3
             {
                 let p0 = state.draft_points_lnglat[0];
@@ -4701,9 +4706,14 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
             }
             state.tool_mode = ToolMode::Select;
         }
-        ToolMode::DrawBasicPolygon => {
+        ToolMode::DrawBasicPolygon | ToolMode::DrawGroundPolygon => {
+            let is_ground = state.tool_mode == ToolMode::DrawGroundPolygon;
             if pts.len() < 3 {
-                state.status_banner = Some("Polygon 3D butuh minimal 3 titik (klik di peta).".into());
+                state.status_banner = Some(if is_ground {
+                    "Ground Polygon butuh minimal 3 titik (klik di peta).".into()
+                } else {
+                    "Polygon 3D butuh minimal 3 titik (klik di peta).".into()
+                });
                 return;
             }
             let local_pts: Vec<[f32; 2]> = pts
@@ -4728,15 +4738,24 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 .collect();
             let (c_lng, c_lat, _) = state.geo_anchor.local_to_lng_lat_alt([cx, 0.0, cz]);
 
-            let mut cfg = BasicMeshConfig::default_for(BasicMeshShape::Polygon);
-            cfg.height = (state.new_polygon_height as f32).clamp(0.1, 400.0);
+            let mut cfg = BasicMeshConfig::default_for(if is_ground {
+                BasicMeshShape::GroundPolygon
+            } else {
+                BasicMeshShape::Polygon
+            });
+            if !is_ground {
+                cfg.height = (state.new_polygon_height as f32).clamp(0.1, 400.0);
+            }
             cfg.polygon_points = centered;
 
             if spawn_basic_mesh_marker(state, api, cfg, None, c_lng, c_lat) {
-                state.status_banner = Some(
+                state.status_banner = Some(if is_ground {
+                    "Ground Polygon berhasil dibuat! Atur Material Warna / Tekstur & Skala UV atau Edit Titik di Inspector."
+                        .into()
+                } else {
                     "Polygon 3D berhasil dibuat! Klik 'Edit Titik di Peta' di Inspector untuk mengubah/menambah titik."
-                        .into(),
-                );
+                        .into()
+                });
             }
             state.tool_mode = ToolMode::Select;
         }

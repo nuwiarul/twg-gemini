@@ -3277,7 +3277,8 @@ fn draw_basic_mesh_tab(
 
     let mut add_shape: Option<BasicMeshShape> = None;
     let mut start_drag_shape: Option<BasicMeshShape> = None;
-    let mut toggle_draw_poly_from_card = false;
+    let mut toggle_draw_poly_from_card: Option<ToolMode> = None;
+    let draw_ground_poly_active = state.tool_mode == ToolMode::DrawGroundPolygon;
 
     egui::ScrollArea::vertical()
         .id_salt("godot_basic_mesh_scroll")
@@ -3285,8 +3286,11 @@ fn draw_basic_mesh_tab(
         .show(ui, |ui| {
             for &shape in BasicMeshShape::ALL {
                 let is_poly_card = shape == BasicMeshShape::Polygon;
+                let is_ground_poly_card = shape == BasicMeshShape::GroundPolygon;
+                let is_draw_card = is_poly_card || is_ground_poly_card;
                 let is_dragging = state.dragging_basic_mesh == Some(shape);
-                let is_active_poly_draw = is_poly_card && draw_poly_active;
+                let is_active_poly_draw = (is_poly_card && draw_poly_active)
+                    || (is_ground_poly_card && draw_ground_poly_active);
                 let card_bg = if is_dragging || is_active_poly_draw {
                     egui::Color32::from_rgb(59, 34, 108)
                 } else {
@@ -3321,6 +3325,8 @@ fn draw_basic_mesh_tab(
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             let tag_col = if shape.is_recommended_extra() {
                                                 egui::Color32::from_rgb(250, 204, 21)
+                                            } else if is_ground_poly_card {
+                                                egui::Color32::from_rgb(56, 189, 248)
                                             } else {
                                                 egui::Color32::from_rgb(167, 139, 250)
                                             };
@@ -3370,18 +3376,26 @@ fn draw_basic_mesh_tab(
                             }
                             let _ = drag_resp.on_hover_text(if !editable {
                                 "Hentikan Play Mode (Stop) untuk menambah Basic Mesh"
+                            } else if is_ground_poly_card {
+                                "Tarik ke peta untuk mulai menggambar titik #1 Ground Polygon, atau klik 'Gambar'"
                             } else if is_poly_card {
                                 "Tarik ke peta untuk mulai menggambar titik #1 Polygon, atau klik 'Gambar'"
                             } else {
                                 "Tarik (drag) ke peta 3D untuk meletakkan Basic Mesh ini"
                             });
 
-                            let (btn_text, btn_fill, btn_hover) = if is_poly_card {
-                                if draw_poly_active {
+                            let (btn_text, btn_fill, btn_hover) = if is_draw_card {
+                                if is_active_poly_draw {
                                     (
                                         "Batal",
                                         egui::Color32::from_rgb(185, 28, 28),
                                         "Batalkan gambar polygon bebas",
+                                    )
+                                } else if is_ground_poly_card {
+                                    (
+                                        "Gambar",
+                                        egui::Color32::from_rgb(2, 132, 199),
+                                        "Gambar ground/lantai poligon datar bebas di peta 3D (bisa warna & tekstur)",
                                     )
                                 } else {
                                     (
@@ -3418,8 +3432,10 @@ fn draw_basic_mesh_tab(
                                 .on_hover_text(btn_hover)
                                 .clicked()
                             {
-                                if is_poly_card {
-                                    toggle_draw_poly_from_card = true;
+                                if is_ground_poly_card {
+                                    toggle_draw_poly_from_card = Some(ToolMode::DrawGroundPolygon);
+                                } else if is_poly_card {
+                                    toggle_draw_poly_from_card = Some(ToolMode::DrawBasicPolygon);
                                 } else {
                                     add_shape = Some(shape);
                                 }
@@ -3430,17 +3446,22 @@ fn draw_basic_mesh_tab(
             }
         });
 
-    if toggle_draw_poly_from_card && editable {
-        if state.tool_mode == ToolMode::DrawBasicPolygon {
+    if let Some(target_mode) = toggle_draw_poly_from_card
+        && editable
+    {
+        if state.tool_mode == target_mode {
             state.tool_mode = ToolMode::Select;
             state.draft_points_lnglat.clear();
         } else {
-            state.tool_mode = ToolMode::DrawBasicPolygon;
+            state.tool_mode = target_mode;
             state.draft_points_lnglat.clear();
-            state.status_banner = Some(
+            state.status_banner = Some(if target_mode == ToolMode::DrawGroundPolygon {
+                "Mode Gambar Ground Polygon (Datar): Klik min 3 titik di peta, klik titik #1 atau tekan Enter untuk selesai (Backspace = Undo)."
+                    .into()
+            } else {
                 "Mode Gambar Polygon Bebas: Klik min 3 titik di peta, klik titik #1 atau tekan Enter untuk selesai (Backspace = Undo)."
-                    .into(),
-            );
+                    .into()
+            });
         }
     }
 

@@ -984,6 +984,7 @@ pub enum ToolMode {
     #[allow(dead_code)] // Kept for existing scenario/draft handling; no longer exposed in the toolbar.
     DrawBuilding,
     DrawBasicPolygon,
+    DrawGroundPolygon,
     PlaceText,
     DrawRoute,
     DrawTrafficLane,
@@ -1012,6 +1013,7 @@ impl ToolMode {
             Self::DrawLine => "Draw Line",
             Self::DrawBuilding => "Draw Bldg",
             Self::DrawBasicPolygon => "Draw Polygon",
+            Self::DrawGroundPolygon => "Draw Ground Polygon",
             Self::PlaceText => "Add Label",
             Self::DrawRoute => "Draw Route",
             Self::DrawTrafficLane => "Draw Traffic",

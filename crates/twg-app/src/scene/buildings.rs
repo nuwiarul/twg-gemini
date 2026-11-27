@@ -102,7 +102,7 @@ pub fn draw_building_draft_gizmos(state: Res<AppState>, mut gizmos: Gizmos) {
     if state.screen != AppScreen::PlotSkenario
         || !matches!(
             state.tool_mode,
-            ToolMode::DrawBuilding | ToolMode::DrawBasicPolygon
+            ToolMode::DrawBuilding | ToolMode::DrawBasicPolygon | ToolMode::DrawGroundPolygon
         )
     {
         return;

@@ -232,6 +232,10 @@ pub fn draw_projected_labels(
                 state.new_polygon_height,
                 state.draft_points_lnglat.len()
             ),
+            ToolMode::DrawGroundPolygon => format!(
+                "Mode Draw Ground Polygon (Datar): {} titik — Min 3 titik, klik titik #1 / Enter selesai, Esc batal",
+                state.draft_points_lnglat.len()
+            ),
             ToolMode::PlaceText => format!(
                 "Mode Add Label: \"{}\" — Klik di peta (Esc batal)",
                 state.new_text_label

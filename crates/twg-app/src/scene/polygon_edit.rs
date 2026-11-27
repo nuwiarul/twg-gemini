@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     scene::{
-        basic_mesh::{BasicMeshConfig, BasicMeshShape, parse_basic_mesh_config, write_basic_mesh_config},
+        basic_mesh::{BasicMeshConfig, parse_basic_mesh_config, write_basic_mesh_config},
         gizmo::{
             closest_axis_param, compute_gizmo_world_radius, intersect_ray_plane, marker_quat,
             marker_world_origin,
@@ -185,7 +185,7 @@ pub fn hit_test_polygon_editor(
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> Option<PolygonHoverTarget> {
-    if cfg.shape != BasicMeshShape::Polygon || cfg.polygon_points.len() < 3 {
+    if !cfg.shape.is_polygon_shape() || cfg.polygon_points.len() < 3 {
         return None;
     }
 
@@ -383,7 +383,7 @@ pub fn insert_vertex_from_cursor_click(
 ) -> Option<usize> {
     let marker_snapshot = state.markers.iter().find(|m| m.id == marker_id)?.clone();
     let mut cfg = parse_basic_mesh_config(&marker_snapshot)?;
-    if cfg.shape != BasicMeshShape::Polygon {
+    if !cfg.shape.is_polygon_shape() {
         return None;
     }
     ensure_editable_polygon_points(&mut cfg);
@@ -443,8 +443,12 @@ pub fn draw_polygon_vertex_editor(
         ))
         .with_clip_rect(clip_rect);
 
-    // 1. Live numbered vertex markers while actively drawing a brand-new Polygon on the map
-    if state.tool_mode == ToolMode::DrawBasicPolygon && !state.draft_points_lnglat.is_empty() {
+    // 1. Live numbered vertex markers while actively drawing a brand-new Polygon / Ground Polygon on the map
+    if matches!(
+        state.tool_mode,
+        ToolMode::DrawBasicPolygon | ToolMode::DrawGroundPolygon
+    ) && !state.draft_points_lnglat.is_empty()
+    {
         for (idx, pt) in state.draft_points_lnglat.iter().enumerate() {
             let local = state.geo_anchor.lng_lat_alt_to_local(pt[0], pt[1], 0.35);
             if let Ok(s) = camera.world_to_viewport(cam_gtf, Vec3::from_array(local)) {
@@ -487,7 +491,7 @@ pub fn draw_polygon_vertex_editor(
     let Some(cfg) = parse_basic_mesh_config(marker) else {
         return;
     };
-    if cfg.shape != BasicMeshShape::Polygon || cfg.polygon_points.len() < 3 {
+    if !cfg.shape.is_polygon_shape() || cfg.polygon_points.len() < 3 {
         return;
     }
 

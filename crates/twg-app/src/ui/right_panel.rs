@@ -448,6 +448,42 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                 });
             });
         }
+        ToolMode::DrawGroundPolygon => {
+            inspector_card(ui, "Tool: Gambar Ground Polygon (Datar)", true, |ui| {
+                let pt_count = state.draft_points_lnglat.len();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Titik ground polygon: {pt_count} (min 3 — klik titik #1 atau Enter untuk Selesai)"
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(125, 211, 252)),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(pt_count > 0, egui::Button::new("Undo Titik").small())
+                        .on_hover_text("Batalkan titik terakhir (Backspace)")
+                        .clicked()
+                    {
+                        state.draft_points_lnglat.pop();
+                    }
+                    let fin = egui::Button::new(
+                        egui::RichText::new("Selesai (Buat Ground)")
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105))
+                    .small();
+                    if ui.add_enabled(pt_count >= 3, fin).clicked() {
+                        finish_active_draft(state, api);
+                    }
+                    if ui.small_button("Batal").clicked() {
+                        state.draft_points_lnglat.clear();
+                        state.tool_mode = ToolMode::Select;
+                    }
+                });
+            });
+        }
         ToolMode::DrawBasicPolygon => {
             inspector_card(ui, "Tool: Gambar Polygon Bebas (Height)", true, |ui| {
                 ui.horizontal(|ui| {
@@ -1572,10 +1608,11 @@ fn draw_marker_inspector(
                             }
                         });
                     }
-                    BasicMeshShape::Polygon => {
-                        f64_dim(ui, "Tinggi (Y):", "bm_h", &mut bm.height, dim_cfg, &mut bm_changed);
-
-                        ui.add_space(4.0);
+                    BasicMeshShape::Polygon | BasicMeshShape::GroundPolygon => {
+                        if bm.shape == BasicMeshShape::Polygon {
+                            f64_dim(ui, "Tinggi (Y):", "bm_h", &mut bm.height, dim_cfg, &mut bm_changed);
+                            ui.add_space(4.0);
+                        }
                         let is_editing_poly = poly_edit.is_editing(m.id);
                         let edit_poly_btn = egui::Button::new(
                             egui::RichText::new(if is_editing_poly {
@@ -2201,7 +2238,7 @@ fn draw_marker_inspector(
                             });
                             let uv_cfg = SpinnerConfig {
                                 min: 0.05,
-                                max: 50.0,
+                                max: 200.0,
                                 step: 0.1,
                                 drag_speed: 0.05,
                                 decimals: 2,
