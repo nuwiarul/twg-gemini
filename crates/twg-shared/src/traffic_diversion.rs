@@ -1144,7 +1144,8 @@ impl TrafficDiversionSimEngine {
             match cur.state {
                 TrafficBehaviorState::Cruising
                 | TrafficBehaviorState::Following
-                | TrafficBehaviorState::YieldingCrossing => {
+                | TrafficBehaviorState::YieldingCrossing
+                | TrafficBehaviorState::WaitingSignal => {
                     desired_lat = 0.0;
                     next_target_id = None;
                     next_timer = 0.0;

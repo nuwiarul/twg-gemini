@@ -535,13 +535,13 @@ pub fn media_preview_audio_system(
                     std::fs::read(&abs).ok()
                 } else if player.ffmpeg_available {
                     silent_command("ffmpeg")
-                        .args(["-v", "quiet", "-i"])
+                        .args(["-v", "quiet", "-nostdin", "-i"])
                         .arg(&abs)
-                        .args(["-vn", "-f", "wav", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "pipe:1"])
+                        .args(["-vn", "-f", "s16le", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "pipe:1"])
                         .output()
                         .ok()
                         .filter(|o| o.status.success() && !o.stdout.is_empty())
-                        .map(|o| o.stdout)
+                        .map(|o| wrap_pcm_s16le_as_wav(&o.stdout, 44_100, 2))
                 } else {
                     None
                 };
@@ -624,15 +624,15 @@ pub fn media_preview_audio_system(
     }
 }
 
-struct VideoStreamProbe {
-    width: Option<u32>,
-    height: Option<u32>,
-    fps: f32,
-    duration_sec: Option<f64>,
-    has_audio: bool,
+pub struct VideoStreamProbe {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: f32,
+    pub duration_sec: Option<f64>,
+    pub has_audio: bool,
 }
 
-fn probe_video_stream(path: &Path) -> VideoStreamProbe {
+pub fn probe_video_stream(path: &Path) -> VideoStreamProbe {
     let mut out = VideoStreamProbe {
         width: None,
         height: None,
@@ -703,9 +703,64 @@ fn probe_video_stream(path: &Path) -> VideoStreamProbe {
     out
 }
 
-fn silent_command(program: &str) -> Command {
+/// Resolves `ffmpeg` or `ffprobe` by checking:
+/// 1. Explicit env var override (`TWG_FFMPEG_PATH` / `TWG_FFPROBE_PATH`)
+/// 2. Sidecar binary bundled beside `twg-app` (`<exe_dir>/bin/`, `<exe_dir>/`,
+///    macOS `<exe_dir>/../Resources/bin/`, Linux `<exe_dir>/../lib/twg-app/bin/`)
+/// 3. Fallback to system `PATH` (for local dev and Linux `.deb` apt dependency)
+pub fn resolve_media_binary(program: &str) -> PathBuf {
+    let env_key = if program.eq_ignore_ascii_case("ffprobe") {
+        "TWG_FFPROBE_PATH"
+    } else {
+        "TWG_FFMPEG_PATH"
+    };
+    if let Ok(custom) = std::env::var(env_key) {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    let file_name = if program.to_ascii_lowercase().ends_with(".exe") {
+        program.to_string()
+    } else {
+        format!("{program}.exe")
+    };
+    #[cfg(not(target_os = "windows"))]
+    let file_name = program.to_string();
+
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidates = [
+            exe_dir.join("bin").join(&file_name),
+            exe_dir.join(&file_name),
+            exe_dir.join("..").join("Resources").join("bin").join(&file_name),
+            exe_dir
+                .join("..")
+                .join("lib")
+                .join("twg-app")
+                .join("bin")
+                .join(&file_name),
+        ];
+        for cand in candidates {
+            if cand.is_file() {
+                return cand;
+            }
+        }
+    }
+
+    PathBuf::from(program)
+}
+
+pub fn silent_command(program: &str) -> Command {
+    let resolved = resolve_media_binary(program);
     #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(resolved);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -715,7 +770,7 @@ fn silent_command(program: &str) -> Command {
     cmd
 }
 
-fn check_command_exists(program: &str) -> bool {
+pub fn check_command_exists(program: &str) -> bool {
     silent_command(program)
         .arg("-version")
         .stdin(Stdio::null())
@@ -723,4 +778,40 @@ fn check_command_exists(program: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Wraps raw signed 16-bit little-endian PCM bytes (`ffmpeg -f s16le`) in a standard 44-byte
+/// RIFF/WAVE header with exact chunk sizes.
+///
+/// Piping `-f wav` directly from FFmpeg writes `0xFFFFFFFF` (odd!) into the `data` chunk size,
+/// which `hound` / `rodio` rejects as "data chunk length is not a multiple of sample size".
+pub fn wrap_pcm_s16le_as_wav(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let ch = channels.max(1);
+    let sr = sample_rate.max(1);
+    let bits_per_sample: u16 = 16;
+    let block_align = ch * (bits_per_sample / 8);
+    let byte_rate = sr.saturating_mul(block_align as u32);
+
+    let max_pcm = ((u32::MAX as usize).saturating_sub(36) / block_align as usize)
+        * block_align as usize;
+    let aligned_len = (pcm.len().min(max_pcm) / block_align as usize) * block_align as usize;
+    let data_size = aligned_len as u32;
+    let riff_size = 36u32.saturating_add(data_size);
+
+    let mut out = Vec::with_capacity(44 + aligned_len);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&ch.to_le_bytes());
+    out.extend_from_slice(&sr.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits_per_sample.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    out.extend_from_slice(&pcm[..aligned_len]);
+    out
 }

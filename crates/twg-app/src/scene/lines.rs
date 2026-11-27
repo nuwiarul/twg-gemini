@@ -5,7 +5,11 @@ use twg_shared::{
     group_anim::GroupAnimMode,
     particle_anim::{is_particle_anim, particle_anim_position},
     spawn_hide_anim::SpawnHideAction,
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_anim::{
+        TrafficLightColor, default_traffic_light_transform, is_traffic_flow_or_signal,
+        is_traffic_signal_anim, parse_traffic_anim_config, project_point_onto_lane,
+        resolve_traffic_light_visual_poses, sample_lane_local_frame,
+    },
     traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
@@ -59,7 +63,7 @@ pub fn draw_lines_and_routes_system(
             if state.hidden_entity_ids.contains(&anim.id) {
                 continue;
             }
-            if is_traffic_anim(anim) {
+            if is_traffic_flow_or_signal(anim) {
                 let cfg = parse_traffic_anim_config(anim);
                 let is_selected =
                     matches!(state.selected, SelectedEntity::Anim(id) if id == anim.id);
@@ -188,6 +192,123 @@ pub fn draw_lines_and_routes_system(
                     gizmos.line(base + fwd * half_l, tip, arrow_col);
                     gizmos.line(tip, tip - fwd * 0.6 + right * 0.45, arrow_col);
                     gizmos.line(tip, tip - fwd * 0.6 - right * 0.45, arrow_col);
+                }
+
+                // Draw Stop-Line guides, pole-to-stop-line tethers, and selected Traffic Light ring
+                if is_traffic_signal_anim(anim) {
+                    let light_poses = state
+                        .traffic_signal_live_status
+                        .get(&anim.id)
+                        .map(|s| s.light_states.clone())
+                        .unwrap_or_else(|| {
+                            resolve_traffic_light_visual_poses(&cfg, state.geo_anchor, 0.0)
+                        });
+                    for lp in &light_poses {
+                        let is_tl_selected =
+                            state.selected_traffic_light == Some((anim.id, lp.light_id));
+                        let sig_col = if !lp.enabled {
+                            Color::srgba(0.55, 0.60, 0.68, 0.5)
+                        } else {
+                            match lp.color {
+                                TrafficLightColor::Red => Color::srgb(0.98, 0.24, 0.24),
+                                TrafficLightColor::Yellow => Color::srgb(0.98, 0.80, 0.14),
+                                TrafficLightColor::Green => Color::srgb(0.14, 0.94, 0.46),
+                            }
+                        };
+                        let sl_a = Vec3::from_array(lp.stop_line_a) + Vec3::Y * 0.14;
+                        let sl_b = Vec3::from_array(lp.stop_line_b) + Vec3::Y * 0.14;
+                        let sl_c = Vec3::from_array(lp.stop_center) + Vec3::Y * 0.16;
+                        let pole = Vec3::from_array(lp.pos) + Vec3::Y * 0.16;
+                        gizmos.line(sl_a, sl_b, sig_col);
+                        gizmos.line(sl_a + Vec3::Y * 0.08, sl_b + Vec3::Y * 0.08, sig_col);
+                        // Subtle tether from stop-line center to its 3D pole base
+                        gizmos.line(
+                            sl_c,
+                            pole,
+                            if is_tl_selected {
+                                Color::srgb(0.98, 0.86, 0.22)
+                            } else {
+                                Color::srgba(0.95, 0.96, 1.0, 0.45)
+                            },
+                        );
+                        if is_tl_selected {
+                            gizmos.circle(
+                                Isometry3d::new(pole, flat_rot),
+                                1.45,
+                                Color::srgb(0.98, 0.86, 0.22),
+                            );
+                            gizmos.circle(
+                                Isometry3d::new(pole, flat_rot),
+                                0.85,
+                                sig_col,
+                            );
+                        } else if is_selected {
+                            gizmos.circle(Isometry3d::new(pole, flat_rot), 0.95, sig_col);
+                        }
+
+                        // Preview the No-Overtake Zone ahead of the stop line on the map when selected
+                        if (is_selected || is_tl_selected)
+                            && lp.enabled
+                            && cfg.allow_overtaking
+                            && cfg.signal_no_overtake_zone_m > 0.1
+                            && let Some(tl) =
+                                cfg.traffic_lights.iter().find(|t| t.id == lp.light_id)
+                            && let Some(lane) = cfg.lanes.iter().find(|l| l.id == tl.lane_id)
+                        {
+                            let stop_s = tl.stop_s_m;
+                            let start_s = (stop_s - cfg.signal_no_overtake_zone_m).max(0.0);
+                            if stop_s - start_s > 0.5 {
+                                let zone_col = if is_tl_selected {
+                                    Color::srgba(0.98, 0.36, 0.28, 0.95)
+                                } else {
+                                    Color::srgba(0.98, 0.36, 0.28, 0.45)
+                                };
+                                let half_w = (cfg.lane_width_m * 0.48).clamp(1.1, 4.2);
+                                // Transverse boundary bar at start of no-overtake zone
+                                if let Some((bp, _, br)) =
+                                    sample_lane_local_frame(lane, state.geo_anchor, start_s)
+                                {
+                                    let ba = Vec3::new(
+                                        (bp[0] - br.0 * half_w) as f32,
+                                        bp[1] as f32 + 0.16,
+                                        (bp[2] - br.1 * half_w) as f32,
+                                    );
+                                    let bb = Vec3::new(
+                                        (bp[0] + br.0 * half_w) as f32,
+                                        bp[1] as f32 + 0.16,
+                                        (bp[2] + br.1 * half_w) as f32,
+                                    );
+                                    gizmos.line(ba, bb, zone_col);
+                                }
+                                // Dashed side rails along the no-overtake zone
+                                let span = stop_s - start_s;
+                                let dash_step = (span / 18.0).clamp(3.0, 22.0);
+                                let mut s_cur = start_s;
+                                while s_cur < stop_s - 0.5 {
+                                    let s_end = (s_cur + dash_step * 0.55).min(stop_s);
+                                    if let (Some((p0, _, r0)), Some((p1, _, r1))) = (
+                                        sample_lane_local_frame(lane, state.geo_anchor, s_cur),
+                                        sample_lane_local_frame(lane, state.geo_anchor, s_end),
+                                    ) {
+                                        for sign in [-1.0_f64, 1.0_f64] {
+                                            let q0 = Vec3::new(
+                                                (p0[0] + r0.0 * sign * half_w) as f32,
+                                                p0[1] as f32 + 0.14,
+                                                (p0[2] + r0.1 * sign * half_w) as f32,
+                                            );
+                                            let q1 = Vec3::new(
+                                                (p1[0] + r1.0 * sign * half_w) as f32,
+                                                p1[1] as f32 + 0.14,
+                                                (p1[2] + r1.1 * sign * half_w) as f32,
+                                            );
+                                            gizmos.line(q0, q1, zone_col);
+                                        }
+                                    }
+                                    s_cur += dash_step;
+                                }
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -697,7 +818,11 @@ pub fn draw_lines_and_routes_system(
                 Color::srgb(0.98, 0.52, 0.14)
             }
         } else if state.tool_mode == ToolMode::DrawTrafficLane {
-            Color::srgb(0.98, 0.72, 0.14)
+            if state.drawing_traffic_is_signal {
+                Color::srgb(0.96, 0.32, 0.46)
+            } else {
+                Color::srgb(0.98, 0.72, 0.14)
+            }
         } else {
             Color::srgb(0.10, 0.92, 0.58)
         };
@@ -716,6 +841,90 @@ pub fn draw_lines_and_routes_system(
             let cur = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.55));
             gizmos.line(last_pt, cur, Color::srgba(0.25, 0.96, 0.68, 0.72));
         }
+    }
+
+    // Active PlaceTrafficLight live snap preview onto the nearest lane of the target animation
+    if state.tool_mode == ToolMode::PlaceTrafficLight
+        && let Some(target_aid) = state.placing_traffic_light_for_anim_id
+        && let Some([clng, clat]) = state.cursor_lnglat
+        && let Some(anim) = state
+            .anims
+            .iter()
+            .find(|a| a.id == target_aid && is_traffic_signal_anim(a))
+    {
+        let cfg = parse_traffic_anim_config(anim);
+        let cur_local = state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.0);
+        let mut best: Option<(usize, f64, f64)> = None;
+        for (li, lane) in cfg.lanes.iter().enumerate() {
+            if let Some((s, dist)) = project_point_onto_lane(
+                lane,
+                state.geo_anchor,
+                (cur_local[0] as f64, cur_local[2] as f64),
+            ) && best.is_none_or(|b| dist < b.2)
+            {
+                best = Some((li, s, dist));
+            }
+        }
+        if let Some((li, stop_s, _)) = best
+            && let Some((stop_p, _fwd, right)) =
+                sample_lane_local_frame(&cfg.lanes[li], state.geo_anchor, stop_s)
+            && let Some((pole_geo, _)) = default_traffic_light_transform(
+                &cfg.lanes[li],
+                state.geo_anchor,
+                stop_s,
+                cfg.lane_width_m,
+                cfg.overtake_side,
+            )
+        {
+            let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let half_w = (cfg.lane_width_m * 0.55).clamp(1.2, 4.5);
+            let a = Vec3::new(
+                (stop_p[0] - right.0 * half_w) as f32,
+                stop_p[1] as f32 + 0.18,
+                (stop_p[2] - right.1 * half_w) as f32,
+            );
+            let b = Vec3::new(
+                (stop_p[0] + right.0 * half_w) as f32,
+                stop_p[1] as f32 + 0.18,
+                (stop_p[2] + right.1 * half_w) as f32,
+            );
+            let c = (a + b) * 0.5;
+            let pole_l = state
+                .geo_anchor
+                .lng_lat_alt_to_local(pole_geo[0], pole_geo[1], pole_geo[2]);
+            let pole_base = Vec3::new(pole_l[0], pole_l[1] + 0.15, pole_l[2]);
+            let preview_col = Color::srgb(0.98, 0.85, 0.20);
+            gizmos.line(a, b, preview_col);
+            gizmos.line(a + Vec3::Y * 0.1, b + Vec3::Y * 0.1, preview_col);
+            gizmos.line(c, pole_base, Color::srgba(0.98, 0.85, 0.20, 0.75));
+            gizmos.circle(Isometry3d::new(pole_base, flat_rot), 1.1, preview_col);
+            gizmos.line(pole_base, pole_base + Vec3::Y * 5.2, preview_col);
+            gizmos.sphere(
+                Isometry3d::from_translation(pole_base + Vec3::Y * 5.2),
+                0.35,
+                Color::srgb(0.98, 0.24, 0.24),
+            );
+        }
+    }
+
+    // Active PlaceBillboard cursor footprint preview on the 3D map
+    if state.tool_mode == ToolMode::PlaceBillboard
+        && let Some([clng, clat]) = state.cursor_lnglat
+    {
+        let p = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(clng, clat, 0.25));
+        let flat_rot = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let col = Color::srgb(0.22, 0.88, 0.98);
+        gizmos.circle(Isometry3d::new(p, flat_rot), 1.6, col);
+        gizmos.line(p, p + Vec3::Y * 5.0, col);
+        let top = p + Vec3::Y * 7.25;
+        let bl = top + Vec3::new(-4.0, -2.25, 0.0);
+        let br = top + Vec3::new(4.0, -2.25, 0.0);
+        let tr = top + Vec3::new(4.0, 2.25, 0.0);
+        let tl = top + Vec3::new(-4.0, 2.25, 0.0);
+        gizmos.line(bl, br, col);
+        gizmos.line(br, tr, col);
+        gizmos.line(tr, tl, col);
+        gizmos.line(tl, bl, col);
     }
 
     // Active Measure tool segments

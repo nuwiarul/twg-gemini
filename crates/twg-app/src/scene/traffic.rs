@@ -4,7 +4,9 @@ use bevy::{camera::primitives::Aabb, prelude::*};
 use twg_shared::{
     group_anim::collect_group_descendant_ids,
     traffic_anim::{
-        TrafficSimEngine, TrafficVehiclePose, is_traffic_anim, parse_traffic_anim_config,
+        TrafficLightColor, TrafficLightVisualPose, TrafficSignalLiveStatus, TrafficSimEngine,
+        TrafficVehiclePose, is_traffic_flow_or_signal, is_traffic_signal_anim,
+        parse_traffic_anim_config, resolve_traffic_light_visual_poses,
     },
     traffic_diversion::{
         TrafficDiversionSimEngine, is_traffic_diversion_anim, parse_traffic_diversion_config,
@@ -119,7 +121,9 @@ pub fn resolve_traffic_scale_preview_poses(state: &AppState) -> Vec<TrafficScale
     }
     let Some(anim) = state.anims.iter().find(|a| {
         a.id == preview.anim_id
-            && (is_traffic_anim(a) || is_traffic_queue_anim(a) || is_traffic_diversion_anim(a))
+            && (is_traffic_flow_or_signal(a)
+                || is_traffic_queue_anim(a)
+                || is_traffic_diversion_anim(a))
     }) else {
         return Vec::new();
     };
@@ -269,8 +273,143 @@ pub fn resolve_active_traffic_scale_gizmo_pose(
         .or_else(|| poses.into_iter().next())
 }
 
+/// World pose of a selected 3D Traffic Light currently owning the Move/Rotate/Scale Gizmo.
+#[derive(Debug, Clone)]
+pub struct TrafficLightGizmoPose {
+    pub anim_id: Uuid,
+    pub light_id: Uuid,
+    pub world_pos: Vec3,
+    pub lng: f64,
+    pub lat: f64,
+    pub alt: f64,
+    pub rot_deg: [f64; 3],
+    pub scale: [f64; 3],
+}
+
+/// Resolves the currently selected 3D Traffic Light for interactive Move / Rotate / Scale Gizmo editing.
+pub fn resolve_active_traffic_light_gizmo_pose(state: &AppState) -> Option<TrafficLightGizmoPose> {
+    let (anim_id, light_id) = state.selected_traffic_light?;
+    if state.selected != SelectedEntity::Anim(anim_id)
+        || state.locked_entity_ids.contains(&anim_id)
+        || state.hidden_entity_ids.contains(&anim_id)
+    {
+        return None;
+    }
+    let anim = state
+        .anims
+        .iter()
+        .find(|a| a.id == anim_id && is_traffic_signal_anim(a))?;
+    let cfg = parse_traffic_anim_config(anim);
+    let tl = cfg.traffic_lights.iter().find(|l| l.id == light_id)?;
+    let world_pos = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(
+        tl.pos_lnglat[0],
+        tl.pos_lnglat[1],
+        tl.pos_lnglat[2],
+    ));
+    Some(TrafficLightGizmoPose {
+        anim_id,
+        light_id,
+        world_pos,
+        lng: tl.pos_lnglat[0],
+        lat: tl.pos_lnglat[1],
+        alt: tl.pos_lnglat[2],
+        rot_deg: tl.rot_deg,
+        scale: tl.scale,
+    })
+}
+
+fn dist_pt_seg_2d(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let lsq = ab.length_squared();
+    if lsq < 1e-5 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / lsq).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Screen-space hit-test against all visible, unlocked 3D Traffic Light poles on the map.
+pub fn hit_test_traffic_light(
+    cursor_px: Vec2,
+    state: &AppState,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<(Uuid, Uuid)> {
+    let mut best: Option<((Uuid, Uuid), f32)> = None;
+    for anim in &state.anims {
+        if !is_traffic_signal_anim(anim)
+            || state.hidden_entity_ids.contains(&anim.id)
+            || state.locked_entity_ids.contains(&anim.id)
+        {
+            continue;
+        }
+        let cfg = parse_traffic_anim_config(anim);
+        for tl in &cfg.traffic_lights {
+            let base = Vec3::from_array(state.geo_anchor.lng_lat_alt_to_local(
+                tl.pos_lnglat[0],
+                tl.pos_lnglat[1],
+                tl.pos_lnglat[2],
+            ));
+            let rot = Quat::from_euler(
+                EulerRot::YXZ,
+                (tl.rot_deg[1] as f32).to_radians(),
+                (tl.rot_deg[0] as f32).to_radians(),
+                (tl.rot_deg[2] as f32).to_radians(),
+            );
+            let top = base + rot * Vec3::new(0.0, 5.6 * (tl.scale[1] as f32).max(0.25), 0.0);
+            let Ok(a2) = camera.world_to_viewport(cam_gtf, base) else {
+                continue;
+            };
+            let b2 = camera.world_to_viewport(cam_gtf, top).unwrap_or(a2);
+            let d = dist_pt_seg_2d(cursor_px, a2, b2);
+            if d <= 16.0 && best.is_none_or(|cur| d < cur.1) {
+                best = Some(((anim.id, tl.id), d));
+            }
+        }
+    }
+    best.map(|(ids, _)| ids)
+}
+
 #[derive(Component)]
 pub struct TrafficVehicleEntity;
+
+#[derive(Component)]
+pub struct TrafficLightVisualEntity;
+
+#[derive(Component)]
+pub struct TrafficLightLampPart;
+
+struct TrafficLightAssets {
+    base_mesh: Handle<Mesh>,
+    collar_mesh: Handle<Mesh>,
+    pole_mesh: Handle<Mesh>,
+    housing_mesh: Handle<Mesh>,
+    cap_mesh: Handle<Mesh>,
+    visor_mesh: Handle<Mesh>,
+    lens_mesh: Handle<Mesh>,
+    beacon_mesh: Handle<Mesh>,
+    stop_line_mesh: Handle<Mesh>,
+    pole_mat: Handle<StandardMaterial>,
+    collar_mat: Handle<StandardMaterial>,
+    housing_mat: Handle<StandardMaterial>,
+    red_on: Handle<StandardMaterial>,
+    red_off: Handle<StandardMaterial>,
+    yellow_on: Handle<StandardMaterial>,
+    yellow_off: Handle<StandardMaterial>,
+    green_on: Handle<StandardMaterial>,
+    green_off: Handle<StandardMaterial>,
+    stop_line_mat: Handle<StandardMaterial>,
+}
+
+struct TrafficLightVisualSlot {
+    root: Entity,
+    red_lamp: Entity,
+    yellow_lamp: Entity,
+    green_lamp: Entity,
+    beacon_lamp: Entity,
+    stop_line: Entity,
+    last_color: Option<TrafficLightColor>,
+}
 
 struct PooledVehicleSlot {
     entity: Entity,
@@ -307,6 +446,8 @@ pub struct TrafficVisualPool {
     fallback_cabin_mesh: Option<Handle<Mesh>>,
     fallback_mat: Option<Handle<StandardMaterial>>,
     slots: Vec<PooledVehicleSlot>,
+    light_assets: Option<TrafficLightAssets>,
+    light_slots: HashMap<(Uuid, Uuid), TrafficLightVisualSlot>,
 }
 
 impl TrafficVisualPool {
@@ -405,6 +546,215 @@ impl TrafficVisualPool {
         });
         idx
     }
+
+    fn ensure_light_assets(
+        &mut self,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) {
+        if self.light_assets.is_some() {
+            return;
+        }
+        self.light_assets = Some(TrafficLightAssets {
+            base_mesh: meshes.add(Cylinder::new(0.28, 0.30)),
+            collar_mesh: meshes.add(Cylinder::new(0.145, 0.72)),
+            pole_mesh: meshes.add(Cylinder::new(0.11, 4.45)),
+            housing_mesh: meshes.add(Cuboid::new(0.62, 1.72, 0.44)),
+            cap_mesh: meshes.add(Cuboid::new(0.68, 0.08, 0.50)),
+            visor_mesh: meshes.add(Cuboid::new(0.46, 0.055, 0.28)),
+            lens_mesh: meshes.add(Sphere::new(0.175)),
+            beacon_mesh: meshes.add(Sphere::new(0.20)),
+            stop_line_mesh: meshes.add(Cuboid::new(1.0, 0.05, 0.42)),
+            pole_mat: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.22, 0.25, 0.30),
+                metallic: 0.65,
+                perceptual_roughness: 0.38,
+                ..default()
+            }),
+            collar_mat: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.96, 0.76, 0.12),
+                metallic: 0.15,
+                perceptual_roughness: 0.45,
+                ..default()
+            }),
+            housing_mat: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.08, 0.09, 0.12),
+                metallic: 0.3,
+                perceptual_roughness: 0.55,
+                ..default()
+            }),
+            red_on: materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.18, 0.14),
+                emissive: LinearRgba::rgb(9.5, 0.45, 0.28),
+                perceptual_roughness: 0.2,
+                ..default()
+            }),
+            red_off: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.22, 0.05, 0.05),
+                perceptual_roughness: 0.6,
+                ..default()
+            }),
+            yellow_on: materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.84, 0.12),
+                emissive: LinearRgba::rgb(9.0, 6.2, 0.25),
+                perceptual_roughness: 0.2,
+                ..default()
+            }),
+            yellow_off: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.22, 0.17, 0.04),
+                perceptual_roughness: 0.6,
+                ..default()
+            }),
+            green_on: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.14, 1.0, 0.36),
+                emissive: LinearRgba::rgb(0.32, 9.2, 1.5),
+                perceptual_roughness: 0.2,
+                ..default()
+            }),
+            green_off: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.04, 0.19, 0.07),
+                perceptual_roughness: 0.6,
+                ..default()
+            }),
+            stop_line_mat: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.96, 0.97, 0.99),
+                emissive: LinearRgba::rgb(0.42, 0.44, 0.48),
+                perceptual_roughness: 0.85,
+                ..default()
+            }),
+        });
+    }
+
+    fn spawn_traffic_light_slot(
+        &mut self,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        key: (Uuid, Uuid),
+    ) {
+        self.ensure_light_assets(meshes, materials);
+        let a = self.light_assets.as_ref().unwrap();
+
+        let root = commands
+            .spawn((
+                Transform::default(),
+                Visibility::Visible,
+                TrafficLightVisualEntity,
+            ))
+            .id();
+
+        let mut red_lamp = Entity::PLACEHOLDER;
+        let mut yellow_lamp = Entity::PLACEHOLDER;
+        let mut green_lamp = Entity::PLACEHOLDER;
+        let mut beacon_lamp = Entity::PLACEHOLDER;
+
+        commands.entity(root).with_children(|child| {
+            // Base plinth
+            child.spawn((
+                Mesh3d(a.base_mesh.clone()),
+                MeshMaterial3d(a.pole_mat.clone()),
+                Transform::from_xyz(0.0, 0.15, 0.0),
+            ));
+            // Yellow reflective collar near pole base
+            child.spawn((
+                Mesh3d(a.collar_mesh.clone()),
+                MeshMaterial3d(a.collar_mat.clone()),
+                Transform::from_xyz(0.0, 0.72, 0.0),
+            ));
+            // Main upright pole
+            child.spawn((
+                Mesh3d(a.pole_mesh.clone()),
+                MeshMaterial3d(a.pole_mat.clone()),
+                Transform::from_xyz(0.0, 2.40, 0.0),
+            ));
+            // Signal head housing box
+            child.spawn((
+                Mesh3d(a.housing_mesh.clone()),
+                MeshMaterial3d(a.housing_mat.clone()),
+                Transform::from_xyz(0.0, 4.46, 0.06),
+            ));
+            // Top cap trim
+            child.spawn((
+                Mesh3d(a.cap_mesh.clone()),
+                MeshMaterial3d(a.collar_mat.clone()),
+                Transform::from_xyz(0.0, 5.36, 0.08),
+            ));
+            // 3 Visors above Red / Yellow / Green lenses (facing local +Z)
+            for vy in [5.14_f32, 4.64, 4.14] {
+                child.spawn((
+                    Mesh3d(a.visor_mesh.clone()),
+                    MeshMaterial3d(a.housing_mat.clone()),
+                    Transform::from_xyz(0.0, vy, 0.34),
+                ));
+            }
+            // Red lens (top)
+            red_lamp = child
+                .spawn((
+                    Mesh3d(a.lens_mesh.clone()),
+                    MeshMaterial3d(a.red_on.clone()),
+                    Transform::from_xyz(0.0, 4.96, 0.25).with_scale(Vec3::new(1.0, 1.0, 0.45)),
+                    TrafficLightLampPart,
+                ))
+                .id();
+            // Yellow lens (middle)
+            yellow_lamp = child
+                .spawn((
+                    Mesh3d(a.lens_mesh.clone()),
+                    MeshMaterial3d(a.yellow_off.clone()),
+                    Transform::from_xyz(0.0, 4.46, 0.25).with_scale(Vec3::new(1.0, 1.0, 0.45)),
+                    TrafficLightLampPart,
+                ))
+                .id();
+            // Green lens (bottom)
+            green_lamp = child
+                .spawn((
+                    Mesh3d(a.lens_mesh.clone()),
+                    MeshMaterial3d(a.green_off.clone()),
+                    Transform::from_xyz(0.0, 3.96, 0.25).with_scale(Vec3::new(1.0, 1.0, 0.45)),
+                    TrafficLightLampPart,
+                ))
+                .id();
+            // 360-degree top beacon orb for high-angle / top-down tactical visibility
+            beacon_lamp = child
+                .spawn((
+                    Mesh3d(a.beacon_mesh.clone()),
+                    MeshMaterial3d(a.red_on.clone()),
+                    Transform::from_xyz(0.0, 5.62, 0.06),
+                    TrafficLightLampPart,
+                ))
+                .id();
+        });
+
+        let stop_line = commands
+            .spawn((
+                Mesh3d(a.stop_line_mesh.clone()),
+                MeshMaterial3d(a.stop_line_mat.clone()),
+                Transform::default(),
+                Visibility::Visible,
+                TrafficLightVisualEntity,
+            ))
+            .id();
+
+        self.light_slots.insert(
+            key,
+            TrafficLightVisualSlot {
+                root,
+                red_lamp,
+                yellow_lamp,
+                green_lamp,
+                beacon_lamp,
+                stop_line,
+                last_color: None,
+            },
+        );
+    }
+
+    fn clear_all_traffic_lights(&mut self, commands: &mut Commands) {
+        for (_, slot) in self.light_slots.drain() {
+            commands.entity(slot.root).despawn();
+            commands.entity(slot.stop_line).despawn();
+        }
+    }
 }
 
 /// Advances deterministic Traffic simulations, measures unscaled 3D mesh extents for loaded
@@ -420,6 +770,11 @@ pub fn traffic_visual_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut pool: ResMut<TrafficVisualPool>,
     mut tf_vis_q: Query<(&mut Transform, &mut Visibility, &GlobalTransform), With<TrafficVehicleEntity>>,
+    mut light_tf_q: Query<
+        (&mut Transform, &mut Visibility),
+        (With<TrafficLightVisualEntity>, Without<TrafficVehicleEntity>),
+    >,
+    mut lamp_mat_q: Query<&mut MeshMaterial3d<StandardMaterial>, With<TrafficLightLampPart>>,
     children_q: Query<&Children>,
     mesh_aabb_q: Query<(&GlobalTransform, &Aabb), Without<TrafficVehicleEntity>>,
 ) {
@@ -484,8 +839,10 @@ pub fn traffic_visual_system(
         pool.sims.clear();
         pool.queue_sims.clear();
         pool.diversion_sims.clear();
+        pool.clear_all_traffic_lights(&mut commands);
         state.traffic_queue_live_status.clear();
         state.traffic_diversion_live_status.clear();
+        state.traffic_signal_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
@@ -503,18 +860,32 @@ pub fn traffic_visual_system(
         Vec::new()
     };
 
+    let mut live_signal_statuses: HashMap<Uuid, TrafficSignalLiveStatus> = HashMap::new();
+
     if !playback.play_test_mode && !is_editor_preview && scale_preview_poses.is_empty() {
         pool.sims.clear();
         pool.queue_sims.clear();
         pool.diversion_sims.clear();
         state.traffic_queue_live_status.clear();
         state.traffic_diversion_live_status.clear();
+        state.traffic_signal_live_status.clear();
         for slot in &mut pool.slots {
             slot.in_use_by = None;
             if let Ok((_, mut vis, _)) = tf_vis_q.get_mut(slot.entity) {
                 *vis = Visibility::Hidden;
             }
         }
+        // Keep procedural 3D traffic lights visible in Plot Editor even when idle!
+        sync_procedural_traffic_lights(
+            &mut commands,
+            &state,
+            &live_signal_statuses,
+            &mut meshes,
+            &mut materials,
+            &mut pool,
+            &mut light_tf_q,
+            &mut lamp_mat_q,
+        );
         return;
     }
 
@@ -562,7 +933,8 @@ pub fn traffic_visual_system(
     }
 
     for anim in &state.anims {
-        let is_flow = is_traffic_anim(anim);
+        let is_flow = is_traffic_flow_or_signal(anim);
+        let is_signal = is_traffic_signal_anim(anim);
         let is_queue = is_traffic_queue_anim(anim);
         let is_diversion = is_traffic_diversion_anim(anim);
         if (!is_flow && !is_queue && !is_diversion) || state.hidden_entity_ids.contains(&anim.id) {
@@ -605,6 +977,9 @@ pub fn traffic_visual_system(
             }
 
             sim.engine.advance_to(track.distance_m);
+            if is_signal {
+                live_signal_statuses.insert(anim.id, sim.engine.live_signal_status());
+            }
             for pose in sim.engine.active_poses() {
                 active_poses.push((anim.id, pose));
             }
@@ -686,6 +1061,18 @@ pub fn traffic_visual_system(
 
     state.traffic_queue_live_status = live_queue_statuses;
     state.traffic_diversion_live_status = live_diversion_statuses;
+    state.traffic_signal_live_status = live_signal_statuses.clone();
+
+    sync_procedural_traffic_lights(
+        &mut commands,
+        &state,
+        &live_signal_statuses,
+        &mut meshes,
+        &mut materials,
+        &mut pool,
+        &mut light_tf_q,
+        &mut lamp_mat_q,
+    );
 
     // Drop simulation state for stopped/removed animations
     pool.sims.retain(|id, _| active_anim_ids.contains(id));
@@ -748,7 +1135,7 @@ pub fn traffic_visual_system(
         };
 
         let entity = pool.slots[slot_idx].entity;
-        let final_scale = (pose.scale * pose.fade_scale).max(0.01);
+        let final_scale = (pose.scale * pose.fade_scale).max(0.0005);
         let new_tf = Transform {
             translation: Vec3::new(pose.x, pose.y, pose.z),
             rotation: Quat::from_rotation_y(pose.rot_y_deg.to_radians()),
@@ -778,5 +1165,156 @@ pub fn traffic_visual_system(
                 true
             }
         });
+    }
+}
+
+/// Synchronizes pooled procedural 3D Traffic Light (APILL) entities & road stop lines across
+/// Plot Editor, Editor Preview, Play Skenario, and Layar Besar.
+#[allow(clippy::too_many_arguments)]
+fn sync_procedural_traffic_lights(
+    commands: &mut Commands,
+    state: &AppState,
+    live_signal_statuses: &HashMap<Uuid, TrafficSignalLiveStatus>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    pool: &mut TrafficVisualPool,
+    light_tf_q: &mut Query<
+        (&mut Transform, &mut Visibility),
+        (With<TrafficLightVisualEntity>, Without<TrafficVehicleEntity>),
+    >,
+    lamp_mat_q: &mut Query<&mut MeshMaterial3d<StandardMaterial>, With<TrafficLightLampPart>>,
+) {
+    let mut wanted: Vec<((Uuid, Uuid), TrafficLightVisualPose)> = Vec::new();
+    for anim in &state.anims {
+        if !is_traffic_signal_anim(anim) || state.hidden_entity_ids.contains(&anim.id) {
+            continue;
+        }
+        if let Some(live) = live_signal_statuses.get(&anim.id) {
+            for lp in &live.light_states {
+                wanted.push(((anim.id, lp.light_id), lp.clone()));
+            }
+        } else {
+            let cfg = parse_traffic_anim_config(anim);
+            for lp in resolve_traffic_light_visual_poses(&cfg, state.geo_anchor, 0.0) {
+                wanted.push(((anim.id, lp.light_id), lp));
+            }
+        }
+    }
+
+    let wanted_keys: HashSet<(Uuid, Uuid)> = wanted.iter().map(|(k, _)| *k).collect();
+    // Despawn removed or hidden traffic light slots
+    let stale_keys: Vec<(Uuid, Uuid)> = pool
+        .light_slots
+        .keys()
+        .copied()
+        .filter(|k| !wanted_keys.contains(k))
+        .collect();
+    for k in stale_keys {
+        if let Some(slot) = pool.light_slots.remove(&k) {
+            commands.entity(slot.root).despawn();
+            commands.entity(slot.stop_line).despawn();
+        }
+    }
+
+    if wanted.is_empty() {
+        return;
+    }
+
+    pool.ensure_light_assets(meshes, materials);
+
+    for (key, lp) in wanted {
+        if !pool.light_slots.contains_key(&key) {
+            pool.spawn_traffic_light_slot(commands, meshes, materials, key);
+        }
+        let assets = pool.light_assets.as_ref().unwrap();
+        let red_mat = if lp.color == TrafficLightColor::Red {
+            assets.red_on.clone()
+        } else {
+            assets.red_off.clone()
+        };
+        let yellow_mat = if lp.color == TrafficLightColor::Yellow {
+            assets.yellow_on.clone()
+        } else {
+            assets.yellow_off.clone()
+        };
+        let green_mat = if lp.color == TrafficLightColor::Green {
+            assets.green_on.clone()
+        } else {
+            assets.green_off.clone()
+        };
+        let beacon_mat = match lp.color {
+            TrafficLightColor::Red => assets.red_on.clone(),
+            TrafficLightColor::Yellow => assets.yellow_on.clone(),
+            TrafficLightColor::Green => assets.green_on.clone(),
+        };
+
+        let slot = pool.light_slots.get_mut(&key).unwrap();
+
+        let pole_rot = Quat::from_euler(
+            EulerRot::YXZ,
+            lp.rot_deg[1].to_radians(),
+            lp.rot_deg[0].to_radians(),
+            lp.rot_deg[2].to_radians(),
+        );
+        let pole_tf = Transform {
+            translation: Vec3::from_array(lp.pos),
+            rotation: pole_rot,
+            scale: Vec3::new(
+                lp.scale[0].max(0.15),
+                lp.scale[1].max(0.15),
+                lp.scale[2].max(0.15),
+            ),
+        };
+        let vis = Visibility::Visible;
+        if let Ok((mut tf, mut v)) = light_tf_q.get_mut(slot.root) {
+            *tf = pole_tf;
+            *v = vis;
+        } else {
+            commands.entity(slot.root).insert((pole_tf, vis));
+        }
+
+        // Update 3D white painted road stop-line bar across the bound lane
+        let a = Vec3::from_array(lp.stop_line_a);
+        let b = Vec3::from_array(lp.stop_line_b);
+        let span = b - a;
+        let line_len = Vec2::new(span.x, span.z).length();
+        let (sl_tf, sl_vis) = if lp.enabled && line_len >= 0.4 {
+            let mid = (a + b) * 0.5 + Vec3::Y * 0.05;
+            // Local +X of `stop_line_mesh` stretches across `a -> b`
+            let yaw = (-span.z).atan2(span.x);
+            (
+                Transform {
+                    translation: mid,
+                    rotation: Quat::from_rotation_y(yaw),
+                    scale: Vec3::new(line_len, 1.0, 1.0),
+                },
+                Visibility::Visible,
+            )
+        } else {
+            (Transform::default(), Visibility::Hidden)
+        };
+        if let Ok((mut tf, mut v)) = light_tf_q.get_mut(slot.stop_line) {
+            *tf = sl_tf;
+            *v = sl_vis;
+        } else {
+            commands.entity(slot.stop_line).insert((sl_tf, sl_vis));
+        }
+
+        // Swap emissive lamp materials whenever color changes (or on first frame)
+        if slot.last_color != Some(lp.color) {
+            slot.last_color = Some(lp.color);
+            for (lamp_ent, mat_handle) in [
+                (slot.red_lamp, red_mat),
+                (slot.yellow_lamp, yellow_mat),
+                (slot.green_lamp, green_mat),
+                (slot.beacon_lamp, beacon_mat),
+            ] {
+                if let Ok(mut mat) = lamp_mat_q.get_mut(lamp_ent) {
+                    mat.0 = mat_handle;
+                } else {
+                    commands.entity(lamp_ent).insert(MeshMaterial3d(mat_handle));
+                }
+            }
+        }
     }
 }

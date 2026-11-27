@@ -17,7 +17,7 @@ use twg_shared::{
     },
     shoot_anim::{is_shoot_anim, shoot_anim_effective_duration_sec, shoot_anim_is_continuous},
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_anim::{is_traffic_flow_or_signal, parse_traffic_anim_config},
     traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{is_traffic_queue_anim, parse_traffic_queue_config},
 };
@@ -196,8 +196,10 @@ pub fn playback_system(
 
     // Phase B: Tick all leaf animations (Spawn/Hide, Particle, Pointer, Shoot, Route)
     for anim in &state.anims {
-        // Audio uses the device clock at normal pitch, independent of scenario speed.
-        if twg_shared::audio_anim::is_audio_anim(anim) {
+        // Audio & Billboard video use the real device clock, independent of scenario speed.
+        if twg_shared::audio_anim::is_audio_anim(anim)
+            || twg_shared::billboard_anim::is_billboard_anim(anim)
+        {
             continue;
         }
         if is_group_anim(anim) {
@@ -227,8 +229,8 @@ pub fn playback_system(
             continue;
         }
 
-        // Traffic simulation animations track elapsed seconds in `track.distance_m`
-        if is_traffic_anim(anim) {
+        // Traffic simulation & Traffic Signal animations track elapsed seconds in `track.distance_m`
+        if is_traffic_flow_or_signal(anim) {
             let cfg = parse_traffic_anim_config(anim);
             let dur_sec = anim.duration_sec.max(10.0);
             let track = playback.tracks.entry(anim.id).or_default();
@@ -472,7 +474,9 @@ fn is_group_child_done_for_handoff(
     let Some(child_anim) = anims.iter().find(|a| a.id == child_id) else {
         return true;
     };
-    if twg_shared::audio_anim::is_audio_anim(child_anim) {
+    if twg_shared::audio_anim::is_audio_anim(child_anim)
+        || twg_shared::billboard_anim::is_billboard_anim(child_anim)
+    {
         return playback.tracks.get(&child_id).is_none_or(|t|
             matches!(t.status, AnimRunStatus::Finished | AnimRunStatus::Stopped));
     }

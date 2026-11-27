@@ -431,10 +431,24 @@ pub fn draw_top_bar(
                     if ui.button("Batal").clicked() {
                         state.draft_points_lnglat.clear();
                         state.drawing_traffic_lane_for_anim_id = None;
+                        state.drawing_traffic_is_signal = false;
                         state.drawing_traffic_queue_target = None;
                         state.drawing_traffic_queue_is_gridlock = false;
                         state.drawing_traffic_queue_is_manual = false;
                         state.drawing_diversion_target = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                }
+
+                if state.tool_mode == ToolMode::PlaceTrafficLight {
+                    let done_btn = egui::Button::new(
+                        egui::RichText::new("Selesai Pasang Lampu (Esc)")
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(5, 150, 105));
+                    if ui.add(done_btn).clicked() {
+                        state.placing_traffic_light_for_anim_id = None;
                         state.tool_mode = ToolMode::Select;
                     }
                 }

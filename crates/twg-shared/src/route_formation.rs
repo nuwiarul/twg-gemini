@@ -953,10 +953,13 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::audio_anim::is_audio_anim(anim) {
         return crate::audio_anim::parse_audio_anim_config(anim).asset_id.is_some();
     }
+    if crate::billboard_anim::is_billboard_anim(anim) {
+        return crate::billboard_anim::parse_billboard_anim_config(anim).is_playable_video();
+    }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }
-    if crate::traffic_anim::is_traffic_anim(anim) {
+    if crate::traffic_anim::is_traffic_flow_or_signal(anim) {
         return crate::traffic_anim::parse_traffic_anim_config(anim).has_playable_setup();
     }
     if crate::traffic_queue::is_traffic_queue_anim(anim) {

@@ -32,6 +32,7 @@ Source: "..\..\dist\twg-app-windows-x64\twg-app.exe"; DestDir: "{app}"; Flags: i
 Source: "..\..\dist\twg-app-windows-x64\twg-app.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\twg-app-windows-x64\TWG-3D.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\twg-app-windows-x64\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\twg-app-windows-x64\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Tactical Wall Game 3D"; Filename: "{app}\TWG-3D.bat"; WorkingDir: "{localappdata}\TWG-3D"; IconFilename: "{app}\twg-app.ico"

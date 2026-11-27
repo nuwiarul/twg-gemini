@@ -14,6 +14,9 @@ use twg_shared::{
         CreateTextMarkerRequest, UpdateAnimRequest, UpdateBuildingRequest, UpdateMarkerRequest,
         UpdatePlotLineRequest, UpdateSkenarioRequest, UpdateTextMarkerRequest,
     },
+    billboard_anim::{
+        ANIM_TYPE_BILLBOARD, BillboardAnimConfig, is_billboard_anim, parse_billboard_anim_config,
+    },
     models::{Anim, Marker, ModelCatalogEntry, TextMarker},
     particle_anim::{
         ParticleAnimConfig, is_particle_anim, particle_anim_position,
@@ -33,8 +36,10 @@ use twg_shared::{
         write_spawn_hide_config,
     },
     traffic_anim::{
-        ANIM_TYPE_TRAFFIC_FLOW, TrafficAnimConfig, TrafficLane, TrafficVehicleEntry,
-        is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config,
+        ANIM_TYPE_TRAFFIC_FLOW, ANIM_TYPE_TRAFFIC_SIGNAL, TrafficAnimConfig, TrafficLane,
+        TrafficSignalPhase, TrafficVehicleEntry, build_traffic_light_on_lane, is_traffic_anim,
+        is_traffic_flow_or_signal, is_traffic_signal_anim, parse_traffic_anim_config,
+        project_point_onto_lane, write_traffic_anim_config,
     },
     traffic_diversion::{
         TRAFFIC_DIVERSION_ANIM_TYPE, TrafficDiversionConfig, TrafficDiversionCorridor,
@@ -61,13 +66,15 @@ use crate::{
             build_basic_mesh_geometry, build_basic_mesh_material, parse_basic_mesh_config,
             write_basic_mesh_config,
         },
+        billboard::{billboard_quat, billboard_world_origin, hit_test_billboard},
         buildings::TacticalBuildingEntity,
         gizmo::{
             GIZMO_SCREEN_RADIUS_PX, GizmoHandle, GizmoMode, TransformGizmoState,
-            begin_gizmo_drag, begin_particle_move_drag, begin_text_marker_move_drag,
-            begin_traffic_preview_scale_drag, compute_gizmo_world_radius,
-            gizmo_mode_for_tool, hit_test_gizmo, marker_quat, marker_world_origin,
-            particle_anim_world_origin, update_gizmo_drag,
+            begin_billboard_gizmo_drag, begin_gizmo_drag, begin_particle_move_drag,
+            begin_text_marker_move_drag, begin_traffic_light_gizmo_drag,
+            begin_traffic_preview_scale_drag, compute_gizmo_world_radius, gizmo_mode_for_tool,
+            hit_test_gizmo, marker_quat, marker_world_origin, particle_anim_world_origin,
+            update_gizmo_drag,
         },
         play_rts::PlayRtsState,
         playback::{PlaybackOverrides, route_estimated_duration_sec},
@@ -88,7 +95,10 @@ use crate::{
             insert_route_midpoint_after, remove_route_waypoint, update_waypoint_drag,
             write_editable_anim_geom,
         },
-        traffic::resolve_active_traffic_scale_gizmo_pose,
+        traffic::{
+            hit_test_traffic_light, resolve_active_traffic_light_gizmo_pose,
+            resolve_active_traffic_scale_gizmo_pose,
+        },
     },
     state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode, UiPointerState},
 };
@@ -2079,6 +2089,8 @@ pub fn map_interaction_system(
         state.picking_shoot_for_anim_id = None;
         state.picking_pointer_for_anim_id = None;
         state.picking_spawn_hide_for_anim_id = None;
+        state.placing_traffic_light_for_anim_id = None;
+        state.selected_traffic_light = None;
         state.dragging_catalog_entry = None;
         state.dragging_basic_mesh = None;
         state.catalog_drop_world_pos = None;
@@ -2098,11 +2110,24 @@ pub fn map_interaction_system(
         }
     }
 
+    // Auto-clear selected 3D Traffic Light if selection changes or Play/Preview starts
+    if let Some((tl_aid, _)) = state.selected_traffic_light {
+        let still_valid = !playback.play_test_mode
+            && playback.editor_preview_anim_id.is_none()
+            && state.selected == SelectedEntity::Anim(tl_aid)
+            && !state.locked_entity_ids.contains(&tl_aid)
+            && resolve_active_traffic_light_gizmo_pose(&state).is_some();
+        if !still_valid {
+            state.selected_traffic_light = None;
+        }
+    }
+
     // Keep RouteEditState synchronized with current selection & lock status
     // Auto-enable interactive waypoint editing whenever an unlocked Route Animation is selected
     if !playback.play_test_mode
         && state.tool_mode.is_transform_tool()
         && state.traffic_scale_preview.is_none()
+        && state.selected_traffic_light.is_none()
         && let SelectedEntity::Anim(sel_id) = state.selected
         && !state.locked_entity_ids.contains(&sel_id)
         && state
@@ -2110,7 +2135,7 @@ pub fn map_interaction_system(
             .iter()
             .find(|a| a.id == sel_id)
             .is_some_and(|a| {
-                !is_traffic_anim(a)
+                !is_traffic_flow_or_signal(a)
                     && !is_traffic_queue_anim(a)
                     && !is_traffic_diversion_anim(a)
                     && a.geom.len() >= 2
@@ -2129,6 +2154,7 @@ pub fn map_interaction_system(
         let valid = !playback.play_test_mode
             && state.tool_mode.is_transform_tool()
             && state.traffic_scale_preview.is_none()
+            && state.selected_traffic_light.is_none()
             && matches!(state.selected, SelectedEntity::Anim(sid) if sid == edit_id)
             && !state.locked_entity_ids.contains(&edit_id)
             && state
@@ -2267,8 +2293,18 @@ pub fn map_interaction_system(
             if state.tool_mode == ToolMode::DrawTrafficLane {
                 state.draft_points_lnglat.clear();
                 state.drawing_traffic_lane_for_anim_id = None;
+                state.drawing_traffic_is_signal = false;
                 state.tool_mode = ToolMode::Select;
                 state.status_banner = Some("Penggambaran Jalur Traffic dibatalkan.".into());
+                return;
+            }
+            if state.tool_mode == ToolMode::PlaceTrafficLight {
+                state.placing_traffic_light_for_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some(
+                    "Selesai memasang Lampu Merah 3D — klik lampu atau pilih di Inspector untuk Move / Rotate / Scale."
+                        .into(),
+                );
                 return;
             }
             if state.tool_mode == ToolMode::DrawTrafficQueueLane {
@@ -2542,7 +2578,11 @@ pub fn map_interaction_system(
         if finished.moved {
             if finished.is_text_marker {
                 state.dirty_text_ids.insert(finished.marker_id);
-            } else if finished.is_particle_anim || finished.traffic_scale_preview.is_some() {
+            } else if finished.is_particle_anim
+                || finished.is_billboard_anim
+                || finished.traffic_scale_preview.is_some()
+                || finished.traffic_light_target.is_some()
+            {
                 state.dirty_anim_ids.insert(finished.marker_id);
             } else {
                 state.dirty_marker_ids.insert(finished.marker_id);
@@ -2707,6 +2747,54 @@ pub fn map_interaction_system(
                     camera,
                     cam_gtf,
                 )
+            } else if state.tool_mode.is_transform_tool()
+                && let SelectedEntity::Anim(sel_id) = state.selected
+                && !state.locked_entity_ids.contains(&sel_id)
+                && let Some(tl) = resolve_active_traffic_light_gizmo_pose(&state)
+                && tl.anim_id == sel_id
+            {
+                let mode = match state.tool_mode {
+                    ToolMode::RotateMarker => GizmoMode::Rotate,
+                    ToolMode::ScaleMarker => GizmoMode::Scale,
+                    _ => GizmoMode::Move,
+                };
+                let origin = tl.world_pos;
+                let rot_quat = Quat::from_euler(
+                    EulerRot::YXZ,
+                    (tl.rot_deg[1] as f32).to_radians(),
+                    (tl.rot_deg[0] as f32).to_radians(),
+                    (tl.rot_deg[2] as f32).to_radians(),
+                );
+                let radius = compute_gizmo_world_radius(
+                    camera,
+                    cam_gtf,
+                    origin,
+                    GIZMO_SCREEN_RADIUS_PX,
+                );
+                hit_test_gizmo(cursor_px, mode, origin, rot_quat, radius, camera, cam_gtf)
+            } else if state.tool_mode.is_transform_tool()
+                && let SelectedEntity::Anim(sel_id) = state.selected
+                && !state.locked_entity_ids.contains(&sel_id)
+                && let Some(anim) = state
+                    .anims
+                    .iter()
+                    .find(|a| a.id == sel_id && is_billboard_anim(a))
+            {
+                let mode = match state.tool_mode {
+                    ToolMode::RotateMarker => GizmoMode::Rotate,
+                    ToolMode::ScaleMarker => GizmoMode::Scale,
+                    _ => GizmoMode::Move,
+                };
+                let cfg = parse_billboard_anim_config(anim);
+                let origin = billboard_world_origin(&state, anim);
+                let rot_quat = billboard_quat(&cfg);
+                let radius = compute_gizmo_world_radius(
+                    camera,
+                    cam_gtf,
+                    origin,
+                    GIZMO_SCREEN_RADIUS_PX,
+                );
+                hit_test_gizmo(cursor_px, mode, origin, rot_quat, radius, camera, cam_gtf)
             } else if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
                 && let SelectedEntity::Anim(sel_id) = state.selected
                 && !state.locked_entity_ids.contains(&sel_id)
@@ -3170,6 +3258,50 @@ pub fn map_interaction_system(
             gizmo_state.empty_click_start_px = None;
             return;
         }
+        if state.tool_mode.is_transform_tool()
+            && let SelectedEntity::Anim(sel_id) = state.selected
+            && !state.locked_entity_ids.contains(&sel_id)
+            && state
+                .selected_traffic_light
+                .is_some_and(|(aid, _)| aid == sel_id)
+        {
+            let mode = match state.tool_mode {
+                ToolMode::RotateMarker => GizmoMode::Rotate,
+                ToolMode::ScaleMarker => GizmoMode::Scale,
+                _ => GizmoMode::Move,
+            };
+            if let Some(drag) =
+                begin_traffic_light_gizmo_drag(&state, mode, handle, cursor_px, camera, cam_gtf)
+            {
+                gizmo_state.active_drag = Some(drag);
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                return;
+            }
+        }
+        if state.tool_mode.is_transform_tool()
+            && let SelectedEntity::Anim(sel_id) = state.selected
+            && !state.locked_entity_ids.contains(&sel_id)
+            && let Some(anim) = state
+                .anims
+                .iter()
+                .find(|a| a.id == sel_id && is_billboard_anim(a))
+                .cloned()
+        {
+            let mode = match state.tool_mode {
+                ToolMode::RotateMarker => GizmoMode::Rotate,
+                ToolMode::ScaleMarker => GizmoMode::Scale,
+                _ => GizmoMode::Move,
+            };
+            if let Some(drag) =
+                begin_billboard_gizmo_drag(&anim, mode, handle, cursor_px, &state, camera, cam_gtf)
+            {
+                gizmo_state.active_drag = Some(drag);
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                return;
+            }
+        }
         if matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker)
             && let SelectedEntity::Anim(sel_id) = state.selected
             && !state.locked_entity_ids.contains(&sel_id)
@@ -3215,6 +3347,59 @@ pub fn map_interaction_system(
         | ToolMode::MoveMarker
         | ToolMode::RotateMarker
         | ToolMode::ScaleMarker => {
+            // Direct click on any procedural 3D Traffic Light pole selects it for Move / Rotate / Scale Gizmo!
+            if !playback.play_test_mode
+                && let Some((tl_anim_id, tl_id)) =
+                    hit_test_traffic_light(cursor_px, &state, camera, cam_gtf)
+                && let Some(clicked_anim) =
+                    state.anims.iter().find(|a| a.id == tl_anim_id).cloned()
+            {
+                let cfg = parse_traffic_anim_config(&clicked_anim);
+                let light_name = cfg
+                    .traffic_lights
+                    .iter()
+                    .find(|l| l.id == tl_id)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "Lampu Merah".into());
+                state.selected = SelectedEntity::Anim(tl_anim_id);
+                state.anim_edit = Some(clicked_anim);
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.traffic_scale_preview = None;
+                state.selected_traffic_light = Some((tl_anim_id, tl_id));
+                route_edit.clear();
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                state.status_banner = Some(format!(
+                    "Lampu Merah '{light_name}' dipilih — gunakan Gizmo di peta (2: Move, 3: Rotate, 4: Scale) atau atur di Inspector."
+                ));
+                return;
+            }
+            // Direct click on any 3D Billboard / Videotron selects it for Move / Rotate / Scale Gizmo!
+            if !playback.play_test_mode
+                && let Some(bb_anim_id) = hit_test_billboard(cursor_px, &state, camera, cam_gtf)
+                && let Some(clicked_anim) =
+                    state.anims.iter().find(|a| a.id == bb_anim_id).cloned()
+            {
+                let bname = clicked_anim.name.clone();
+                state.selected = SelectedEntity::Anim(bb_anim_id);
+                state.anim_edit = Some(clicked_anim);
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.traffic_scale_preview = None;
+                state.selected_traffic_light = None;
+                route_edit.clear();
+                gizmo_state.suppress_camera_pan = true;
+                gizmo_state.empty_click_start_px = None;
+                state.status_banner = Some(format!(
+                    "Billboard '{bname}' dipilih — gunakan Gizmo di peta (2: Move, 3: Rotate, 4: Scale) atau atur di Inspector."
+                ));
+                return;
+            }
             match gizmo_state.hovered_entity {
                 Some(SelectedEntity::Marker(id)) => {
                     state.selected = SelectedEntity::Marker(id);
@@ -3293,13 +3478,13 @@ pub fn map_interaction_system(
                     let is_route_poly = clicked_anim
                         .as_ref()
                         .is_some_and(|a| {
-                !is_traffic_anim(a)
+                !is_traffic_flow_or_signal(a)
                     && !is_traffic_queue_anim(a)
                     && !is_traffic_diversion_anim(a)
                     && a.geom.len() >= 2
             });
                     let clicked_traffic_lane = clicked_anim.as_ref().and_then(|a| {
-                        if is_traffic_anim(a)
+                        if is_traffic_flow_or_signal(a)
                             || is_traffic_queue_anim(a)
                             || is_traffic_diversion_anim(a)
                         {
@@ -3316,6 +3501,7 @@ pub fn map_interaction_system(
                     state.building_edit = None;
                     state.line_edit = None;
                     state.text_edit = None;
+                    state.selected_traffic_light = None;
                     if (is_route_poly || clicked_traffic_lane.is_some())
                         && state.traffic_scale_preview.is_none()
                         && !playback.play_test_mode
@@ -3378,6 +3564,158 @@ pub fn map_interaction_system(
             };
             let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
             state.draft_points_lnglat.push([lng, lat]);
+        }
+        ToolMode::PlaceTrafficLight => {
+            if playback.play_test_mode {
+                return;
+            }
+            let Some(hit) = hit_opt else {
+                return;
+            };
+            let Some(target_aid) = state.placing_traffic_light_for_anim_id else {
+                state.tool_mode = ToolMode::Select;
+                return;
+            };
+            let anchor = state.geo_anchor;
+            let phase_idx = state.placing_traffic_light_phase_idx;
+            if let Some(anim) = state
+                .anims
+                .iter_mut()
+                .find(|a| a.id == target_aid && is_traffic_signal_anim(a))
+            {
+                let mut cfg = parse_traffic_anim_config(anim);
+                let mut best: Option<(usize, f64, f64)> = None;
+                for (li, lane) in cfg.lanes.iter().enumerate() {
+                    if let Some((s, dist)) =
+                        project_point_onto_lane(lane, anchor, (hit.x as f64, hit.z as f64))
+                        && best.is_none_or(|b| dist < b.2)
+                    {
+                        best = Some((li, s, dist));
+                    }
+                }
+                if let Some((li, stop_s, _)) = best {
+                    let light_num = cfg.traffic_lights.len() + 1;
+                    let lane_name = cfg.lanes[li].name.clone();
+                    let name = format!("Lampu {light_num} ({lane_name})");
+                    if let Some(tl) = build_traffic_light_on_lane(
+                        &cfg.lanes[li],
+                        anchor,
+                        stop_s,
+                        phase_idx,
+                        name.clone(),
+                        cfg.lane_width_m,
+                        cfg.overtake_side,
+                    ) {
+                        let new_light_id = tl.id;
+                        cfg.traffic_lights.push(tl);
+                        while cfg.signal_phases.len() <= phase_idx {
+                            let pi = cfg.signal_phases.len();
+                            cfg.signal_phases
+                                .push(TrafficSignalPhase::new(format!("Fase {}", pi + 1)));
+                        }
+                        write_traffic_anim_config(anim, &cfg);
+                        let updated = anim.clone();
+                        state.selected = SelectedEntity::Anim(target_aid);
+                        state.anim_edit = Some(updated);
+                        state.dirty_anim_ids.insert(target_aid);
+                        state.selected_traffic_light = Some((target_aid, new_light_id));
+                        state.status_banner = Some(format!(
+                            "Lampu Merah '{name}' dipasang pada Fase {}! Klik jalur lain untuk tambah lampu, atau Esc untuk selesai & geser/rotate/scale.",
+                            phase_idx + 1
+                        ));
+                    }
+                } else {
+                    state.status_banner =
+                        Some("Belum ada jalur valid untuk menempelkan Lampu Merah.".into());
+                }
+            }
+        }
+        ToolMode::PlaceBillboard => {
+            if playback.play_test_mode {
+                return;
+            }
+            let Some(hit) = hit_opt else {
+                return;
+            };
+            let Some(sk) = state.active_skenario.clone() else {
+                return;
+            };
+            let (lng, lat, _) = state.geo_anchor.local_to_lng_lat_alt([hit.x, 0.0, hit.z]);
+            let bb_cnt = state
+                .anims
+                .iter()
+                .filter(|a| is_billboard_anim(a))
+                .count()
+                + 1;
+            let name = if state.new_billboard_name.trim().is_empty() {
+                format!("Billboard {bb_cnt}")
+            } else {
+                state.new_billboard_name.trim().to_string()
+            };
+            // Orient initial billboard roughly toward the camera so user sees the front screen immediately!
+            let to_cam = cam_gtf.translation() - Vec3::new(hit.x, 0.0, hit.z);
+            let init_yaw_deg = (to_cam.x.atan2(to_cam.z).to_degrees() as f64 * 10.0).round() / 10.0;
+            let cfg = BillboardAnimConfig {
+                pos_lnglat: [lng, lat, 0.0],
+                rot_deg: [0.0, init_yaw_deg, 0.0],
+                ..Default::default()
+            };
+            let data = serde_json::json!({ "billboard": cfg });
+            let geom = vec![[lng, lat, 0.0]];
+            let sort_order = (state.anims.len() + 1) as i32;
+
+            if state.offline_preview {
+                let now = chrono::Utc::now();
+                let a = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: ANIM_TYPE_BILLBOARD.to_string(),
+                    sort_order,
+                    speed: 1.0,
+                    duration_sec: 0.0,
+                    replay: false,
+                    autoplay: false,
+                    geom,
+                    data,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let aid = a.id;
+                state.selected = SelectedEntity::Anim(aid);
+                state.anim_edit = Some(a.clone());
+                state.marker_edit = None;
+                state.building_edit = None;
+                state.line_edit = None;
+                state.text_edit = None;
+                state.anims.push(a);
+                state.sort_anims_by_order();
+                state.status_banner = Some(format!(
+                    "Billboard / Videotron '{name}' dipasang — pilih Gambar/Video di Inspector atau Move/Rotate/Scale di peta!"
+                ));
+            } else if let Some(auth) = current_auth(&state) {
+                api.send(ApiCommand::CreateAnim {
+                    auth,
+                    req: CreateAnimRequest {
+                        operasi_id: sk.operasi_id,
+                        skenario_id: sk.id,
+                        marker_id: None,
+                        name,
+                        anim_type: ANIM_TYPE_BILLBOARD.to_string(),
+                        sort_order,
+                        speed: 1.0,
+                        duration_sec: 0.0,
+                        replay: false,
+                        autoplay: false,
+                        geom,
+                        data,
+                    },
+                });
+            }
+            state.tool_mode = ToolMode::Select;
+            state.new_billboard_name = format!("Billboard {}", bb_cnt + 1);
         }
         ToolMode::PlaceText => {
             if playback.play_test_mode {
@@ -4333,8 +4671,9 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 if let Some(existing) = state
                     .anims
                     .iter_mut()
-                    .find(|a| a.id == target_aid && is_traffic_anim(a))
+                    .find(|a| a.id == target_aid && is_traffic_flow_or_signal(a))
                 {
+                    let is_sig = is_traffic_signal_anim(existing);
                     let mut cfg = parse_traffic_anim_config(existing);
                     let lane_num = cfg.lanes.len() + 1;
                     cfg.lanes
@@ -4344,16 +4683,35 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     state.selected = SelectedEntity::Anim(target_aid);
                     state.anim_edit = Some(updated);
                     state.dirty_anim_ids.insert(target_aid);
-                    state.status_banner = Some(format!(
-                        "Jalur {lane_num} ditambahkan ke Simulasi Traffic! Klik Preview untuk menguji atau Simpan untuk menyimpan."
-                    ));
+                    state.status_banner = Some(if is_sig {
+                        format!(
+                            "Jalur {lane_num} ditambahkan ke Lalu Lintas Lampu Merah! Pasang lampu merah atau klik 'Auto-Pasang di Simpang' di Inspector."
+                        )
+                    } else {
+                        format!(
+                            "Jalur {lane_num} ditambahkan ke Simulasi Traffic! Klik Preview untuk menguji atau Simpan untuk menyimpan."
+                        )
+                    });
                 }
+                state.drawing_traffic_is_signal = false;
                 state.tool_mode = ToolMode::Select;
                 return;
             }
 
-            let traffic_cnt = state.anims.iter().filter(|a| is_traffic_anim(a)).count() + 1;
-            let name = if state.new_traffic_name.trim().is_empty() {
+            let is_signal = state.drawing_traffic_is_signal;
+            state.drawing_traffic_is_signal = false;
+            let traffic_cnt = if is_signal {
+                state.anims.iter().filter(|a| is_traffic_signal_anim(a)).count() + 1
+            } else {
+                state.anims.iter().filter(|a| is_traffic_anim(a)).count() + 1
+            };
+            let name = if is_signal {
+                if state.new_traffic_signal_name.trim().is_empty() {
+                    format!("Lampu Merah {traffic_cnt}")
+                } else {
+                    state.new_traffic_signal_name.trim().to_string()
+                }
+            } else if state.new_traffic_name.trim().is_empty() {
                 format!("Traffic Lalu Lintas {traffic_cnt}")
             } else {
                 state.new_traffic_name.trim().to_string()
@@ -4395,14 +4753,28 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     .collect();
             }
 
+            let default_phases = if is_signal {
+                vec![
+                    TrafficSignalPhase::new("Fase 1"),
+                    TrafficSignalPhase::new("Fase 2"),
+                ]
+            } else {
+                Vec::new()
+            };
             let cfg = TrafficAnimConfig {
                 lanes: vec![TrafficLane::new("Jalur 1", geom.clone())],
                 vehicle_pool: auto_pool,
                 seed: 20_261_126_u64.wrapping_add((state.anims.len() as u64 + 1) * 7919),
+                signal_phases: default_phases,
                 ..Default::default()
             };
             let data = serde_json::json!({ "traffic": cfg });
             let sort_order = (state.anims.len() + 1) as i32;
+            let anim_type_str = if is_signal {
+                ANIM_TYPE_TRAFFIC_SIGNAL.to_string()
+            } else {
+                ANIM_TYPE_TRAFFIC_FLOW.to_string()
+            };
 
             if state.offline_preview {
                 let now = chrono::Utc::now();
@@ -4412,7 +4784,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     skenario_id: sk.id,
                     marker_id: None,
                     name: name.clone(),
-                    anim_type: ANIM_TYPE_TRAFFIC_FLOW.to_string(),
+                    anim_type: anim_type_str,
                     sort_order,
                     speed: 10.0,
                     duration_sec: 60.0,
@@ -4431,9 +4803,15 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 state.line_edit = None;
                 state.text_edit = None;
                 state.anims.push(a);
-                state.status_banner = Some(format!(
-                    "Simulasi Traffic '{name}' dibuat! Gunakan 'Duplikat Jalur Balik' atau atur pool kendaraan di Inspector."
-                ));
+                state.status_banner = Some(if is_signal {
+                    format!(
+                        "Lalu Lintas Lampu Merah '{name}' dibuat! Tambah jalur lain lalu klik '+ Pasang Lampu Merah' atau 'Auto-Pasang di Simpang' di Inspector."
+                    )
+                } else {
+                    format!(
+                        "Simulasi Traffic '{name}' dibuat! Gunakan 'Duplikat Jalur Balik' atau atur pool kendaraan di Inspector."
+                    )
+                });
             } else if let Some(auth) = current_auth(state) {
                 api.send(ApiCommand::CreateAnim {
                     auth,
@@ -4442,7 +4820,7 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                         skenario_id: sk.id,
                         marker_id: None,
                         name,
-                        anim_type: ANIM_TYPE_TRAFFIC_FLOW.to_string(),
+                        anim_type: anim_type_str,
                         sort_order,
                         speed: 10.0,
                         duration_sec: 60.0,
@@ -4454,7 +4832,11 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                 });
             }
             state.tool_mode = ToolMode::Select;
-            state.new_traffic_name = format!("Traffic Lalu Lintas {}", traffic_cnt + 1);
+            if is_signal {
+                state.new_traffic_signal_name = format!("Lampu Merah {}", traffic_cnt + 1);
+            } else {
+                state.new_traffic_name = format!("Traffic Lalu Lintas {}", traffic_cnt + 1);
+            }
         }
         ToolMode::DrawTrafficQueueLane => {
             if pts.len() < 2 {
@@ -4879,6 +5261,7 @@ fn clear_selection(state: &mut AppState) {
     state.line_edit = None;
     state.text_edit = None;
     state.anim_edit = None;
+    state.selected_traffic_light = None;
 }
 
 /// Executes a confirmed deletion of any map entity (offline or via server API).

@@ -362,6 +362,9 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::audio_anim::is_audio_anim(anim) {
         return crate::audio_anim::parse_audio_anim_config(anim).plays().is_none();
     }
+    if crate::billboard_anim::is_billboard_anim(anim) {
+        return crate::billboard_anim::parse_billboard_anim_config(anim).is_continuous();
+    }
     if crate::shoot_anim::is_shoot_anim(anim) {
         return crate::shoot_anim::shoot_anim_is_continuous(anim);
     }
@@ -371,7 +374,7 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::pointer_anim::is_pointer_arrow_anim(anim) {
         return crate::pointer_anim::parse_pointer_arrow_config(anim).continuous;
     }
-    if crate::traffic_anim::is_traffic_anim(anim) {
+    if crate::traffic_anim::is_traffic_flow_or_signal(anim) {
         return crate::traffic_anim::parse_traffic_anim_config(anim).continuous;
     }
     if crate::traffic_queue::is_traffic_queue_anim(anim)

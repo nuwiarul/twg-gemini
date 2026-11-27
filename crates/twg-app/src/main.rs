@@ -51,6 +51,7 @@ use crate::{
         polygon_edit::PolygonEditState,
         plot_line_edit::PlotLineEditState,
         route_edit::RouteEditState,
+        billboard::{BillboardRuntimePool, billboard_visual_system},
         scenario_audio::{ScenarioAudio, scenario_audio_system},
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
@@ -147,6 +148,7 @@ fn main() {
         .init_resource::<AssetPreviewStage>()
         .init_resource::<MediaPreviewPlayer>()
         .init_resource::<ScenarioAudio>()
+        .init_resource::<BillboardRuntimePool>()
         .insert_resource(ApiClientBridge::start())
         .insert_resource(WsClientBridge::start())
         .insert_resource(sync_bridge)
@@ -210,6 +212,7 @@ fn main() {
                     particle_fx_visual_system,
                     pointer_arrow_visual_system,
                     traffic_visual_system,
+                    billboard_visual_system,
                 )
                     .chain(),
             )
@@ -1111,8 +1114,10 @@ fn process_net_events_system(
                 let anim_id = a.id;
                 let anim_name = a.name.clone();
                 let is_audio = twg_shared::audio_anim::is_audio_anim(&a);
+                let is_billboard = twg_shared::billboard_anim::is_billboard_anim(&a);
                 let is_particle = twg_shared::particle_anim::is_particle_anim(&a);
                 let is_traffic = twg_shared::traffic_anim::is_traffic_anim(&a);
+                let is_traffic_signal = twg_shared::traffic_anim::is_traffic_signal_anim(&a);
                 let is_traffic_queue = twg_shared::traffic_queue::is_traffic_queue_anim(&a);
                 let is_traffic_gridlock = twg_shared::traffic_queue::is_traffic_gridlock_anim(&a);
                 let is_traffic_manual = twg_shared::traffic_queue::is_traffic_manual_anim(&a);
@@ -1128,7 +1133,9 @@ fn process_net_events_system(
                 let bound_empty = twg_shared::route_formation::anim_bound_marker_ids(&a).is_empty();
                 let needs_marker_pick = !is_particle
                     && !twg_shared::audio_anim::is_audio_anim(&a)
+                    && !is_billboard
                     && !is_traffic
+                    && !is_traffic_signal
                     && !is_traffic_queue
                     && !is_traffic_diversion
                     && !is_shoot
@@ -1147,11 +1154,19 @@ fn process_net_events_system(
                 state.sort_anims_by_order();
                 if is_audio {
                     state.status_banner = Some(format!("Play Suara '{anim_name}' dibuat — pilih Sound dari Assets di Inspector."));
+                } else if is_billboard {
+                    state.status_banner = Some(format!(
+                        "Billboard / Videotron '{anim_name}' dipasang — pilih Gambar/Video di Inspector, atau geser/putar/skala via Gizmo (2: Move, 3: Rotate, 4: Scale)!"
+                    ));
                 } else if is_particle {
                     state.particle_preview_reset_nonce =
                         state.particle_preview_reset_nonce.wrapping_add(1);
                     state.status_banner = Some(format!(
                         "Partikel '{anim_name}' diletakkan — geser posisi via Move Gizmo (X / Alt / Z) atau ubah setting di Inspector!"
+                    ));
+                } else if is_traffic_signal {
+                    state.status_banner = Some(format!(
+                        "Lalu Lintas Lampu Merah '{anim_name}' dibuat — tambah jalur lain lalu klik '+ Pasang Lampu Merah' atau 'Auto-Pasang di Simpang' di Inspector!"
                     ));
                 } else if is_traffic {
                     state.status_banner = Some(format!(

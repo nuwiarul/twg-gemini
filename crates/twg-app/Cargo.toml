@@ -36,7 +36,7 @@ maintainer = "TWG Team <admin@twg.local>"
 copyright = "2026, TWG Team"
 section = "graphics"
 priority = "optional"
-depends = "$auto, libvulkan1, libasound2 | libasound2t64, xdg-desktop-portal"
+depends = "$auto, libvulkan1, libasound2 | libasound2t64, xdg-desktop-portal, ffmpeg"
 assets = [
     ["target/release/twg-app", "usr/lib/twg-app/twg-app-bin", "755"],
     ["packaging/linux/twg-app", "usr/bin/twg-app", "755"],

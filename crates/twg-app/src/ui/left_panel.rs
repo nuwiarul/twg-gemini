@@ -22,7 +22,7 @@ use twg_shared::{
         SpawnHideAction, SpawnHideConfig, is_spawn_hide_anim, parse_spawn_hide_config,
         spawn_hide_action,
     },
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_anim::{is_traffic_anim, is_traffic_signal_anim, parse_traffic_anim_config},
     traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{
         is_traffic_gridlock_anim, is_traffic_manual_anim, is_traffic_queue_anim,
@@ -3099,7 +3099,10 @@ fn draw_animations_tab(
         AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
         AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
         AnimCategory::Other => draw_other_create_card(ui, state, editable),
-        AnimCategory::Audio => super::audio_anim::draw_create(ui, state, api, editable),
+        AnimCategory::Audio => {
+            super::audio_anim::draw_create(ui, state, api, editable);
+            super::billboard_anim::draw_create(ui, state, editable);
+        }
     }
 
     ui.add_space(7.0);
@@ -4305,12 +4308,48 @@ fn draw_route_create_card(ui: &mut egui::Ui, state: &mut AppState, editable: boo
                     let traffic_idx = state.anims.iter().filter(|a| is_traffic_anim(a)).count() + 1;
                     state.tool_mode = ToolMode::DrawTrafficLane;
                     state.drawing_traffic_lane_for_anim_id = None;
+                    state.drawing_traffic_is_signal = false;
                     state.draft_points_lnglat.clear();
                     state.route_target_marker_id = None;
                     state.picking_marker_for_anim_id = None;
                     state.new_traffic_name = format!("Traffic Lalu Lintas {traffic_idx}");
                     state.status_banner = Some(
                         "Simulasi Traffic: Klik titik-titik Jalur 1 di peta (min 2 titik), lalu tekan Enter / Finish. Setelah itu bisa Duplikat Jalur Balik & pilih kendaraan di Inspector."
+                            .into(),
+                    );
+                }
+
+                ui.add_space(4.0);
+                let signal_btn = egui::Button::new(
+                    egui::RichText::new("+ Lalu Lintas Lampu Merah")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(225, 29, 72))
+                .min_size(egui::vec2(ui.available_width(), 25.0));
+                if ui
+                    .add_enabled(editable, signal_btn)
+                    .on_hover_text(
+                        "Simulasi arus lalu lintas normal (kecepatan acak & menyalip) + Lampu Merah 3D (Merah/Kuning/Hijau bergantian antar fase) yang bisa dipindah, diputar, & diskala",
+                    )
+                    .clicked()
+                {
+                    let sig_idx = state
+                        .anims
+                        .iter()
+                        .filter(|a| is_traffic_signal_anim(a))
+                        .count()
+                        + 1;
+                    state.tool_mode = ToolMode::DrawTrafficLane;
+                    state.drawing_traffic_lane_for_anim_id = None;
+                    state.drawing_traffic_is_signal = true;
+                    state.draft_points_lnglat.clear();
+                    state.route_target_marker_id = None;
+                    state.picking_marker_for_anim_id = None;
+                    state.new_traffic_signal_name = format!("Lampu Merah {sig_idx}");
+                    state.status_banner = Some(
+                        "Lalu Lintas Lampu Merah: Klik titik-titik Jalur 1 di peta (min 2 titik), tekan Enter / Finish. Lalu tambah jalur lain & pasang Lampu Merah 3D di Inspector!"
                             .into(),
                     );
                 }
@@ -4583,6 +4622,9 @@ fn draw_ordered_animation_list(
                 let can_play = anim_is_playable(a, &state.markers);
                 let cat = AnimCategory::from_anim_type(&a.anim_type);
                 let (cat_tag, cat_col) = match cat {
+                    AnimCategory::Route if is_traffic_signal_anim(a) => {
+                        ("LAMPU MERAH", egui::Color32::from_rgb(225, 29, 72))
+                    }
                     AnimCategory::Route if is_traffic_anim(a) => {
                         ("TRAFFIC", egui::Color32::from_rgb(217, 119, 6))
                     }
@@ -4606,6 +4648,15 @@ fn draw_ordered_animation_list(
                         }
                     }
                     AnimCategory::Route => ("RUTE", egui::Color32::from_rgb(5, 150, 105)),
+                    AnimCategory::Audio if twg_shared::billboard_anim::is_billboard_anim(a) => {
+                        if twg_shared::billboard_anim::parse_billboard_anim_config(a).media_mode
+                            == twg_shared::billboard_anim::BillboardMediaMode::Video
+                        {
+                            ("VIDEOTRON", egui::Color32::from_rgb(2, 132, 199))
+                        } else {
+                            ("BILLBOARD", egui::Color32::from_rgb(14, 116, 144))
+                        }
+                    }
                     AnimCategory::Audio => ("PLAY SUARA", egui::Color32::from_rgb(109, 40, 217)),
                     AnimCategory::Shoot => match shoot_anim_kind(a).unwrap_or_default() {
                         ShootAnimKind::WaterCannon => {
@@ -4845,6 +4896,17 @@ fn draw_ordered_animation_list(
                                     cfg.transition.short_label()
                                 )
                             }
+                        } else if twg_shared::billboard_anim::is_billboard_anim(a) {
+                            super::billboard_anim::asset_summary(state, a)
+                        } else if is_traffic_signal_anim(a) {
+                            let cfg = parse_traffic_anim_config(a);
+                            let active_lanes = cfg.lanes.iter().filter(|l| l.enabled && l.geom.len() >= 2).count();
+                            let lights = cfg.traffic_lights.iter().filter(|l| l.enabled).count();
+                            let phases = cfg.effective_signal_phases().len();
+                            format!(
+                                "{active_lanes} Jalur  •  {lights} Lampu ({phases} Fase)  •  {} Model",
+                                cfg.vehicle_pool.len(),
+                            )
                         } else if is_traffic_anim(a) {
                             let cfg = parse_traffic_anim_config(a);
                             let active_lanes = cfg.lanes.iter().filter(|l| l.enabled && l.geom.len() >= 2).count();

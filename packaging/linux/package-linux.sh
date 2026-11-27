@@ -48,6 +48,22 @@ if [[ -f "$ICONS_DIR/twg-app-256.png" ]]; then
   cp "$ICONS_DIR/twg-app-256.png" "$STAGE_DIR/twg-app.png"
 fi
 
+# Bundle sidecar ffmpeg & ffprobe into portable tarball when available (FFMPEG_BIN_DIR or PATH)
+FFMPEG_SRC="${FFMPEG_BIN_DIR:+${FFMPEG_BIN_DIR}/ffmpeg}"
+FFPROBE_SRC="${FFMPEG_BIN_DIR:+${FFMPEG_BIN_DIR}/ffprobe}"
+if [[ -z "$FFMPEG_SRC" ]] && command -v ffmpeg >/dev/null 2>&1; then
+  FFMPEG_SRC="$(command -v ffmpeg)"
+fi
+if [[ -z "$FFPROBE_SRC" ]] && command -v ffprobe >/dev/null 2>&1; then
+  FFPROBE_SRC="$(command -v ffprobe)"
+fi
+if [[ -n "$FFMPEG_SRC" && -f "$FFMPEG_SRC" && -n "$FFPROBE_SRC" && -f "$FFPROBE_SRC" ]]; then
+  echo "==> Bundling FFmpeg sidecar into $STAGE_DIR/bin..."
+  mkdir -p "$STAGE_DIR/bin"
+  install -m 0755 "$FFMPEG_SRC" "$STAGE_DIR/bin/ffmpeg"
+  install -m 0755 "$FFPROBE_SRC" "$STAGE_DIR/bin/ffprobe"
+fi
+
 TAR_PATH="$DIST_DIR/twg-app-linux-${ARCH}-v${VERSION}.tar.gz"
 echo "==> Creating portable tarball: $TAR_PATH"
 tar -C "$DIST_DIR" -czf "$TAR_PATH" "twg-app-linux-${ARCH}"

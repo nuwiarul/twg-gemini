@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub const ANIM_TYPE_TRAFFIC_FLOW: &str = "traffic_flow";
+pub const ANIM_TYPE_TRAFFIC_SIGNAL: &str = "traffic_signal";
 
 /// Fixed deterministic simulation timestep (30 Hz) so Operator & Layar Besar
 /// produce identical traffic trajectories from the same seed & elapsed time.
@@ -86,7 +87,7 @@ impl TrafficVehicleEntry {
             } else {
                 self.name.trim().to_string()
             },
-            scale: self.scale.clamp(0.05, 20.0),
+            scale: self.scale.clamp(0.01, 20.0),
             length_m: self.length_m.clamp(1.2, 24.0),
             weight: self.weight.clamp(0.05, 100.0),
             rot_y_offset_deg: self.rot_y_offset_deg.rem_euclid(360.0),
@@ -216,6 +217,207 @@ impl TrafficLane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficLightColor {
+    #[default]
+    Red,
+    Yellow,
+    Green,
+}
+
+impl TrafficLightColor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Red => "Merah",
+            Self::Yellow => "Kuning",
+            Self::Green => "Hijau",
+        }
+    }
+}
+
+/// One ordered signal phase in a Traffic Signal (`traffic_signal`) intersection cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrafficSignalPhase {
+    #[serde(default)]
+    pub name: String,
+    /// Green duration in seconds (`2.0..=180.0`).
+    #[serde(default = "default_signal_green_sec")]
+    pub green_sec: f64,
+    /// Yellow caution duration in seconds (`1.0..=15.0`).
+    #[serde(default = "default_signal_yellow_sec")]
+    pub yellow_sec: f64,
+    /// All-red safety clearance pause after yellow before the next phase turns green (`0.0..=10.0`).
+    #[serde(default = "default_signal_all_red_sec")]
+    pub all_red_sec: f64,
+}
+
+fn default_signal_green_sec() -> f64 {
+    12.0
+}
+fn default_signal_yellow_sec() -> f64 {
+    3.0
+}
+fn default_signal_all_red_sec() -> f64 {
+    1.5
+}
+
+impl Default for TrafficSignalPhase {
+    fn default() -> Self {
+        Self {
+            name: "Fase 1".to_string(),
+            green_sec: default_signal_green_sec(),
+            yellow_sec: default_signal_yellow_sec(),
+            all_red_sec: default_signal_all_red_sec(),
+        }
+    }
+}
+
+impl TrafficSignalPhase {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn sanitized(&self, fallback_idx: usize) -> Self {
+        Self {
+            name: if self.name.trim().is_empty() {
+                format!("Fase {}", fallback_idx + 1)
+            } else {
+                self.name.trim().to_string()
+            },
+            green_sec: self.green_sec.clamp(2.0, 180.0),
+            yellow_sec: self.yellow_sec.clamp(1.0, 15.0),
+            all_red_sec: self.all_red_sec.clamp(0.0, 10.0),
+        }
+    }
+
+    pub fn span_sec(&self) -> f64 {
+        self.green_sec + self.yellow_sec + self.all_red_sec
+    }
+}
+
+/// One 3D Traffic Light (APILL) bound to a specific `TrafficLane` stop line (`stop_s_m`)
+/// and a signal phase (`phase_idx`), with full independent 3D Move / Rotate / Scale transform.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrafficLightSignal {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    #[serde(default)]
+    pub name: String,
+    /// Bound `TrafficLane.id` that this signal controls.
+    pub lane_id: Uuid,
+    /// Longitudinal stop-line distance from the start of the bound lane (meters).
+    #[serde(default)]
+    pub stop_s_m: f64,
+    /// Signal phase index (`0, 1, 2, ...`). Signals sharing `phase_idx` turn Green together.
+    #[serde(default)]
+    pub phase_idx: usize,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// World geographic position `[lng, lat, alt]` of the 3D traffic light pole base.
+    #[serde(default)]
+    pub pos_lnglat: [f64; 3],
+    /// World Euler rotation `[rot_x, rot_y, rot_z]` in degrees (YXZ order, matching 3D Markers).
+    #[serde(default)]
+    pub rot_deg: [f64; 3],
+    /// 3D scale `[sx, sy, sz]` of the procedural traffic light.
+    #[serde(default = "default_traffic_light_scale")]
+    pub scale: [f64; 3],
+}
+
+fn default_traffic_light_scale() -> [f64; 3] {
+    [1.0, 1.0, 1.0]
+}
+
+impl TrafficLightSignal {
+    pub fn sanitized(&self, fallback_idx: usize) -> Self {
+        let clean_axis = |v: f64| if v.is_finite() { v.clamp(0.15, 15.0) } else { 1.0 };
+        let clean_rot = |v: f64| if v.is_finite() { v } else { 0.0 };
+        let clean_alt = if self.pos_lnglat[2].is_finite() {
+            self.pos_lnglat[2].clamp(-100.0, 20_000.0)
+        } else {
+            0.0
+        };
+        Self {
+            id: if self.id.is_nil() {
+                Uuid::new_v4()
+            } else {
+                self.id
+            },
+            name: if self.name.trim().is_empty() {
+                format!("Lampu {}", fallback_idx + 1)
+            } else {
+                self.name.trim().to_string()
+            },
+            lane_id: self.lane_id,
+            stop_s_m: if self.stop_s_m.is_finite() {
+                self.stop_s_m.max(1.0)
+            } else {
+                10.0
+            },
+            phase_idx: self.phase_idx.min(15),
+            enabled: self.enabled,
+            pos_lnglat: [
+                if self.pos_lnglat[0].is_finite() {
+                    self.pos_lnglat[0]
+                } else {
+                    0.0
+                },
+                if self.pos_lnglat[1].is_finite() {
+                    self.pos_lnglat[1]
+                } else {
+                    0.0
+                },
+                clean_alt,
+            ],
+            rot_deg: [
+                clean_rot(self.rot_deg[0]),
+                clean_rot(self.rot_deg[1]),
+                clean_rot(self.rot_deg[2]),
+            ],
+            scale: [
+                clean_axis(self.scale[0]),
+                clean_axis(self.scale[1]),
+                clean_axis(self.scale[2]),
+            ],
+        }
+    }
+}
+
+/// Resolved 3D world pose & active lamp color for one procedural Traffic Light.
+#[derive(Debug, Clone)]
+pub struct TrafficLightVisualPose {
+    pub light_id: Uuid,
+    pub name: String,
+    pub lane_id: Uuid,
+    pub phase_idx: usize,
+    pub color: TrafficLightColor,
+    pub remaining_sec: f64,
+    pub pos: [f32; 3],
+    pub rot_deg: [f32; 3],
+    pub scale: [f32; 3],
+    pub stop_line_a: [f32; 3],
+    pub stop_line_b: [f32; 3],
+    pub stop_center: [f32; 3],
+    pub enabled: bool,
+}
+
+/// Live runtime telemetry for a `traffic_signal` (`Lalu Lintas Lampu Merah`) animation.
+#[derive(Debug, Clone, Default)]
+pub struct TrafficSignalLiveStatus {
+    pub active_phase_idx: Option<usize>,
+    pub active_phase_name: String,
+    pub active_color: TrafficLightColor,
+    pub is_all_red: bool,
+    pub remaining_sec: f64,
+    pub total_vehicles: usize,
+    pub stopped_vehicles: usize,
+    pub light_states: Vec<TrafficLightVisualPose>,
+}
+
 /// Full configuration for a multi-lane pooled Traffic simulation animation stored in `anim.data["traffic"]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrafficAnimConfig {
@@ -252,6 +454,22 @@ pub struct TrafficAnimConfig {
     pub continuous: bool,
     #[serde(default = "default_traffic_seed")]
     pub seed: u64,
+    /// Placed 3D traffic light signals (used by `traffic_signal` animations).
+    #[serde(default)]
+    pub traffic_lights: Vec<TrafficLightSignal>,
+    /// Ordered signal phases (`Fase 1`, `Fase 2`, ...) controlling green/yellow/all-red rotation.
+    #[serde(default)]
+    pub signal_phases: Vec<TrafficSignalPhase>,
+    /// Optional start time offset in seconds for the signal cycle (green-wave coordination).
+    #[serde(default)]
+    pub signal_cycle_offset_sec: f64,
+    /// Distance before each traffic light stop line where overtaking is suppressed (`0..=1000` m, default `35` m; `0` disables).
+    #[serde(default = "default_signal_no_overtake_zone_m")]
+    pub signal_no_overtake_zone_m: f64,
+}
+
+fn default_signal_no_overtake_zone_m() -> f64 {
+    35.0
 }
 
 fn default_max_vehicles_per_lane() -> u32 {
@@ -304,6 +522,10 @@ impl Default for TrafficAnimConfig {
             yield_at_intersections: true,
             continuous: true,
             seed: default_traffic_seed(),
+            traffic_lights: Vec::new(),
+            signal_phases: Vec::new(),
+            signal_cycle_offset_sec: 0.0,
+            signal_no_overtake_zone_m: default_signal_no_overtake_zone_m(),
         }
     }
 }
@@ -325,6 +547,18 @@ impl TrafficAnimConfig {
             .iter()
             .map(TrafficVehicleEntry::sanitized)
             .filter(|v| !v.model_path.is_empty())
+            .collect();
+        let traffic_lights: Vec<TrafficLightSignal> = self
+            .traffic_lights
+            .iter()
+            .enumerate()
+            .map(|(i, l)| l.sanitized(i))
+            .collect();
+        let signal_phases: Vec<TrafficSignalPhase> = self
+            .signal_phases
+            .iter()
+            .enumerate()
+            .map(|(i, p)| p.sanitized(i))
             .collect();
         Self {
             lanes,
@@ -351,7 +585,43 @@ impl TrafficAnimConfig {
             } else {
                 self.seed
             },
+            traffic_lights,
+            signal_phases,
+            signal_cycle_offset_sec: if self.signal_cycle_offset_sec.is_finite() {
+                self.signal_cycle_offset_sec.clamp(0.0, 600.0)
+            } else {
+                0.0
+            },
+            signal_no_overtake_zone_m: if self.signal_no_overtake_zone_m.is_finite() {
+                self.signal_no_overtake_zone_m.clamp(0.0, 1000.0)
+            } else {
+                default_signal_no_overtake_zone_m()
+            },
         }
+    }
+
+    /// Returns the effective ordered list of signal phases (synthesizing defaults if empty
+    /// whenever at least one traffic light is present).
+    pub fn effective_signal_phases(&self) -> Vec<TrafficSignalPhase> {
+        let max_used = self
+            .traffic_lights
+            .iter()
+            .filter(|l| l.enabled)
+            .map(|l| l.phase_idx)
+            .max();
+        let mut phases: Vec<TrafficSignalPhase> = self
+            .signal_phases
+            .iter()
+            .enumerate()
+            .map(|(i, p)| p.sanitized(i))
+            .collect();
+        if let Some(m) = max_used {
+            while phases.len() <= m {
+                let idx = phases.len();
+                phases.push(TrafficSignalPhase::new(format!("Fase {}", idx + 1)));
+            }
+        }
+        phases
     }
 
     pub fn has_playable_setup(&self) -> bool {
@@ -363,7 +633,7 @@ impl TrafficAnimConfig {
     }
 
     /// Computes a stable hash of the traffic config + anchor so runtime visual pools
-    /// automatically rebuild whenever lanes, pool models, or parameters are edited.
+    /// automatically rebuild whenever lanes, pool models, signals, or parameters are edited.
     pub fn config_signature(&self, anchor: GeoAnchor) -> u64 {
         let mut h = DefaultHasher::new();
         anchor.center_lng.to_bits().hash(&mut h);
@@ -382,6 +652,8 @@ impl TrafficAnimConfig {
         self.yield_at_intersections.hash(&mut h);
         self.continuous.hash(&mut h);
         self.seed.hash(&mut h);
+        self.signal_cycle_offset_sec.to_bits().hash(&mut h);
+        self.signal_no_overtake_zone_m.to_bits().hash(&mut h);
         self.lanes.len().hash(&mut h);
         for l in &self.lanes {
             l.id.hash(&mut h);
@@ -405,12 +677,45 @@ impl TrafficAnimConfig {
             v.weight.to_bits().hash(&mut h);
             v.rot_y_offset_deg.to_bits().hash(&mut h);
         }
+        self.signal_phases.len().hash(&mut h);
+        for p in &self.signal_phases {
+            p.name.hash(&mut h);
+            p.green_sec.to_bits().hash(&mut h);
+            p.yellow_sec.to_bits().hash(&mut h);
+            p.all_red_sec.to_bits().hash(&mut h);
+        }
+        self.traffic_lights.len().hash(&mut h);
+        for tl in &self.traffic_lights {
+            tl.id.hash(&mut h);
+            tl.lane_id.hash(&mut h);
+            tl.stop_s_m.to_bits().hash(&mut h);
+            tl.phase_idx.hash(&mut h);
+            tl.enabled.hash(&mut h);
+            for c in tl.pos_lnglat {
+                c.to_bits().hash(&mut h);
+            }
+            for r in tl.rot_deg {
+                r.to_bits().hash(&mut h);
+            }
+            for s in tl.scale {
+                s.to_bits().hash(&mut h);
+            }
+        }
         h.finish()
     }
 }
 
 pub fn is_traffic_anim(anim: &Anim) -> bool {
     anim.anim_type.eq_ignore_ascii_case(ANIM_TYPE_TRAFFIC_FLOW)
+}
+
+pub fn is_traffic_signal_anim(anim: &Anim) -> bool {
+    anim.anim_type
+        .eq_ignore_ascii_case(ANIM_TYPE_TRAFFIC_SIGNAL)
+}
+
+pub fn is_traffic_flow_or_signal(anim: &Anim) -> bool {
+    is_traffic_anim(anim) || is_traffic_signal_anim(anim)
 }
 
 pub fn parse_traffic_anim_config(anim: &Anim) -> TrafficAnimConfig {
@@ -427,8 +732,29 @@ pub fn parse_traffic_anim_config(anim: &Anim) -> TrafficAnimConfig {
 }
 
 pub fn write_traffic_anim_config(anim: &mut Anim, cfg: &TrafficAnimConfig) {
+    let keep_signal = is_traffic_signal_anim(anim);
+    write_traffic_anim_config_with_type(
+        anim,
+        cfg,
+        if keep_signal {
+            ANIM_TYPE_TRAFFIC_SIGNAL
+        } else {
+            ANIM_TYPE_TRAFFIC_FLOW
+        },
+    );
+}
+
+pub fn write_traffic_signal_config(anim: &mut Anim, cfg: &TrafficAnimConfig) {
+    write_traffic_anim_config_with_type(anim, cfg, ANIM_TYPE_TRAFFIC_SIGNAL);
+}
+
+fn write_traffic_anim_config_with_type(
+    anim: &mut Anim,
+    cfg: &TrafficAnimConfig,
+    anim_type: &str,
+) {
     let clean = cfg.sanitized();
-    anim.anim_type = ANIM_TYPE_TRAFFIC_FLOW.to_string();
+    anim.anim_type = anim_type.to_string();
     anim.marker_id = None;
     // Mirror first lane geometry into `anim.geom` so focus/search/map bounds work seamlessly.
     if let Some(first_lane) = clean.lanes.iter().find(|l| l.geom.len() >= 2) {
@@ -523,6 +849,397 @@ pub fn build_reverse_lane(
     })
 }
 
+/// Projects a local XZ point onto `lane` and returns `(stop_s_m, perp_distance_m)`.
+pub fn project_point_onto_lane(
+    lane: &TrafficLane,
+    anchor: GeoAnchor,
+    world_xz: (f64, f64),
+) -> Option<(f64, f64)> {
+    if lane.geom.len() < 2 {
+        return None;
+    }
+    let pts: Vec<[f64; 3]> = lane
+        .geom
+        .iter()
+        .map(|p| {
+            let l = anchor.lng_lat_alt_to_local(p[0], p[1], p[2]);
+            [l[0] as f64, l[1] as f64, l[2] as f64]
+        })
+        .collect();
+    let mut cum = 0.0;
+    let mut best: Option<(f64, f64)> = None;
+    for w in pts.windows(2) {
+        let ax = w[0][0];
+        let az = w[0][2];
+        let bx = w[1][0];
+        let bz = w[1][2];
+        let dx = bx - ax;
+        let dz = bz - az;
+        let seg_len_sq = dx * dx + dz * dz;
+        let seg_len = seg_len_sq.sqrt().max(0.01);
+        let t = if seg_len_sq > 1e-8 {
+            (((world_xz.0 - ax) * dx + (world_xz.1 - az) * dz) / seg_len_sq).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let px = ax + dx * t;
+        let pz = az + dz * t;
+        let dist = (world_xz.0 - px).hypot(world_xz.1 - pz);
+        let s = cum + t * seg_len;
+        if best.is_none_or(|b| dist < b.1) {
+            best = Some((s, dist));
+        }
+        cum += seg_len;
+    }
+    let total = cum;
+    best.map(|(s, d)| (s.clamp(2.0, (total - 2.0).max(2.0)), d))
+}
+
+/// Samples local `(pos, forward_xz, right_xz)` at distance `s_m` along `lane`.
+pub fn sample_lane_local_frame(
+    lane: &TrafficLane,
+    anchor: GeoAnchor,
+    s_m: f64,
+) -> Option<([f64; 3], (f64, f64), (f64, f64))> {
+    if lane.geom.len() < 2 {
+        return None;
+    }
+    let pts: Vec<[f64; 3]> = lane
+        .geom
+        .iter()
+        .map(|p| {
+            let l = anchor.lng_lat_alt_to_local(p[0], p[1], p[2]);
+            [l[0] as f64, l[1] as f64, l[2] as f64]
+        })
+        .collect();
+    let mut seg_lens = Vec::with_capacity(pts.len() - 1);
+    let mut total = 0.0;
+    for w in pts.windows(2) {
+        let l = (w[1][0] - w[0][0]).hypot(w[1][2] - w[0][2]).max(0.01);
+        seg_lens.push(l);
+        total += l;
+    }
+    let target = s_m.clamp(0.0, total);
+    let mut acc = 0.0;
+    for (idx, &seg_len) in seg_lens.iter().enumerate() {
+        if acc + seg_len >= target || idx + 1 == seg_lens.len() {
+            let t = ((target - acc) / seg_len).clamp(0.0, 1.0);
+            let a = pts[idx];
+            let b = pts[idx + 1];
+            let dx = b[0] - a[0];
+            let dz = b[2] - a[2];
+            let len = dx.hypot(dz).max(1e-4);
+            let fwd = (dx / len, dz / len);
+            let right = (-fwd.1, fwd.0);
+            let pos = [
+                a[0] + dx * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + dz * t,
+            ];
+            return Some((pos, fwd, right));
+        }
+        acc += seg_len;
+    }
+    None
+}
+
+/// Computes the default pole `[lng, lat, alt]` and `[rot_x, rot_y, rot_z]` (degrees) placed on the
+/// outer road shoulder beside `stop_s_m`, facing directly toward oncoming vehicles on `lane`.
+pub fn default_traffic_light_transform(
+    lane: &TrafficLane,
+    anchor: GeoAnchor,
+    stop_s_m: f64,
+    lane_width_m: f64,
+    overtake_side: OvertakeSide,
+) -> Option<([f64; 3], [f64; 3])> {
+    let (stop_pos, fwd, right) = sample_lane_local_frame(lane, anchor, stop_s_m)?;
+    // Place pole on the outer curb side (left side for Indonesia left-hand traffic where overtake is Right)
+    let shoulder_sign = -overtake_side.lateral_sign();
+    let shoulder_offset = (lane_width_m * 0.55 + 1.35).clamp(2.2, 6.0);
+    let forward_lead = 1.25;
+    let pole_x = stop_pos[0] + right.0 * shoulder_sign * shoulder_offset + fwd.0 * forward_lead;
+    let pole_y = stop_pos[1];
+    let pole_z = stop_pos[2] + right.1 * shoulder_sign * shoulder_offset + fwd.1 * forward_lead;
+    let (lng, lat, alt) = anchor.local_to_lng_lat_alt([pole_x as f32, pole_y as f32, pole_z as f32]);
+    // Local +Z of the procedural signal box holds the 3 glowing lenses -> face `-fwd` (incoming cars).
+    let face_yaw_deg = (-fwd.0).atan2(-fwd.1).to_degrees();
+    Some(([lng, lat, alt], [0.0, face_yaw_deg, 0.0]))
+}
+
+/// Builds a new `TrafficLightSignal` snapped to `lane` at `stop_s_m` with default pole placement.
+pub fn build_traffic_light_on_lane(
+    lane: &TrafficLane,
+    anchor: GeoAnchor,
+    stop_s_m: f64,
+    phase_idx: usize,
+    name: impl Into<String>,
+    lane_width_m: f64,
+    overtake_side: OvertakeSide,
+) -> Option<TrafficLightSignal> {
+    let total = lane.total_length_m();
+    let clamped_s = stop_s_m.clamp(2.0, (total - 2.0).max(2.0));
+    let (pos_lnglat, rot_deg) =
+        default_traffic_light_transform(lane, anchor, clamped_s, lane_width_m, overtake_side)?;
+    Some(TrafficLightSignal {
+        id: Uuid::new_v4(),
+        name: name.into(),
+        lane_id: lane.id,
+        stop_s_m: clamped_s,
+        phase_idx,
+        enabled: true,
+        pos_lnglat,
+        rot_deg,
+        scale: [1.0, 1.0, 1.0],
+    })
+}
+
+/// Automatically detects lane crossings (or falls back to mid-lane) and places traffic lights
+/// ~10 m before each intersection, grouping parallel/opposite lanes into shared phases.
+/// Returns the number of newly added traffic lights.
+pub fn auto_place_intersection_traffic_lights(
+    cfg: &mut TrafficAnimConfig,
+    anchor: GeoAnchor,
+) -> usize {
+    let mut rng = SplitMix64::new(cfg.seed);
+    let mut compiled = Vec::new();
+    for (idx, lane) in cfg.lanes.iter().enumerate() {
+        if let Some(c) = CompiledLane::from_lane(idx, lane, cfg, anchor, &mut rng) {
+            compiled.push(c);
+        }
+    }
+    if compiled.is_empty() {
+        return 0;
+    }
+
+    let crossings = compute_lane_crossings(&compiled);
+    let mut stop_per_compiled: Vec<Option<f64>> = vec![None; compiled.len()];
+    for cr in &crossings {
+        let sa = (cr.s_a - 10.0).clamp(4.0, (compiled[cr.lane_a].total_len - 4.0).max(4.0));
+        let sb = (cr.s_b - 10.0).clamp(4.0, (compiled[cr.lane_b].total_len - 4.0).max(4.0));
+        stop_per_compiled[cr.lane_a] = Some(match stop_per_compiled[cr.lane_a] {
+            Some(prev) => prev.min(sa),
+            None => sa,
+        });
+        stop_per_compiled[cr.lane_b] = Some(match stop_per_compiled[cr.lane_b] {
+            Some(prev) => prev.min(sb),
+            None => sb,
+        });
+    }
+
+    // Group lanes by axis orientation (parallel/opposite lanes share a phase)
+    let mut phase_axes: Vec<(f64, f64)> = Vec::new();
+    let mut added = 0usize;
+
+    for (ci, cl) in compiled.iter().enumerate() {
+        let lane = &cfg.lanes[cl.source_idx];
+        // Skip lanes that already have at least one light
+        if cfg.traffic_lights.iter().any(|tl| tl.lane_id == lane.id) {
+            continue;
+        }
+        let stop_s = stop_per_compiled[ci]
+            .unwrap_or_else(|| (cl.total_len * 0.45).clamp(4.0, (cl.total_len - 4.0).max(4.0)));
+        let smp = cl.sample(stop_s);
+        let dir = (smp.fx, smp.fz);
+
+        let phase_idx = if let Some(found) = phase_axes
+            .iter()
+            .position(|a| (a.0 * dir.0 + a.1 * dir.1).abs() > 0.78)
+        {
+            found
+        } else {
+            let new_idx = phase_axes.len();
+            phase_axes.push(dir);
+            new_idx
+        };
+
+        let light_num = cfg.traffic_lights.len() + 1;
+        let name = format!("Lampu {} ({})", light_num, lane.name);
+        if let Some(tl) = build_traffic_light_on_lane(
+            lane,
+            anchor,
+            stop_s,
+            phase_idx,
+            name,
+            cfg.lane_width_m,
+            cfg.overtake_side,
+        ) {
+            cfg.traffic_lights.push(tl);
+            added += 1;
+        }
+    }
+
+    let needed_phases = cfg
+        .traffic_lights
+        .iter()
+        .map(|l| l.phase_idx + 1)
+        .max()
+        .unwrap_or(0);
+    while cfg.signal_phases.len() < needed_phases {
+        let idx = cfg.signal_phases.len();
+        cfg.signal_phases
+            .push(TrafficSignalPhase::new(format!("Fase {}", idx + 1)));
+    }
+    added
+}
+
+/// Evaluates the deterministic signal state at `elapsed_sec`.
+/// Returns `(active_phase_idx, active_phase_name, active_color, is_all_red, remaining_sec)`.
+pub fn evaluate_signal_phase_at_time(
+    cfg: &TrafficAnimConfig,
+    elapsed_sec: f64,
+) -> (Option<usize>, String, TrafficLightColor, bool, f64) {
+    let phases = cfg.effective_signal_phases();
+    if phases.is_empty() {
+        return (None, String::new(), TrafficLightColor::Green, false, 0.0);
+    }
+
+    // Special case: a single configured phase still alternates Green -> Yellow -> Red
+    // so single-lane traffic light tests cycle visibly!
+    if phases.len() == 1 {
+        let p = &phases[0];
+        let red_hold = (p.all_red_sec + p.green_sec * 0.75).max(4.0);
+        let total = p.green_sec + p.yellow_sec + red_hold;
+        let t = (elapsed_sec + cfg.signal_cycle_offset_sec).rem_euclid(total);
+        if t < p.green_sec {
+            return (
+                Some(0),
+                p.name.clone(),
+                TrafficLightColor::Green,
+                false,
+                (p.green_sec - t).max(0.0),
+            );
+        } else if t < p.green_sec + p.yellow_sec {
+            return (
+                Some(0),
+                p.name.clone(),
+                TrafficLightColor::Yellow,
+                false,
+                (p.green_sec + p.yellow_sec - t).max(0.0),
+            );
+        } else {
+            return (
+                None,
+                p.name.clone(),
+                TrafficLightColor::Red,
+                true,
+                (total - t).max(0.0),
+            );
+        }
+    }
+
+    let total_cycle: f64 = phases.iter().map(TrafficSignalPhase::span_sec).sum();
+    if total_cycle <= 1e-4 {
+        return (
+            Some(0),
+            phases[0].name.clone(),
+            TrafficLightColor::Green,
+            false,
+            0.0,
+        );
+    }
+    let t = (elapsed_sec + cfg.signal_cycle_offset_sec).rem_euclid(total_cycle);
+    let mut acc = 0.0;
+    for (idx, p) in phases.iter().enumerate() {
+        let span = p.span_sec();
+        if t < acc + span || idx + 1 == phases.len() {
+            let local_t = (t - acc).max(0.0);
+            if local_t < p.green_sec {
+                return (
+                    Some(idx),
+                    p.name.clone(),
+                    TrafficLightColor::Green,
+                    false,
+                    (p.green_sec - local_t).max(0.0),
+                );
+            } else if local_t < p.green_sec + p.yellow_sec {
+                return (
+                    Some(idx),
+                    p.name.clone(),
+                    TrafficLightColor::Yellow,
+                    false,
+                    (p.green_sec + p.yellow_sec - local_t).max(0.0),
+                );
+            } else {
+                return (
+                    None,
+                    p.name.clone(),
+                    TrafficLightColor::Red,
+                    true,
+                    (span - local_t).max(0.0),
+                );
+            }
+        }
+        acc += span;
+    }
+    (None, String::new(), TrafficLightColor::Red, true, 0.0)
+}
+
+/// Resolves world-space poses and lamp colors for every placed `TrafficLightSignal`
+/// at `elapsed_sec` (usable in both Plot Editor static view at `t = 0.0` and live playback).
+pub fn resolve_traffic_light_visual_poses(
+    cfg: &TrafficAnimConfig,
+    anchor: GeoAnchor,
+    elapsed_sec: f64,
+) -> Vec<TrafficLightVisualPose> {
+    let (active_phase_idx, _, active_color, is_all_red, remaining_sec) =
+        evaluate_signal_phase_at_time(cfg, elapsed_sec);
+    let half_w = (cfg.lane_width_m * 0.52).clamp(1.2, 4.5);
+
+    let mut out = Vec::with_capacity(cfg.traffic_lights.len());
+    for tl in &cfg.traffic_lights {
+        let pos = anchor.lng_lat_alt_to_local(
+            tl.pos_lnglat[0],
+            tl.pos_lnglat[1],
+            tl.pos_lnglat[2],
+        );
+        let (stop_center, stop_line_a, stop_line_b) = cfg
+            .lanes
+            .iter()
+            .find(|l| l.id == tl.lane_id)
+            .and_then(|l| sample_lane_local_frame(l, anchor, tl.stop_s_m))
+            .map(|(p, _fwd, right)| {
+                let c = [p[0] as f32, p[1] as f32, p[2] as f32];
+                let a = [
+                    (p[0] - right.0 * half_w) as f32,
+                    p[1] as f32,
+                    (p[2] - right.1 * half_w) as f32,
+                ];
+                let b = [
+                    (p[0] + right.0 * half_w) as f32,
+                    p[1] as f32,
+                    (p[2] + right.1 * half_w) as f32,
+                ];
+                (c, a, b)
+            })
+            .unwrap_or((pos, pos, pos));
+
+        let color = if !tl.enabled {
+            TrafficLightColor::Green
+        } else if !is_all_red && active_phase_idx == Some(tl.phase_idx) {
+            active_color
+        } else {
+            TrafficLightColor::Red
+        };
+
+        out.push(TrafficLightVisualPose {
+            light_id: tl.id,
+            name: tl.name.clone(),
+            lane_id: tl.lane_id,
+            phase_idx: tl.phase_idx,
+            color,
+            remaining_sec,
+            pos,
+            rot_deg: [tl.rot_deg[0] as f32, tl.rot_deg[1] as f32, tl.rot_deg[2] as f32],
+            scale: [tl.scale[0] as f32, tl.scale[1] as f32, tl.scale[2] as f32],
+            stop_line_a,
+            stop_line_b,
+            stop_center,
+            enabled: tl.enabled,
+        });
+    }
+    out
+}
+
 // =============================================================================
 // Deterministic PRNG (SplitMix64) for identical Operator <-> Layar Besar sync
 // =============================================================================
@@ -572,6 +1289,7 @@ pub enum TrafficBehaviorState {
     Overtaking,
     Returning,
     YieldingCrossing,
+    WaitingSignal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -838,12 +1556,20 @@ pub struct TrafficVehiclePose {
     pub behavior: TrafficBehaviorState,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompiledSignal {
+    lane_idx: usize,
+    stop_s_m: f64,
+    phase_idx: usize,
+}
+
 /// Deterministic multi-lane traffic simulation engine.
 #[derive(Debug, Clone)]
 pub struct TrafficSimEngine {
     cfg: TrafficAnimConfig,
     anchor: GeoAnchor,
     lanes: Vec<CompiledLane>,
+    signals: Vec<CompiledSignal>,
     crossings: Vec<LaneCrossing>,
     vehicles: Vec<SimVehicle>,
     rng: SplitMix64,
@@ -861,6 +1587,30 @@ impl TrafficSimEngine {
                 lanes.push(compiled);
             }
         }
+        let mut signals = Vec::new();
+        for tl in &cfg.traffic_lights {
+            if !tl.enabled {
+                continue;
+            }
+            if let Some(ci) = lanes
+                .iter()
+                .position(|cl| cfg.lanes[cl.source_idx].id == tl.lane_id)
+            {
+                let clamped_s = tl
+                    .stop_s_m
+                    .clamp(2.0, (lanes[ci].total_len - 2.0).max(2.0));
+                signals.push(CompiledSignal {
+                    lane_idx: ci,
+                    stop_s_m: clamped_s,
+                    phase_idx: tl.phase_idx,
+                });
+            }
+        }
+        signals.sort_by(|a, b| {
+            a.lane_idx
+                .cmp(&b.lane_idx)
+                .then_with(|| a.stop_s_m.total_cmp(&b.stop_s_m))
+        });
         let crossings = if cfg.yield_at_intersections {
             compute_lane_crossings(&lanes)
         } else {
@@ -870,6 +1620,7 @@ impl TrafficSimEngine {
             cfg,
             anchor,
             lanes,
+            signals,
             crossings,
             vehicles: Vec::new(),
             rng,
@@ -1072,11 +1823,63 @@ impl TrafficSimEngine {
         let overtake_offset = lane_width * self.cfg.overtake_side.lateral_sign();
         let min_gap = self.cfg.min_safe_gap_m;
         let yield_mult = (1.0 - self.cfg.front_yield_slowdown_pct / 100.0).clamp(0.4, 1.0);
+        let (active_signal_phase, _, active_signal_color, signal_all_red, _) =
+            evaluate_signal_phase_at_time(&self.cfg, self.sim_time);
 
         for i in 0..self.vehicles.len() {
             let cur = &snap[i];
             let lane = &self.lanes[cur.lane_idx];
             let sample = lane.sample(cur.s);
+
+            // Evaluate upcoming traffic lights on this lane (if any)
+            let cur_front_s = cur.s + 0.5 * cur.length_m;
+            let mut active_red_stop_front_s: Option<f64> = None;
+            let mut near_signal_no_overtake = false;
+            let mut signal_forces_return = false;
+            for sig in &self.signals {
+                if sig.lane_idx != cur.lane_idx {
+                    continue;
+                }
+                let stop_front_s = (sig.stop_s_m - 0.6).max(1.5);
+                let dist_to_stop = stop_front_s - cur_front_s;
+                let sig_color = if !signal_all_red && active_signal_phase == Some(sig.phase_idx) {
+                    active_signal_color
+                } else {
+                    TrafficLightColor::Red
+                };
+                // Configurable No-Overtake Zone near traffic light stop line (0 m disables completely)
+                let zone_m = self.cfg.signal_no_overtake_zone_m.clamp(0.0, 1000.0);
+                if zone_m > 0.01 {
+                    let no_ot_ahead = match sig_color {
+                        TrafficLightColor::Green => (zone_m * 0.55).max(8.0).min(zone_m),
+                        TrafficLightColor::Yellow | TrafficLightColor::Red => zone_m,
+                    };
+                    let no_ot_past = 10.0_f64.min(zone_m * 0.5);
+                    if dist_to_stop > -no_ot_past && dist_to_stop < no_ot_ahead {
+                        near_signal_no_overtake = true;
+                    }
+                }
+                let must_stop = match sig_color {
+                    TrafficLightColor::Green => false,
+                    TrafficLightColor::Red => dist_to_stop > -0.35,
+                    TrafficLightColor::Yellow => {
+                        let safe_stop_dist = (cur.speed * cur.speed) / (2.0 * 4.8) + 1.5;
+                        dist_to_stop > safe_stop_dist && dist_to_stop < 45.0
+                    }
+                };
+                if must_stop {
+                    if zone_m > 0.01 {
+                        let force_ret_dist = (zone_m * 0.75).max(12.0).min(zone_m);
+                        if dist_to_stop < force_ret_dist {
+                            signal_forces_return = true;
+                        }
+                    }
+                    active_red_stop_front_s = Some(match active_red_stop_front_s {
+                        Some(prev) => prev.min(stop_front_s),
+                        None => stop_front_s,
+                    });
+                }
+            }
 
             // Find closest vehicle ahead on the SAME lane occupying the main lane (or same lateral band)
             let mut front_in_lane: Option<&SimVehicle> = None;
@@ -1115,7 +1918,8 @@ impl TrafficSimEngine {
             match cur.state {
                 TrafficBehaviorState::Cruising
                 | TrafficBehaviorState::Following
-                | TrafficBehaviorState::YieldingCrossing => {
+                | TrafficBehaviorState::YieldingCrossing
+                | TrafficBehaviorState::WaitingSignal => {
                     desired_lat = 0.0;
                     next_target_id = None;
                     next_overtake_timer = 0.0;
@@ -1124,12 +1928,15 @@ impl TrafficSimEngine {
                         let follow_trigger = (min_gap + cur.speed * 1.45).max(min_gap + 6.0);
                         if front_gap < follow_trigger {
                             next_state = TrafficBehaviorState::Following;
-                            // Evaluate whether overtaking is desirable & safe
+                            // Evaluate whether overtaking is desirable & safe (blocked in signal no-overtake zones!)
                             let wants_overtake = self.cfg.allow_overtaking
+                                && !near_signal_no_overtake
                                 && !cur.being_overtaken
                                 && cur.desired_speed >= front.speed + 1.4
                                 && front.state != TrafficBehaviorState::Overtaking
                                 && front.state != TrafficBehaviorState::Returning
+                                && front.state != TrafficBehaviorState::WaitingSignal
+                                && front.speed > 1.5
                                 && front_gap < follow_trigger * 0.95
                                 && front_gap > 1.0;
 
@@ -1222,6 +2029,7 @@ impl TrafficSimEngine {
                                 || remaining_lane < 14.0
                                 || next_overtake_timer > 11.0
                                 || (oncoming_danger && not_yet_alongside)
+                                || (signal_forces_return && not_yet_alongside)
                             {
                                 next_state = TrafficBehaviorState::Returning;
                                 next_target_id = None;
@@ -1236,10 +2044,22 @@ impl TrafficSimEngine {
                     }
                 }
                 TrafficBehaviorState::Returning => {
-                    desired_lat = 0.0;
                     next_target_id = None;
-                    if cur.lateral_offset.abs() < 0.12 {
-                        next_state = TrafficBehaviorState::Cruising;
+                    // Never slide sideways into a vehicle occupying the main lane beside us!
+                    let side_occupied = snap.iter().any(|other| {
+                        other.id != cur.id
+                            && other.lane_idx == cur.lane_idx
+                            && other.lateral_offset.abs() < lane_width * 0.55
+                            && (other.s - cur.s).abs()
+                                < 0.5 * (other.length_m + cur.length_m) + 1.2
+                    });
+                    if side_occupied && cur.lateral_offset.abs() > lane_width * 0.35 {
+                        desired_lat = cur.lateral_offset;
+                    } else {
+                        desired_lat = 0.0;
+                        if cur.lateral_offset.abs() < 0.12 {
+                            next_state = TrafficBehaviorState::Cruising;
+                        }
                     }
                 }
             }
@@ -1248,7 +2068,8 @@ impl TrafficSimEngine {
             let active_blocker = if matches!(
                 next_state,
                 TrafficBehaviorState::Overtaking
-            ) {
+            ) || cur.lateral_offset.abs() > lane_width * 0.45
+            {
                 front_in_overtake_band.map(|f| (f, overtake_band_gap))
             } else {
                 front_in_lane.map(|f| (f, front_gap))
@@ -1266,6 +2087,23 @@ impl TrafficSimEngine {
                 }
             }
 
+            // 3b. Traffic Light (APILL) stop-line braking & queue holding
+            if let Some(stop_front_s) = active_red_stop_front_s {
+                let dist_to_stop = stop_front_s - cur_front_s;
+                let brake_horizon = ((cur.speed * cur.speed) / (2.0 * 3.6) + 6.0).max(26.0);
+                if dist_to_stop < brake_horizon {
+                    if dist_to_stop <= 0.45 {
+                        target_speed = 0.0;
+                    } else {
+                        let v_stop = (2.0 * 3.4 * dist_to_stop).sqrt();
+                        target_speed = target_speed.min(v_stop);
+                    }
+                    if !matches!(next_state, TrafficBehaviorState::Overtaking) {
+                        next_state = TrafficBehaviorState::WaitingSignal;
+                    }
+                }
+            }
+
             // 4. Intersection crossing yield (when two lanes cross each other)
             if self.cfg.yield_at_intersections
                 && next_state != TrafficBehaviorState::Overtaking
@@ -1278,16 +2116,43 @@ impl TrafficSimEngine {
                     } else {
                         continue;
                     };
+
+                    // Check whether this intersection crossing is governed by Traffic Lights (APILL).
+                    let crossing_signalized = self.signals.iter().any(|sig| {
+                        (sig.lane_idx == cross.lane_a
+                            && sig.stop_s_m <= cross.s_a + 1.5
+                            && cross.s_a - sig.stop_s_m < 35.0)
+                            || (sig.lane_idx == cross.lane_b
+                                && sig.stop_s_m <= cross.s_b + 1.5
+                                && cross.s_b - sig.stop_s_m < 35.0)
+                    });
+
                     let dist_to_cross = my_cross_s - cur.s - cur.length_m * 0.5;
                     if dist_to_cross > 1.5 && dist_to_cross < 18.0 {
                         let cross_occupied = snap.iter().any(|other| {
                             if other.lane_idx != other_lane {
                                 return false;
                             }
-                            let other_dist = other_cross_s - other.s;
-                            // Occupied if already inside crossing box or closer to crossing than us
-                            (other_dist > -9.0 && other_dist < 10.0)
-                                || (other_dist > 0.0 && other_dist + 2.0 < dist_to_cross)
+                            let other_front_s = other.s + 0.5 * other.length_m;
+                            let other_rear_s = other.s - 0.5 * other.length_m;
+                            let other_front_dist = other_cross_s - other_front_s;
+
+                            if crossing_signalized {
+                                // At a signalized intersection, NEVER yield to a vehicle waiting
+                                // behind its red stop line! Only yield if `other` is ALREADY
+                                // physically inside the crossing conflict box and actively clearing.
+                                let inside_conflict_box = other_front_s > other_cross_s - 2.0
+                                    && other_rear_s < other_cross_s + 3.0;
+                                inside_conflict_box && other.speed > 0.4
+                            } else {
+                                // Un-signalized crossing: ignore vehicles already halted well before crossing
+                                if other.speed < 0.3 && other_front_dist > 2.5 {
+                                    return false;
+                                }
+                                let other_dist = other_cross_s - other.s;
+                                (other_dist > -9.0 && other_dist < 10.0)
+                                    || (other_dist > 0.0 && other_dist + 2.0 < dist_to_cross)
+                            }
                         });
                         if cross_occupied {
                             let ratio = ((dist_to_cross - 3.0) / 15.0).clamp(0.0, 1.0);
@@ -1316,6 +2181,13 @@ impl TrafficSimEngine {
                 let max_s = blocker.s - 0.5 * (blocker.length_m + cur.length_m) - 0.8;
                 if new_s > max_s {
                     new_s = max_s.max(cur.s);
+                }
+            }
+            // Hard stop-line clamp when held by an active Red/Yellow traffic signal
+            if let Some(stop_front_s) = active_red_stop_front_s {
+                let max_center_s = stop_front_s - 0.5 * cur.length_m;
+                if cur.s <= max_center_s + 0.15 && new_s > max_center_s {
+                    new_s = max_center_s.max(cur.s);
                 }
             }
 
@@ -1445,6 +2317,29 @@ impl TrafficSimEngine {
             }
         }
         false
+    }
+
+    /// Returns live signal phase telemetry + per-light visual states for `traffic_signal` UI & 3D rendering.
+    pub fn live_signal_status(&self) -> TrafficSignalLiveStatus {
+        let (active_phase_idx, active_phase_name, active_color, is_all_red, remaining_sec) =
+            evaluate_signal_phase_at_time(&self.cfg, self.sim_time);
+        let light_states =
+            resolve_traffic_light_visual_poses(&self.cfg, self.anchor, self.sim_time);
+        let stopped_vehicles = self
+            .vehicles
+            .iter()
+            .filter(|v| v.speed < 0.6 || v.state == TrafficBehaviorState::WaitingSignal)
+            .count();
+        TrafficSignalLiveStatus {
+            active_phase_idx,
+            active_phase_name,
+            active_color,
+            is_all_red,
+            remaining_sec,
+            total_vehicles: self.vehicles.len(),
+            stopped_vehicles,
+            light_states,
+        }
     }
 
     /// Returns world-space poses for all currently active vehicles (for rendering via pooled entities).
@@ -1760,6 +2655,254 @@ mod tests {
         assert!(
             overtook_after_clear,
             "fast vehicle should overtake once oncoming traffic has passed"
+        );
+    }
+
+    #[test]
+    fn traffic_signal_stops_vehicles_on_red_and_releases_on_green() {
+        let anchor = test_anchor();
+        let lane_ew = straight_lane_local(anchor, "Barat -> Timur", -120.0, 0.0, 120.0, 0.0);
+        let lane_ns = straight_lane_local(anchor, "Utara -> Selatan", 0.0, -120.0, 0.0, 120.0);
+
+        let light_ew = build_traffic_light_on_lane(
+            &lane_ew,
+            anchor,
+            105.0,
+            0, // Phase 0: Green first (0..8s), Yellow (8..10s), All-Red (10..11s)
+            "Lampu EW",
+            3.6,
+            OvertakeSide::Right,
+        )
+        .expect("light ew");
+        let light_ns = build_traffic_light_on_lane(
+            &lane_ns,
+            anchor,
+            105.0,
+            1, // Phase 1: Red during 0..11s, then Green (11..19s)
+            "Lampu NS",
+            3.6,
+            OvertakeSide::Right,
+        )
+        .expect("light ns");
+
+        let cfg = TrafficAnimConfig {
+            lanes: vec![lane_ew, lane_ns],
+            vehicle_pool: sample_pool(),
+            max_vehicles_per_lane: 4,
+            max_total_vehicles: 8,
+            traffic_lights: vec![light_ew, light_ns],
+            signal_phases: vec![
+                TrafficSignalPhase {
+                    name: "Fase 1".into(),
+                    green_sec: 8.0,
+                    yellow_sec: 2.0,
+                    all_red_sec: 1.0,
+                },
+                TrafficSignalPhase {
+                    name: "Fase 2".into(),
+                    green_sec: 8.0,
+                    yellow_sec: 2.0,
+                    all_red_sec: 1.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let mut engine = TrafficSimEngine::new(&cfg, anchor);
+        engine.vehicles.clear();
+        for l in &mut engine.lanes {
+            l.next_spawn_timer = 999.0;
+        }
+        // Place one car on lane_ns (Phase 1 = RED initially) at s=70 approaching stop line s=105
+        let smp = engine.lanes[1].sample(70.0);
+        engine.vehicles.push(SimVehicle {
+            id: 10,
+            lane_idx: 1,
+            pool_idx: 0,
+            s: 70.0,
+            lateral_offset: 0.0,
+            lateral_vel: 0.0,
+            speed: 12.0,
+            desired_speed: 12.0,
+            length_m: 4.5,
+            state: TrafficBehaviorState::Cruising,
+            overtake_target_id: None,
+            overtake_timer: 0.0,
+            being_overtaken: false,
+            world_x: smp.x,
+            world_y: 0.0,
+            world_z: smp.z,
+            dir_x: smp.fx,
+            dir_z: smp.fz,
+            rot_y_deg: 0.0,
+        });
+
+        // Advance to t = 7.0s (still RED for Phase 1)
+        engine.advance_to(7.0);
+        let car_red = engine.vehicles.iter().find(|v| v.id == 10).expect("car still on lane");
+        assert!(
+            car_red.s + 0.5 * car_red.length_m <= 105.0,
+            "vehicle must stop behind stop line on red (front_s={})",
+            car_red.s + 0.5 * car_red.length_m
+        );
+        assert!(
+            car_red.speed < 0.5,
+            "vehicle should come to a halt at red light (speed={})",
+            car_red.speed
+        );
+
+        // Check phase transitions: t=9.0 -> Phase 0 Yellow, t=10.5 -> All-Red, t=12.0 -> Phase 1 Green
+        let (_, _, c9, ar9, _) = evaluate_signal_phase_at_time(&cfg, 9.0);
+        assert_eq!(c9, TrafficLightColor::Yellow);
+        assert!(!ar9);
+        let (_, _, c105, ar105, _) = evaluate_signal_phase_at_time(&cfg, 10.5);
+        assert_eq!(c105, TrafficLightColor::Red);
+        assert!(ar105);
+
+        // Advance to t = 16.0s (Phase 1 has been GREEN since t=11s)
+        engine.advance_to(16.0);
+        let car_green = engine.vehicles.iter().find(|v| v.id == 10).expect("car still on lane");
+        assert!(
+            car_green.s > 115.0,
+            "vehicle should accelerate past stop line once green (s={})",
+            car_green.s
+        );
+        assert!(
+            car_green.speed > 8.0,
+            "vehicle should regain configured cruising speed on green (speed={})",
+            car_green.speed
+        );
+    }
+
+    #[test]
+    fn auto_place_intersection_groups_crossing_lanes_into_distinct_phases() {
+        let anchor = test_anchor();
+        let lane_ew = straight_lane_local(anchor, "Barat -> Timur", -120.0, 0.0, 120.0, 0.0);
+        let lane_we = build_reverse_lane(&lane_ew, 3.6, OvertakeSide::Right, "Timur -> Barat")
+            .expect("rev");
+        let lane_ns = straight_lane_local(anchor, "Utara -> Selatan", 0.0, -120.0, 0.0, 120.0);
+        let lane_sn = build_reverse_lane(&lane_ns, 3.6, OvertakeSide::Right, "Selatan -> Utara")
+            .expect("rev");
+        let mut cfg = TrafficAnimConfig {
+            lanes: vec![lane_ew, lane_we, lane_ns, lane_sn],
+            vehicle_pool: sample_pool(),
+            ..Default::default()
+        };
+        let added = auto_place_intersection_traffic_lights(&mut cfg, anchor);
+        assert_eq!(added, 4);
+        assert_eq!(cfg.signal_phases.len(), 2);
+        assert_eq!(cfg.traffic_lights[0].phase_idx, cfg.traffic_lights[1].phase_idx);
+        assert_eq!(cfg.traffic_lights[2].phase_idx, cfg.traffic_lights[3].phase_idx);
+        assert_ne!(cfg.traffic_lights[0].phase_idx, cfg.traffic_lights[2].phase_idx);
+    }
+
+    #[test]
+    fn signalized_crossing_never_deadlocks_against_red_waiting_vehicles() {
+        let anchor = test_anchor();
+        // Two perpendicular crossing lanes intersecting at (0, 0), s = 100 on both lanes.
+        let lane_ew = straight_lane_local(anchor, "Barat -> Timur", -100.0, 0.0, 100.0, 0.0);
+        let lane_ns = straight_lane_local(anchor, "Utara -> Selatan", 0.0, -100.0, 0.0, 100.0);
+
+        // Stop lines close to the crossing (6m before crossing = s=94), where the old yield check deadlocked!
+        let light_ew = build_traffic_light_on_lane(
+            &lane_ew,
+            anchor,
+            94.0,
+            0,
+            "Lampu EW",
+            3.6,
+            OvertakeSide::Right,
+        )
+        .expect("light ew");
+        let light_ns = build_traffic_light_on_lane(
+            &lane_ns,
+            anchor,
+            94.0,
+            1,
+            "Lampu NS",
+            3.6,
+            OvertakeSide::Right,
+        )
+        .expect("light ns");
+
+        let cfg = TrafficAnimConfig {
+            lanes: vec![lane_ew, lane_ns],
+            vehicle_pool: sample_pool(),
+            max_vehicles_per_lane: 4,
+            max_total_vehicles: 8,
+            yield_at_intersections: true,
+            traffic_lights: vec![light_ew, light_ns],
+            signal_phases: vec![
+                TrafficSignalPhase {
+                    name: "Fase 1".into(),
+                    green_sec: 8.0,
+                    yellow_sec: 2.0,
+                    all_red_sec: 1.0,
+                },
+                TrafficSignalPhase {
+                    name: "Fase 2".into(),
+                    green_sec: 8.0,
+                    yellow_sec: 2.0,
+                    all_red_sec: 1.0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let mut engine = TrafficSimEngine::new(&cfg, anchor);
+        engine.vehicles.clear();
+        for l in &mut engine.lanes {
+            l.next_spawn_timer = 999.0;
+        }
+        // Place one car stopped right at EW stop line (GREEN) AND one car stopped right at NS stop line (RED)
+        for (id, lane_idx, s) in [(1, 0, 91.0), (2, 1, 91.0)] {
+            let smp = engine.lanes[lane_idx].sample(s);
+            engine.vehicles.push(SimVehicle {
+                id,
+                lane_idx,
+                pool_idx: 0,
+                s,
+                lateral_offset: 0.0,
+                lateral_vel: 0.0,
+                speed: 0.0,
+                desired_speed: 12.0,
+                length_m: 4.5,
+                state: TrafficBehaviorState::WaitingSignal,
+                overtake_target_id: None,
+                overtake_timer: 0.0,
+                being_overtaken: false,
+                world_x: smp.x,
+                world_y: 0.0,
+                world_z: smp.z,
+                dir_x: smp.fx,
+                dir_z: smp.fz,
+                rot_y_deg: 0.0,
+            });
+        }
+
+        // Advance 5 seconds: EW (Phase 0 = GREEN) must drive cleanly across s=100 while NS stays behind s=94!
+        engine.advance_to(5.0);
+        let ew_car = engine.vehicles.iter().find(|v| v.id == 1).expect("ew car");
+        let ns_car = engine.vehicles.iter().find(|v| v.id == 2).expect("ns car");
+        assert!(
+            ew_car.s > 120.0,
+            "GREEN lane car must NOT deadlock against RED waiting car (ew.s={})",
+            ew_car.s
+        );
+        assert!(
+            ns_car.s + 0.5 * ns_car.length_m <= 94.0 && ns_car.speed < 0.2,
+            "RED lane car must stay stopped behind stop line (ns.s={}, speed={})",
+            ns_car.s,
+            ns_car.speed
+        );
+
+        // Advance to t=16.0s (Phase 1 = GREEN since t=11.0s): NS car must drive cleanly across s=100!
+        engine.advance_to(16.0);
+        let ns_car2 = engine.vehicles.iter().find(|v| v.id == 2).expect("ns car2");
+        assert!(
+            ns_car2.s > 120.0,
+            "Phase 2 car must accelerate cleanly through crossing on GREEN (ns.s={})",
+            ns_car2.s
         );
     }
 }

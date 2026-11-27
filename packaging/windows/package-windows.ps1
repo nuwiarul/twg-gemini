@@ -2,7 +2,9 @@
     [string]$ServerUrl = "https://twg.domain-anda.com",
     [string]$Version = "0.1.0",
     [switch]$SkipBuild,
-    [switch]$IncludeOfflineSeed
+    [switch]$IncludeOfflineSeed,
+    [string]$FfmpegBinDir = "",
+    [switch]$DownloadFfmpeg
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +35,56 @@ try {
     $IconSrc = Join-Path $RepoRoot "packaging\icons\twg-app.ico"
     if (Test-Path $IconSrc) {
         Copy-Item $IconSrc (Join-Path $StageDir "twg-app.ico")
+    }
+
+    # Bundle sidecar ffmpeg.exe & ffprobe.exe into bin/ so Videotron / video playback works offline without manual install
+    $StageBin = Join-Path $StageDir "bin"
+    $FfmpegSrc = ""
+    $FfprobeSrc = ""
+    if ($FfmpegBinDir -and (Test-Path (Join-Path $FfmpegBinDir "ffmpeg.exe"))) {
+        $FfmpegSrc = Join-Path $FfmpegBinDir "ffmpeg.exe"
+        $FfprobeSrc = Join-Path $FfmpegBinDir "ffprobe.exe"
+    } elseif (-not $DownloadFfmpeg) {
+        $ffCmd = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+        $fpCmd = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
+        if ($ffCmd -and $fpCmd) {
+            $FfmpegSrc = $ffCmd.Source
+            $FfprobeSrc = $fpCmd.Source
+        }
+    }
+    if ((-not $FfmpegSrc -or -not (Test-Path $FfmpegSrc)) -and ($DownloadFfmpeg -or $env:GITHUB_ACTIONS -eq "true")) {
+        $CacheDir = Join-Path $DistRoot "_ffmpeg_win_cache"
+        $CacheFfmpeg = Join-Path $CacheDir "ffmpeg.exe"
+        $CacheFfprobe = Join-Path $CacheDir "ffprobe.exe"
+        if (-not ((Test-Path $CacheFfmpeg) -and (Test-Path $CacheFfprobe))) {
+            Write-Host "==> Downloading FFmpeg essentials sidecar for Windows x64..." -ForegroundColor Cyan
+            New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+            $FfZip = Join-Path $CacheDir "ffmpeg-release-essentials.zip"
+            $FfExtract = Join-Path $CacheDir "extracted"
+            if (Test-Path $FfExtract) { Remove-Item -Recurse -Force $FfExtract }
+            Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $FfZip
+            Expand-Archive -Path $FfZip -DestinationPath $FfExtract -Force
+            $FoundFf = Get-ChildItem $FfExtract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+            $FoundFp = Get-ChildItem $FfExtract -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+            if ($FoundFf -and $FoundFp) {
+                Copy-Item $FoundFf.FullName $CacheFfmpeg -Force
+                Copy-Item $FoundFp.FullName $CacheFfprobe -Force
+            }
+            Remove-Item -Recurse -Force $FfExtract -ErrorAction SilentlyContinue
+            Remove-Item -Force $FfZip -ErrorAction SilentlyContinue
+        }
+        if ((Test-Path $CacheFfmpeg) -and (Test-Path $CacheFfprobe)) {
+            $FfmpegSrc = $CacheFfmpeg
+            $FfprobeSrc = $CacheFfprobe
+        }
+    }
+    if ($FfmpegSrc -and $FfprobeSrc -and (Test-Path $FfmpegSrc) -and (Test-Path $FfprobeSrc)) {
+        Write-Host "==> Bundling FFmpeg sidecar into bin/..." -ForegroundColor Cyan
+        New-Item -ItemType Directory -Force -Path $StageBin | Out-Null
+        Copy-Item $FfmpegSrc (Join-Path $StageBin "ffmpeg.exe") -Force
+        Copy-Item $FfprobeSrc (Join-Path $StageBin "ffprobe.exe") -Force
+    } else {
+        Write-Host "==> FFmpeg sidecar not bundled (pass -DownloadFfmpeg or -FfmpegBinDir to embed)." -ForegroundColor Yellow
     }
 
     # Launcher batch script that configures writable per-user offline cache + server URL

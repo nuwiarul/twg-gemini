@@ -989,6 +989,8 @@ pub enum ToolMode {
     DrawTrafficLane,
     DrawTrafficQueueLane,
     DrawTrafficDiversionLane,
+    PlaceTrafficLight,
+    PlaceBillboard,
     PickRouteMarker,
     PickShootMarker,
     PickPointerMarker,
@@ -1012,6 +1014,8 @@ impl ToolMode {
             Self::DrawTrafficLane => "Draw Traffic",
             Self::DrawTrafficQueueLane => "Draw Urai Simpang",
             Self::DrawTrafficDiversionLane => "Draw Alih Arus",
+            Self::PlaceTrafficLight => "Pasang Lampu Merah",
+            Self::PlaceBillboard => "Pasang Billboard",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
             Self::PickPointerMarker => "Pilih Target Panah",
@@ -1069,13 +1073,13 @@ impl AnimCategory {
             Self::SpawnHide => "Spawn & Hide",
             Self::Group => "Grup",
             Self::Other => "Lainnya",
-            Self::Audio => "Audio",
+            Self::Audio => "Media",
         }
     }
 
     pub fn from_anim_type(anim_type: &str) -> Self {
         match anim_type {
-            "play_sound" => Self::Audio,
+            "play_sound" | "billboard" => Self::Audio,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1462,9 +1466,11 @@ impl PlaybackState {
         for a in anims {
             let playable = if twg_shared::audio_anim::is_audio_anim(a) {
                 twg_shared::audio_anim::parse_audio_anim_config(a).asset_id.is_some()
+            } else if twg_shared::billboard_anim::is_billboard_anim(a) {
+                twg_shared::billboard_anim::parse_billboard_anim_config(a).is_playable_video()
             } else if twg_shared::particle_anim::is_particle_anim(a) {
                 !a.geom.is_empty()
-            } else if twg_shared::traffic_anim::is_traffic_anim(a) {
+            } else if twg_shared::traffic_anim::is_traffic_flow_or_signal(a) {
                 twg_shared::traffic_anim::parse_traffic_anim_config(a).has_playable_setup()
             } else if twg_shared::traffic_queue::is_traffic_queue_anim(a) {
                 twg_shared::traffic_queue::parse_traffic_queue_config(a).has_playable_setup()
@@ -1681,7 +1687,23 @@ pub struct AppState {
     pub new_route_speed: f64,
     pub new_route_loop: bool,
     pub drawing_traffic_lane_for_anim_id: Option<Uuid>,
+    /// When `true` and `drawing_traffic_lane_for_anim_id` is `None`, finishing `DrawTrafficLane`
+    /// creates a `Lalu Lintas Lampu Merah` (`traffic_signal`) animation instead of `traffic_flow`.
+    pub drawing_traffic_is_signal: bool,
     pub new_traffic_name: String,
+    pub new_traffic_signal_name: String,
+    /// Target animation id while `ToolMode::PlaceTrafficLight` is active.
+    pub placing_traffic_light_for_anim_id: Option<Uuid>,
+    /// Default phase index assigned to newly placed traffic lights.
+    pub placing_traffic_light_phase_idx: usize,
+    /// Currently selected 3D Traffic Light `(anim_id, light_id)` for Move/Rotate/Scale Gizmo editing.
+    pub selected_traffic_light: Option<(Uuid, Uuid)>,
+    /// When `true`, dragging a 3D Traffic Light with the Move Gizmo also updates its stop-line `stop_s_m`
+    /// by projecting onto the bound lane.
+    pub traffic_light_move_sync_stop_line: bool,
+    /// Live runtime status snapshots for active `traffic_signal` animations.
+    pub traffic_signal_live_status:
+        HashMap<Uuid, twg_shared::traffic_anim::TrafficSignalLiveStatus>,
     /// Target for `ToolMode::DrawTrafficQueueLane`:
     /// - `None`: create a new `Antrean & Urai Simpang` animation (drawing first `Jalur Antre`)
     /// - `Some((anim_id, None))`: add a new `Jalur Antre` to existing `anim_id`
@@ -1716,6 +1738,8 @@ pub struct AppState {
     /// Measured unscaled local 3D mesh extents `[width_x, height_y, length_z]` per `model_path`
     /// so preview spacing & length hints automatically match each GLB's true physical size.
     pub traffic_model_unit_dims: HashMap<String, [f32; 3]>,
+    pub new_billboard_name: String,
+    pub billboard_status: HashMap<Uuid, String>,
     pub new_shoot_kind: twg_shared::shoot_anim::ShootAnimKind,
     pub new_shoot_name: String,
     pub shoot_preview_reset_nonce: u64,
@@ -1935,7 +1959,14 @@ impl AppState {
             new_route_speed: 5.0,
             new_route_loop: false,
             drawing_traffic_lane_for_anim_id: None,
+            drawing_traffic_is_signal: false,
             new_traffic_name: "Traffic Lalu Lintas 1".to_string(),
+            new_traffic_signal_name: "Lampu Merah 1".to_string(),
+            placing_traffic_light_for_anim_id: None,
+            placing_traffic_light_phase_idx: 0,
+            selected_traffic_light: None,
+            traffic_light_move_sync_stop_line: true,
+            traffic_signal_live_status: HashMap::new(),
             traffic_pool_search: String::new(),
             traffic_pool_category_filter: None,
             traffic_reverse_offset_m: 4.0,
@@ -1944,6 +1975,8 @@ impl AppState {
             traffic_preview_layout: TrafficPreviewLayout::FrontBack,
             traffic_preview_gap_m: 4.0,
             traffic_model_unit_dims: HashMap::new(),
+            new_billboard_name: "Billboard 1".to_string(),
+            billboard_status: HashMap::new(),
             drawing_traffic_queue_target: None,
             drawing_traffic_queue_is_gridlock: false,
             drawing_traffic_queue_is_manual: false,
@@ -2197,8 +2230,12 @@ impl AppState {
                 .iter()
                 .find(|a| a.id == id)
                 .map(|a| {
-                    let kind = if twg_shared::shoot_anim::is_shoot_anim(a) {
+                    let kind = if twg_shared::billboard_anim::is_billboard_anim(a) {
+                        "Billboard / Videotron"
+                    } else if twg_shared::shoot_anim::is_shoot_anim(a) {
                         "Shoot Animation"
+                    } else if twg_shared::traffic_anim::is_traffic_signal_anim(a) {
+                        "Lalu Lintas Lampu Merah"
                     } else if twg_shared::traffic_anim::is_traffic_anim(a) {
                         "Simulasi Traffic"
                     } else if twg_shared::traffic_queue::is_traffic_gridlock_anim(a) {

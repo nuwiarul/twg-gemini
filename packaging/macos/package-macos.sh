@@ -71,6 +71,22 @@ install -m 0755 "$FINAL_BIN" "$APP_BUNDLE/Contents/MacOS/twg-app-bin"
 sed "s|__SERVER_URL__|${SERVER_URL}|g" "$SCRIPT_DIR/twg-app-launcher.sh" > "$APP_BUNDLE/Contents/MacOS/twg-app"
 chmod +x "$APP_BUNDLE/Contents/MacOS/twg-app"
 
+# Bundle sidecar ffmpeg & ffprobe inside Contents/Resources/bin/ when available (auto-discovered by twg-app)
+FFMPEG_SRC="${FFMPEG_BIN_DIR:+${FFMPEG_BIN_DIR}/ffmpeg}"
+FFPROBE_SRC="${FFMPEG_BIN_DIR:+${FFMPEG_BIN_DIR}/ffprobe}"
+if [[ -z "$FFMPEG_SRC" ]] && command -v ffmpeg >/dev/null 2>&1; then
+  FFMPEG_SRC="$(command -v ffmpeg)"
+fi
+if [[ -z "$FFPROBE_SRC" ]] && command -v ffprobe >/dev/null 2>&1; then
+  FFPROBE_SRC="$(command -v ffprobe)"
+fi
+if [[ -n "$FFMPEG_SRC" && -f "$FFMPEG_SRC" && -n "$FFPROBE_SRC" && -f "$FFPROBE_SRC" ]]; then
+  echo "==> Bundling FFmpeg sidecar into $APP_BUNDLE/Contents/Resources/bin..."
+  mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
+  install -m 0755 "$FFMPEG_SRC" "$APP_BUNDLE/Contents/Resources/bin/ffmpeg"
+  install -m 0755 "$FFPROBE_SRC" "$APP_BUNDLE/Contents/Resources/bin/ffprobe"
+fi
+
 sed "s|__VERSION__|${VERSION}|g" "$SCRIPT_DIR/Info.plist" > "$APP_BUNDLE/Contents/Info.plist"
 
 # Bundle macOS app icon (.icns) — regenerate natively with iconutil when available, else use pre-built .icns

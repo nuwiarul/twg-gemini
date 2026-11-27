@@ -1,6 +1,7 @@
 pub mod app_icon;
 mod assets_page;
 mod audio_anim;
+mod billboard_anim;
 mod bottom_bar;
 mod formation_pad;
 mod layar_besar_page;

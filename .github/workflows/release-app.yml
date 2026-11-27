@@ -72,12 +72,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build & package twg-app (Windows x64 ZIP + Inno Setup)
+      - name: Build & package twg-app (Windows x64 ZIP + Inno Setup + FFmpeg sidecar)
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File packaging/windows/package-windows.ps1 `
             -ServerUrl "${{ needs.meta.outputs.server_url }}" `
-            -Version "${{ needs.meta.outputs.version }}"
+            -Version "${{ needs.meta.outputs.version }}" `
+            -DownloadFfmpeg
       - uses: actions/upload-artifact@v4
         with:
           name: twg-app-windows-x64
@@ -92,14 +93,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install Bevy & rfd system dependencies
+      - name: Install Bevy, rfd & FFmpeg dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config \
             libx11-dev libasound2-dev libudev-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
-            libwayland-dev libvulkan-dev libgtk-3-dev
+            libwayland-dev libvulkan-dev libgtk-3-dev \
+            ffmpeg
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
       - name: Build & package twg-app (Linux tar.gz + deb)
@@ -123,7 +125,17 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare static FFmpeg sidecar (macOS)
+        run: |
+          mkdir -p /tmp/twg-ffmpeg-bin
+          curl -fSL "https://evermeet.cx/ffmpeg/getrelease/zip" -o /tmp/ffmpeg.zip
+          curl -fSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
+          unzip -o /tmp/ffmpeg.zip -d /tmp/twg-ffmpeg-bin
+          unzip -o /tmp/ffprobe.zip -d /tmp/twg-ffmpeg-bin
+          chmod +x /tmp/twg-ffmpeg-bin/ffmpeg /tmp/twg-ffmpeg-bin/ffprobe
       - name: Build & package twg-app (macOS Universal .app + .dmg)
+        env:
+          FFMPEG_BIN_DIR: /tmp/twg-ffmpeg-bin
         run: |
           bash packaging/macos/package-macos.sh \
             --arch universal \

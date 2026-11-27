@@ -3,9 +3,15 @@ use std::f32::consts::TAU;
 use bevy::prelude::*;
 use bevy_egui::egui;
 use twg_shared::{
+    billboard_anim::{
+        is_billboard_anim, parse_billboard_anim_config, write_billboard_anim_config,
+    },
     models::{Anim, Marker},
     particle_anim::{is_particle_anim, particle_anim_position, set_particle_anim_position},
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
+    traffic_anim::{
+        is_traffic_flow_or_signal, is_traffic_signal_anim, parse_traffic_anim_config,
+        project_point_onto_lane, write_traffic_anim_config,
+    },
     traffic_diversion::{
         is_traffic_diversion_anim, parse_traffic_diversion_config, write_traffic_diversion_config,
     },
@@ -17,8 +23,13 @@ use uuid::Uuid;
 
 use crate::{
     scene::{
-        play_rts::PlayRtsState, playback::PlaybackOverrides,
-        traffic::{measured_vehicle_scaled_dims, resolve_active_traffic_scale_gizmo_pose},
+        billboard::{billboard_quat, billboard_world_origin},
+        play_rts::PlayRtsState,
+        playback::PlaybackOverrides,
+        traffic::{
+            measured_vehicle_scaled_dims, resolve_active_traffic_light_gizmo_pose,
+            resolve_active_traffic_scale_gizmo_pose,
+        },
     },
     state::{AppScreen, AppState, PlaybackState, SelectedEntity, ToolMode},
 };
@@ -63,8 +74,10 @@ impl GizmoHandle {
 pub struct ActiveGizmoDrag {
     pub marker_id: Uuid,
     pub is_particle_anim: bool,
+    pub is_billboard_anim: bool,
     pub is_text_marker: bool,
     pub traffic_scale_preview: Option<(Uuid, usize)>,
+    pub traffic_light_target: Option<(Uuid, Uuid)>,
     pub mode: GizmoMode,
     pub handle: GizmoHandle,
     pub start_origin: Vec3,
@@ -197,9 +210,9 @@ pub fn intersect_ray_plane(ray: Ray3d, plane_origin: Vec3, plane_normal: Vec3) -
 
 pub fn smooth_scale_factor(delta_px: f32, pixels_per_2x: f32) -> f32 {
     if delta_px >= 0.0 {
-        (1.0 + delta_px / pixels_per_2x).clamp(0.05, 25.0)
+        (1.0 + delta_px / pixels_per_2x).clamp(0.01, 25.0)
     } else {
-        (1.0 / (1.0 - delta_px / pixels_per_2x)).clamp(0.04, 1.0)
+        (1.0 / (1.0 - delta_px / pixels_per_2x)).clamp(0.005, 1.0)
     }
 }
 
@@ -367,8 +380,10 @@ pub fn begin_gizmo_drag(
     Some(ActiveGizmoDrag {
         marker_id: marker.id,
         is_particle_anim: false,
+        is_billboard_anim: false,
         is_text_marker: false,
         traffic_scale_preview: None,
+        traffic_light_target: None,
         mode,
         handle,
         start_origin,
@@ -423,8 +438,10 @@ pub fn begin_move_gizmo_drag_at_origin(
     Some(ActiveGizmoDrag {
         marker_id,
         is_particle_anim: false,
+        is_billboard_anim: false,
         is_text_marker: false,
         traffic_scale_preview: None,
+        traffic_light_target: None,
         mode: GizmoMode::Move,
         handle,
         start_origin,
@@ -552,8 +569,10 @@ pub fn begin_particle_move_drag(
     Some(ActiveGizmoDrag {
         marker_id: anim.id,
         is_particle_anim: true,
+        is_billboard_anim: false,
         is_text_marker: false,
         traffic_scale_preview: None,
+        traffic_light_target: None,
         mode: GizmoMode::Move,
         handle,
         start_origin,
@@ -598,8 +617,10 @@ pub fn begin_traffic_preview_scale_drag(
     Some(ActiveGizmoDrag {
         marker_id: sp.anim_id,
         is_particle_anim: false,
+        is_billboard_anim: false,
         is_text_marker: false,
         traffic_scale_preview: Some((sp.anim_id, sp.pool_idx)),
+        traffic_light_target: None,
         mode: GizmoMode::Scale,
         handle,
         start_origin,
@@ -620,6 +641,150 @@ pub fn begin_traffic_preview_scale_drag(
     })
 }
 
+/// Starts a full 3D Move / Rotate / Scale Gizmo drag on the currently selected Traffic Light (APILL).
+pub fn begin_traffic_light_gizmo_drag(
+    state: &AppState,
+    mode: GizmoMode,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let tl = resolve_active_traffic_light_gizmo_pose(state)?;
+    let start_origin = tl.world_pos;
+    let start_quat = Quat::from_euler(
+        EulerRot::YXZ,
+        (tl.rot_deg[1] as f32).to_radians(),
+        (tl.rot_deg[0] as f32).to_radians(),
+        (tl.rot_deg[2] as f32).to_radians(),
+    );
+    let start_scale = Vec3::new(tl.scale[0] as f32, tl.scale[1] as f32, tl.scale[2] as f32);
+    let gizmo_radius_world =
+        compute_gizmo_world_radius(camera, cam_gtf, start_origin, GIZMO_SCREEN_RADIUS_PX);
+    let (ax, ay, az) = gizmo_axes(mode, start_quat);
+    let axis_world = match handle {
+        GizmoHandle::AxisX => ax,
+        GizmoHandle::AxisY => ay,
+        GizmoHandle::AxisZ => az,
+        GizmoHandle::Free => Vec3::Y,
+    };
+
+    let ray = camera.viewport_to_world(cam_gtf, cursor_px).ok()?;
+    let start_axis_param = closest_axis_param(ray, start_origin, axis_world).unwrap_or(0.0);
+    let free_plane_offset = if mode == GizmoMode::Move && handle == GizmoHandle::Free {
+        let hit = intersect_ray_plane(ray, start_origin, Vec3::Y).or_else(|| {
+            let cam_fwd = cam_gtf.forward().as_vec3();
+            intersect_ray_plane(ray, start_origin, -cam_fwd)
+                .map(|p| Vec3::new(p.x, start_origin.y, p.z))
+        });
+        hit.map(|h| start_origin - h).unwrap_or(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    };
+    let rot_start_dir = if mode == GizmoMode::Rotate && handle != GizmoHandle::Free {
+        intersect_ray_plane(ray, start_origin, axis_world)
+            .and_then(|h| (h - start_origin).try_normalize())
+    } else {
+        None
+    };
+
+    Some(ActiveGizmoDrag {
+        marker_id: tl.anim_id,
+        is_particle_anim: false,
+        is_billboard_anim: false,
+        is_text_marker: false,
+        traffic_scale_preview: None,
+        traffic_light_target: Some((tl.anim_id, tl.light_id)),
+        mode,
+        handle,
+        start_origin,
+        start_quat,
+        current_quat: start_quat,
+        start_scale,
+        start_cursor_px: cursor_px,
+        prev_cursor_px: cursor_px,
+        start_axis_param,
+        free_plane_offset,
+        axis_world,
+        rot_start_dir,
+        prev_rot_vec: rot_start_dir,
+        accumulated_angle_rad: 0.0,
+        gizmo_radius_world,
+        visual_scale_factor: 1.0,
+        moved: false,
+    })
+}
+
+/// Starts a full 3D Move / Rotate / Scale Gizmo drag on a selected 3D Billboard / Videotron.
+pub fn begin_billboard_gizmo_drag(
+    anim: &Anim,
+    mode: GizmoMode,
+    handle: GizmoHandle,
+    cursor_px: Vec2,
+    state: &AppState,
+    camera: &Camera,
+    cam_gtf: &GlobalTransform,
+) -> Option<ActiveGizmoDrag> {
+    let cfg = parse_billboard_anim_config(anim);
+    let start_origin = billboard_world_origin(state, anim);
+    let start_quat = billboard_quat(&cfg);
+    let start_scale = Vec3::new(cfg.scale[0] as f32, cfg.scale[1] as f32, cfg.scale[2] as f32);
+    let gizmo_radius_world =
+        compute_gizmo_world_radius(camera, cam_gtf, start_origin, GIZMO_SCREEN_RADIUS_PX);
+    let (ax, ay, az) = gizmo_axes(mode, start_quat);
+    let axis_world = match handle {
+        GizmoHandle::AxisX => ax,
+        GizmoHandle::AxisY => ay,
+        GizmoHandle::AxisZ => az,
+        GizmoHandle::Free => Vec3::Y,
+    };
+
+    let ray = camera.viewport_to_world(cam_gtf, cursor_px).ok()?;
+    let start_axis_param = closest_axis_param(ray, start_origin, axis_world).unwrap_or(0.0);
+    let free_plane_offset = if mode == GizmoMode::Move && handle == GizmoHandle::Free {
+        let hit = intersect_ray_plane(ray, start_origin, Vec3::Y).or_else(|| {
+            let cam_fwd = cam_gtf.forward().as_vec3();
+            intersect_ray_plane(ray, start_origin, -cam_fwd)
+                .map(|p| Vec3::new(p.x, start_origin.y, p.z))
+        });
+        hit.map(|h| start_origin - h).unwrap_or(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    };
+    let rot_start_dir = if mode == GizmoMode::Rotate && handle != GizmoHandle::Free {
+        intersect_ray_plane(ray, start_origin, axis_world)
+            .and_then(|h| (h - start_origin).try_normalize())
+    } else {
+        None
+    };
+
+    Some(ActiveGizmoDrag {
+        marker_id: anim.id,
+        is_particle_anim: false,
+        is_billboard_anim: true,
+        is_text_marker: false,
+        traffic_scale_preview: None,
+        traffic_light_target: None,
+        mode,
+        handle,
+        start_origin,
+        start_quat,
+        current_quat: start_quat,
+        start_scale,
+        start_cursor_px: cursor_px,
+        prev_cursor_px: cursor_px,
+        start_axis_param,
+        free_plane_offset,
+        axis_world,
+        rot_start_dir,
+        prev_rot_vec: rot_start_dir,
+        accumulated_angle_rad: 0.0,
+        gizmo_radius_world,
+        visual_scale_factor: 1.0,
+        moved: false,
+    })
+}
+
 pub fn update_gizmo_drag(
     drag: &mut ActiveGizmoDrag,
     cursor_px: Vec2,
@@ -627,6 +792,363 @@ pub fn update_gizmo_drag(
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> bool {
+    // Dedicated Move / Rotate / Scale Gizmo branch for a selected 3D Billboard / Videotron
+    if drag.is_billboard_anim {
+        let Ok(ray) = camera.viewport_to_world(cam_gtf, cursor_px) else {
+            return false;
+        };
+        let delta_px = cursor_px - drag.prev_cursor_px;
+        let total_px = cursor_px - drag.start_cursor_px;
+        if !drag.moved && total_px.length_squared() < 2.25 {
+            drag.prev_cursor_px = cursor_px;
+            return false;
+        }
+        let cam_fwd = cam_gtf.forward().as_vec3();
+        let anchor = state.geo_anchor;
+        let anim_id = drag.marker_id;
+        let mut changed = false;
+
+        if let Some(anim) = state
+            .anims
+            .iter_mut()
+            .find(|a| a.id == anim_id && is_billboard_anim(a))
+        {
+            let mut cfg = parse_billboard_anim_config(anim);
+            match (drag.mode, drag.handle) {
+                (GizmoMode::Move, _) => {
+                    if let Some(new_pos) =
+                        compute_move_gizmo_drag_world_pos(drag, cursor_px, camera, cam_gtf)
+                    {
+                        let (lng, lat, alt) = anchor.local_to_lng_lat_alt([
+                            new_pos.x,
+                            new_pos.y.clamp(-100.0, 20_000.0),
+                            new_pos.z,
+                        ]);
+                        cfg.pos_lnglat = [lng, lat, round_clean(alt, 2)];
+                        changed = true;
+                    }
+                }
+                (
+                    GizmoMode::Rotate,
+                    GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ,
+                ) => {
+                    let facing = drag.axis_world.dot(cam_fwd).abs();
+                    let mut stepped = false;
+                    if facing > 0.22
+                        && let Some(hit) =
+                            intersect_ray_plane(ray, drag.start_origin, drag.axis_world)
+                        && let Some(curr_vec) = (hit - drag.start_origin).try_normalize()
+                    {
+                        if let Some(prev_vec) = drag.prev_rot_vec {
+                            let sin_a = prev_vec.cross(curr_vec).dot(drag.axis_world);
+                            let cos_a = prev_vec.dot(curr_vec);
+                            let step = sin_a.atan2(cos_a);
+                            if step.is_finite() {
+                                drag.accumulated_angle_rad += step;
+                                stepped = true;
+                            }
+                        }
+                        drag.prev_rot_vec = Some(curr_vec);
+                    }
+                    if !stepped && delta_px.length_squared() > 0.0 {
+                        let tangent = if let (Ok(o2), Ok(t2)) = (
+                            camera.world_to_viewport(cam_gtf, drag.start_origin),
+                            camera.world_to_viewport(
+                                cam_gtf,
+                                drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                            ),
+                        ) {
+                            let s_axis = (t2 - o2).normalize_or(Vec2::Y);
+                            Vec2::new(-s_axis.y, s_axis.x)
+                        } else {
+                            Vec2::X
+                        };
+                        drag.accumulated_angle_rad += delta_px.dot(tangent) * 0.014;
+                        stepped = true;
+                    }
+                    if stepped {
+                        drag.current_quat = (Quat::from_axis_angle(
+                            drag.axis_world,
+                            drag.accumulated_angle_rad,
+                        ) * drag.start_quat)
+                            .normalize();
+                        let (yaw, pitch, roll) = drag.current_quat.to_euler(EulerRot::YXZ);
+                        cfg.rot_deg = [
+                            round_clean(pitch.to_degrees() as f64, 1),
+                            round_clean(yaw.to_degrees() as f64, 1),
+                            round_clean(roll.to_degrees() as f64, 1),
+                        ];
+                        changed = true;
+                    }
+                }
+                (GizmoMode::Rotate, GizmoHandle::Free) => {
+                    if delta_px.length_squared() > 0.0 {
+                        let cam_right = cam_gtf.right().as_vec3();
+                        let cam_up = cam_gtf.up().as_vec3();
+                        let sens = 0.011;
+                        let q_yaw = Quat::from_axis_angle(cam_up, delta_px.x * sens);
+                        let q_pitch = Quat::from_axis_angle(cam_right, delta_px.y * sens);
+                        drag.current_quat = (q_yaw * q_pitch * drag.current_quat).normalize();
+                        let (yaw, pitch, roll) = drag.current_quat.to_euler(EulerRot::YXZ);
+                        cfg.rot_deg = [
+                            round_clean(pitch.to_degrees() as f64, 1),
+                            round_clean(yaw.to_degrees() as f64, 1),
+                            round_clean(roll.to_degrees() as f64, 1),
+                        ];
+                        changed = true;
+                    }
+                }
+                (
+                    GizmoMode::Scale,
+                    GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ,
+                ) => {
+                    if let (Ok(o2), Ok(t2)) = (
+                        camera.world_to_viewport(cam_gtf, drag.start_origin),
+                        camera.world_to_viewport(
+                            cam_gtf,
+                            drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                        ),
+                    ) {
+                        let screen_dir = (t2 - o2).normalize_or(Vec2::X);
+                        let proj_px = total_px.dot(screen_dir);
+                        let factor = smooth_scale_factor(proj_px, 95.0);
+                        drag.visual_scale_factor = factor;
+                        match drag.handle {
+                            GizmoHandle::AxisX => {
+                                cfg.scale[0] = round_clean(
+                                    (drag.start_scale.x * factor).clamp(0.05, 25.0) as f64,
+                                    2,
+                                );
+                            }
+                            GizmoHandle::AxisY => {
+                                cfg.scale[1] = round_clean(
+                                    (drag.start_scale.y * factor).clamp(0.05, 25.0) as f64,
+                                    2,
+                                );
+                            }
+                            GizmoHandle::AxisZ => {
+                                cfg.scale[2] = round_clean(
+                                    (drag.start_scale.z * factor).clamp(0.05, 25.0) as f64,
+                                    2,
+                                );
+                            }
+                            GizmoHandle::Free => {}
+                        }
+                        changed = true;
+                    }
+                }
+                (GizmoMode::Scale, GizmoHandle::Free) => {
+                    let drag_delta = total_px.x - total_px.y;
+                    let factor = smooth_scale_factor(drag_delta, 115.0);
+                    drag.visual_scale_factor = factor;
+                    cfg.scale = [
+                        round_clean((drag.start_scale.x * factor).clamp(0.05, 25.0) as f64, 2),
+                        round_clean((drag.start_scale.y * factor).clamp(0.05, 25.0) as f64, 2),
+                        round_clean((drag.start_scale.z * factor).clamp(0.05, 25.0) as f64, 2),
+                    ];
+                    changed = true;
+                }
+            }
+            if changed {
+                write_billboard_anim_config(anim, &cfg);
+                let updated = anim.clone();
+                if state.anim_edit.as_ref().is_some_and(|e| e.id == anim_id) {
+                    state.anim_edit = Some(updated);
+                }
+                state.dirty_anim_ids.insert(anim_id);
+                drag.moved = true;
+            }
+        }
+        drag.prev_cursor_px = cursor_px;
+        return changed;
+    }
+
+    // Dedicated Move / Rotate / Scale Gizmo branch for a selected 3D Traffic Light (APILL)
+    if let Some((anim_id, light_id)) = drag.traffic_light_target {
+        let Ok(ray) = camera.viewport_to_world(cam_gtf, cursor_px) else {
+            return false;
+        };
+        let delta_px = cursor_px - drag.prev_cursor_px;
+        let total_px = cursor_px - drag.start_cursor_px;
+        if !drag.moved && total_px.length_squared() < 2.25 {
+            drag.prev_cursor_px = cursor_px;
+            return false;
+        }
+        let cam_fwd = cam_gtf.forward().as_vec3();
+        let anchor = state.geo_anchor;
+        let sync_stop = state.traffic_light_move_sync_stop_line;
+
+        let mut changed = false;
+        if let Some(anim) = state
+            .anims
+            .iter_mut()
+            .find(|a| a.id == anim_id && is_traffic_signal_anim(a))
+        {
+            let mut cfg = parse_traffic_anim_config(anim);
+            if let Some(tl_idx) = cfg.traffic_lights.iter().position(|l| l.id == light_id) {
+                match (drag.mode, drag.handle) {
+                    (GizmoMode::Move, _) => {
+                        if let Some(new_pos) =
+                            compute_move_gizmo_drag_world_pos(drag, cursor_px, camera, cam_gtf)
+                        {
+                            let (lng, lat, alt) = anchor.local_to_lng_lat_alt([
+                                new_pos.x,
+                                new_pos.y.clamp(-100.0, 20_000.0),
+                                new_pos.z,
+                            ]);
+                            let bound_lane_id = cfg.traffic_lights[tl_idx].lane_id;
+                            cfg.traffic_lights[tl_idx].pos_lnglat = [lng, lat, round_clean(alt, 2)];
+                            if sync_stop
+                                && drag.handle != GizmoHandle::AxisY
+                                && let Some(lane) =
+                                    cfg.lanes.iter().find(|l| l.id == bound_lane_id)
+                                && let Some((proj_s, _)) = project_point_onto_lane(
+                                    lane,
+                                    anchor,
+                                    (new_pos.x as f64, new_pos.z as f64),
+                                )
+                            {
+                                cfg.traffic_lights[tl_idx].stop_s_m = round_clean(proj_s, 2);
+                            }
+                            changed = true;
+                        }
+                    }
+                    (
+                        GizmoMode::Rotate,
+                        GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ,
+                    ) => {
+                        let facing = drag.axis_world.dot(cam_fwd).abs();
+                        let mut stepped = false;
+                        if facing > 0.22
+                            && let Some(hit) =
+                                intersect_ray_plane(ray, drag.start_origin, drag.axis_world)
+                            && let Some(curr_vec) = (hit - drag.start_origin).try_normalize()
+                        {
+                            if let Some(prev_vec) = drag.prev_rot_vec {
+                                let sin_a = prev_vec.cross(curr_vec).dot(drag.axis_world);
+                                let cos_a = prev_vec.dot(curr_vec);
+                                let step = sin_a.atan2(cos_a);
+                                if step.is_finite() {
+                                    drag.accumulated_angle_rad += step;
+                                    stepped = true;
+                                }
+                            }
+                            drag.prev_rot_vec = Some(curr_vec);
+                        }
+                        if !stepped && delta_px.length_squared() > 0.0 {
+                            let tangent = if let (Ok(o2), Ok(t2)) = (
+                                camera.world_to_viewport(cam_gtf, drag.start_origin),
+                                camera.world_to_viewport(
+                                    cam_gtf,
+                                    drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                                ),
+                            ) {
+                                let s_axis = (t2 - o2).normalize_or(Vec2::Y);
+                                Vec2::new(-s_axis.y, s_axis.x)
+                            } else {
+                                Vec2::X
+                            };
+                            drag.accumulated_angle_rad += delta_px.dot(tangent) * 0.014;
+                            stepped = true;
+                        }
+                        if stepped {
+                            drag.current_quat = (Quat::from_axis_angle(
+                                drag.axis_world,
+                                drag.accumulated_angle_rad,
+                            ) * drag.start_quat)
+                                .normalize();
+                            let (yaw, pitch, roll) = drag.current_quat.to_euler(EulerRot::YXZ);
+                            cfg.traffic_lights[tl_idx].rot_deg = [
+                                round_clean(pitch.to_degrees() as f64, 1),
+                                round_clean(yaw.to_degrees() as f64, 1),
+                                round_clean(roll.to_degrees() as f64, 1),
+                            ];
+                            changed = true;
+                        }
+                    }
+                    (GizmoMode::Rotate, GizmoHandle::Free) => {
+                        if delta_px.length_squared() > 0.0 {
+                            let cam_right = cam_gtf.right().as_vec3();
+                            let cam_up = cam_gtf.up().as_vec3();
+                            let sens = 0.011;
+                            let q_yaw = Quat::from_axis_angle(cam_up, delta_px.x * sens);
+                            let q_pitch = Quat::from_axis_angle(cam_right, delta_px.y * sens);
+                            drag.current_quat = (q_yaw * q_pitch * drag.current_quat).normalize();
+                            let (yaw, pitch, roll) = drag.current_quat.to_euler(EulerRot::YXZ);
+                            cfg.traffic_lights[tl_idx].rot_deg = [
+                                round_clean(pitch.to_degrees() as f64, 1),
+                                round_clean(yaw.to_degrees() as f64, 1),
+                                round_clean(roll.to_degrees() as f64, 1),
+                            ];
+                            changed = true;
+                        }
+                    }
+                    (
+                        GizmoMode::Scale,
+                        GizmoHandle::AxisX | GizmoHandle::AxisY | GizmoHandle::AxisZ,
+                    ) => {
+                        if let (Ok(o2), Ok(t2)) = (
+                            camera.world_to_viewport(cam_gtf, drag.start_origin),
+                            camera.world_to_viewport(
+                                cam_gtf,
+                                drag.start_origin + drag.axis_world * drag.gizmo_radius_world,
+                            ),
+                        ) {
+                            let screen_dir = (t2 - o2).normalize_or(Vec2::X);
+                            let proj_px = total_px.dot(screen_dir);
+                            let factor = smooth_scale_factor(proj_px, 95.0);
+                            drag.visual_scale_factor = factor;
+                            match drag.handle {
+                                GizmoHandle::AxisX => {
+                                    cfg.traffic_lights[tl_idx].scale[0] = round_clean(
+                                        (drag.start_scale.x * factor).clamp(0.15, 15.0) as f64,
+                                        2,
+                                    );
+                                }
+                                GizmoHandle::AxisY => {
+                                    cfg.traffic_lights[tl_idx].scale[1] = round_clean(
+                                        (drag.start_scale.y * factor).clamp(0.15, 15.0) as f64,
+                                        2,
+                                    );
+                                }
+                                GizmoHandle::AxisZ => {
+                                    cfg.traffic_lights[tl_idx].scale[2] = round_clean(
+                                        (drag.start_scale.z * factor).clamp(0.15, 15.0) as f64,
+                                        2,
+                                    );
+                                }
+                                GizmoHandle::Free => {}
+                            }
+                            changed = true;
+                        }
+                    }
+                    (GizmoMode::Scale, GizmoHandle::Free) => {
+                        let drag_delta = total_px.x - total_px.y;
+                        let factor = smooth_scale_factor(drag_delta, 115.0);
+                        drag.visual_scale_factor = factor;
+                        cfg.traffic_lights[tl_idx].scale = [
+                            round_clean((drag.start_scale.x * factor).clamp(0.15, 15.0) as f64, 2),
+                            round_clean((drag.start_scale.y * factor).clamp(0.15, 15.0) as f64, 2),
+                            round_clean((drag.start_scale.z * factor).clamp(0.15, 15.0) as f64, 2),
+                        ];
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                write_traffic_anim_config(anim, &cfg);
+                let updated = anim.clone();
+                if state.anim_edit.as_ref().is_some_and(|e| e.id == anim_id) {
+                    state.anim_edit = Some(updated);
+                }
+                state.dirty_anim_ids.insert(anim_id);
+                drag.moved = true;
+            }
+        }
+        drag.prev_cursor_px = cursor_px;
+        return changed;
+    }
+
     // Dedicated uniform Scale Gizmo branch for an on-map Traffic pool model preview
     if let Some((anim_id, pool_idx)) = drag.traffic_scale_preview {
         let total_px = cursor_px - drag.start_cursor_px;
@@ -656,13 +1178,13 @@ pub fn update_gizmo_drag(
             }
         };
         drag.visual_scale_factor = factor;
-        let new_scale = round_clean((drag.start_scale.x * factor).clamp(0.05, 20.0) as f64, 2);
+        let new_scale = round_clean((drag.start_scale.x * factor).clamp(0.01, 20.0) as f64, 2);
         let synced_len = state
             .anims
             .iter()
             .find(|a| {
                 a.id == anim_id
-                    && (is_traffic_anim(a)
+                    && (is_traffic_flow_or_signal(a)
                         || is_traffic_queue_anim(a)
                         || is_traffic_diversion_anim(a))
             })
@@ -680,7 +1202,7 @@ pub fn update_gizmo_drag(
             });
         if let Some(anim) = state.anims.iter_mut().find(|a| {
             a.id == anim_id
-                && (is_traffic_anim(a)
+                && (is_traffic_flow_or_signal(a)
                     || is_traffic_queue_anim(a)
                     || is_traffic_diversion_anim(a))
         }) {
@@ -1127,6 +1649,53 @@ pub fn draw_transform_gizmo(
                             sp.alt,
                             [0.0, sp.model_yaw_deg as f64, 0.0],
                             [s, s, s],
+                        )
+                    } else if let Some(tl) = resolve_active_traffic_light_gizmo_pose(state)
+                        && tl.anim_id == anim_id
+                        && state.tool_mode.is_transform_tool()
+                    {
+                        let mode = match state.tool_mode {
+                            ToolMode::RotateMarker => GizmoMode::Rotate,
+                            ToolMode::ScaleMarker => GizmoMode::Scale,
+                            _ => GizmoMode::Move,
+                        };
+                        let rot_quat = Quat::from_euler(
+                            EulerRot::YXZ,
+                            (tl.rot_deg[1] as f32).to_radians(),
+                            (tl.rot_deg[0] as f32).to_radians(),
+                            (tl.rot_deg[2] as f32).to_radians(),
+                        );
+                        (
+                            mode,
+                            tl.world_pos,
+                            rot_quat,
+                            tl.lng,
+                            tl.lat,
+                            tl.alt,
+                            tl.rot_deg,
+                            tl.scale,
+                        )
+                    } else if state.tool_mode.is_transform_tool()
+                        && let Some(anim) = state
+                            .anims
+                            .iter()
+                            .find(|a| a.id == anim_id && is_billboard_anim(a))
+                    {
+                        let mode = match state.tool_mode {
+                            ToolMode::RotateMarker => GizmoMode::Rotate,
+                            ToolMode::ScaleMarker => GizmoMode::Scale,
+                            _ => GizmoMode::Move,
+                        };
+                        let cfg = parse_billboard_anim_config(anim);
+                        (
+                            mode,
+                            billboard_world_origin(state, anim),
+                            billboard_quat(&cfg),
+                            cfg.pos_lnglat[0],
+                            cfg.pos_lnglat[1],
+                            cfg.pos_lnglat[2],
+                            cfg.rot_deg,
+                            cfg.scale,
                         )
                     } else {
                         if !matches!(state.tool_mode, ToolMode::Select | ToolMode::MoveMarker) {

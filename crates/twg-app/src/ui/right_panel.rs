@@ -32,8 +32,11 @@ use twg_shared::{
         spawn_hide_action, write_spawn_hide_config,
     },
     traffic_anim::{
-        OvertakeSide, TrafficVehicleEntry, build_reverse_lane, is_traffic_anim,
-        parse_traffic_anim_config, write_traffic_anim_config,
+        OvertakeSide, TrafficLightColor, TrafficSignalPhase, TrafficVehicleEntry,
+        auto_place_intersection_traffic_lights, build_reverse_lane,
+        default_traffic_light_transform, is_traffic_anim, is_traffic_flow_or_signal,
+        is_traffic_signal_anim, parse_traffic_anim_config, sample_lane_local_frame,
+        write_traffic_anim_config,
     },
     traffic_diversion::{
         DiversionFlowMode, is_traffic_diversion_anim, parse_traffic_diversion_config,
@@ -2875,9 +2878,11 @@ fn draw_editor_preview_card(
     };
     let disabled_tip: String = if twg_shared::audio_anim::is_audio_anim(a) {
         "Pilih Sound dari Assets terlebih dahulu".into()
+    } else if twg_shared::billboard_anim::is_billboard_anim(a) {
+        "Pilih Video dari Assets terlebih dahulu".into()
     } else if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
-    } else if is_traffic_anim(a) {
+    } else if is_traffic_flow_or_signal(a) {
         "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool".into()
     } else if is_queue {
         let qcfg = parse_traffic_queue_config(a);
@@ -3380,6 +3385,64 @@ fn draw_editor_preview_card(
                             .size(10.0)
                             .color(egui::Color32::from_rgb(125, 211, 252)),
                     );
+                } else if twg_shared::billboard_anim::is_billboard_anim(a) {
+                    let status_line = state
+                        .billboard_status
+                        .get(&a.id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Video berjalan · t = {:.1} dtk", track.distance_m));
+                    ui.label(
+                        egui::RichText::new(status_line)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
+                } else if is_traffic_signal_anim(a) {
+                    let elapsed = track.distance_m;
+                    let (status_line, status_col) =
+                        if let Some(live) = state.traffic_signal_live_status.get(&a.id) {
+                            let (c_lbl, c_col) = if live.is_all_red {
+                                ("ALL-RED", egui::Color32::from_rgb(251, 113, 133))
+                            } else {
+                                match live.active_color {
+                                    TrafficLightColor::Green => (
+                                        "HIJAU",
+                                        egui::Color32::from_rgb(110, 231, 183),
+                                    ),
+                                    TrafficLightColor::Yellow => (
+                                        "KUNING",
+                                        egui::Color32::from_rgb(253, 224, 71),
+                                    ),
+                                    TrafficLightColor::Red => (
+                                        "MERAH",
+                                        egui::Color32::from_rgb(251, 113, 133),
+                                    ),
+                                }
+                            };
+                            (
+                                format!(
+                                    "{} [{c_lbl} {:.1}s]  •  {} kendaraan ({} berhenti)  •  t = {elapsed:.1}s",
+                                    if live.active_phase_name.is_empty() {
+                                        "APILL"
+                                    } else {
+                                        &live.active_phase_name
+                                    },
+                                    live.remaining_sec,
+                                    live.total_vehicles,
+                                    live.stopped_vehicles,
+                                ),
+                                c_col,
+                            )
+                        } else {
+                            (
+                                format!("Lalu Lintas Lampu Merah berjalan  •  t = {elapsed:.1} dtk"),
+                                egui::Color32::from_rgb(253, 164, 175),
+                            )
+                        };
+                    ui.label(
+                        egui::RichText::new(status_line)
+                            .size(10.0)
+                            .color(status_col),
+                    );
                 } else if is_traffic_anim(a) {
                     ui.label(
                         egui::RichText::new(format!(
@@ -3460,9 +3523,16 @@ fn draw_anim_inspector(
     if twg_shared::audio_anim::is_audio_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         super::audio_anim::draw_inspector(ui, state, &mut a, editable);
+    } else if twg_shared::billboard_anim::is_billboard_anim(&a) {
+        if twg_shared::billboard_anim::parse_billboard_anim_config(&a).media_mode
+            == twg_shared::billboard_anim::BillboardMediaMode::Video
+        {
+            draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        }
+        super::billboard_anim::draw_inspector(ui, state, tcam, &mut a, editable);
     } else if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
-    } else if is_traffic_anim(&a) {
+    } else if is_traffic_flow_or_signal(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         draw_traffic_inspector_cards(ui, state, tcam, playback, route_edit, &mut a, editable);
     } else if is_traffic_queue_anim(&a) {
@@ -4695,9 +4765,11 @@ fn draw_anim_inspector(
         });
         let disabled_hint = if twg_shared::audio_anim::is_audio_anim(&a) {
             "Pilih Sound dari Assets terlebih dahulu"
+        } else if twg_shared::billboard_anim::is_billboard_anim(&a) {
+            "Mode Gambar tampil statis di peta; pilih Mode Video dan Video dari Assets untuk diputar"
         } else if is_particle_anim(&a) {
             "Tentukan posisi partikel di peta terlebih dahulu"
-        } else if is_traffic_anim(&a) {
+        } else if is_traffic_flow_or_signal(&a) {
             "Tambahkan minimal 1 jalur aktif (>= 2 titik) dan 1 model kendaraan di Vehicle Pool"
         } else if is_traffic_queue_anim(&a) {
             "Setiap jalur aktif wajib punya Jalur Antre + Jalur Lancar (>= 2 titik) dan minimal 1 model kendaraan"
@@ -8418,6 +8490,16 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         "PANAH 3D"
     } else if let Some(sk) = shoot_anim_kind(a) {
         sk.short_tag()
+    } else if twg_shared::billboard_anim::is_billboard_anim(a) {
+        if twg_shared::billboard_anim::parse_billboard_anim_config(a).media_mode
+            == twg_shared::billboard_anim::BillboardMediaMode::Video
+        {
+            "VIDEOTRON"
+        } else {
+            "BILLBOARD"
+        }
+    } else if is_traffic_signal_anim(a) {
+        "LAMPU MERAH"
     } else if is_traffic_anim(a) {
         "TRAFFIC"
     } else if is_traffic_gridlock_anim(a) {
@@ -8448,11 +8530,17 @@ fn draw_traffic_inspector_cards(
     a: &mut twg_shared::models::Anim,
     editable: bool,
 ) {
+    let is_signal = is_traffic_signal_anim(a);
     let mut cfg = parse_traffic_anim_config(a);
     let mut cfg_changed = false;
 
     // 1. General Info & Playback Mode
-    inspector_card(ui, "Simulasi Lalu Lintas (Traffic Pool)", true, |ui| {
+    let card_title = if is_signal {
+        "Lalu Lintas Lampu Merah (APILL)"
+    } else {
+        "Simulasi Lalu Lintas (Traffic Pool)"
+    };
+    inspector_card(ui, card_title, true, |ui| {
         ui.add_enabled_ui(editable, |ui| {
             ui.label("Nama Animasi:");
             ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(f32::INFINITY));
@@ -8516,9 +8604,11 @@ fn draw_traffic_inspector_cards(
                 .min_size(egui::vec2(ui.available_width(), 24.0));
                 if ui.add(add_lane_btn).clicked() {
                     state.traffic_scale_preview = None;
+                    state.selected_traffic_light = None;
                     route_edit.clear();
                     state.tool_mode = ToolMode::DrawTrafficLane;
                     state.drawing_traffic_lane_for_anim_id = Some(a.id);
+                    state.drawing_traffic_is_signal = is_signal;
                     state.draft_points_lnglat.clear();
                     state.status_banner = Some(
                         "Klik titik-titik Jalur Traffic baru di peta (min 2 titik), lalu tekan Enter / Finish."
@@ -8767,7 +8857,17 @@ fn draw_traffic_inspector_cards(
                 cfg_changed = true;
             }
             if let Some(idx) = delete_lane_idx {
+                let removed_lane_id = cfg.lanes[idx].id;
                 cfg.lanes.remove(idx);
+                cfg.traffic_lights.retain(|tl| tl.lane_id != removed_lane_id);
+                if state
+                    .selected_traffic_light
+                    .is_some_and(|(aid, lid)| {
+                        aid == a.id && !cfg.traffic_lights.iter().any(|tl| tl.id == lid)
+                    })
+                {
+                    state.selected_traffic_light = None;
+                }
                 if route_edit.editing_anim_id == Some(a.id) {
                     route_edit.clear();
                 }
@@ -8775,6 +8875,873 @@ fn draw_traffic_inspector_cards(
             }
         },
     );
+
+    // 2b. Dedicated Traffic Light (APILL) & Signal Phase Manager (only for `traffic_signal` animations)
+    if is_signal {
+        if cfg.signal_phases.is_empty() {
+            cfg.signal_phases.push(TrafficSignalPhase::new("Fase 1"));
+            cfg.signal_phases.push(TrafficSignalPhase::new("Fase 2"));
+            cfg_changed = true;
+        }
+        let lights_cnt = cfg.traffic_lights.len();
+        let phases_cnt = cfg.signal_phases.len();
+        inspector_card(
+            ui,
+            &format!("Lampu Merah 3D (APILL) ({lights_cnt} Lampu • {phases_cnt} Fase)"),
+            true,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Pasang lampu merah menempel ke jalur. Klik tiang lampu di peta (atau pilih di daftar) untuk Move / Rotate / Scale 3D Gizmo.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(4.0);
+
+                if editable {
+                    let is_placing = state.tool_mode == ToolMode::PlaceTrafficLight
+                        && state.placing_traffic_light_for_anim_id == Some(a.id);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Fase Pasang:")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(186, 230, 253)),
+                        );
+                        let p_idx = state
+                            .placing_traffic_light_phase_idx
+                            .min(cfg.signal_phases.len().saturating_sub(1));
+                        state.placing_traffic_light_phase_idx = p_idx;
+                        let cur_phase_lbl = cfg
+                            .signal_phases
+                            .get(p_idx)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| format!("Fase {}", p_idx + 1));
+                        egui::ComboBox::from_id_salt(("tl_place_phase", a.id))
+                            .selected_text(cur_phase_lbl)
+                            .width(105.0)
+                            .show_ui(ui, |ui| {
+                                for (pi, ph) in cfg.signal_phases.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut state.placing_traffic_light_phase_idx,
+                                        pi,
+                                        &ph.name,
+                                    );
+                                }
+                            });
+                    });
+                    ui.add_space(4.0);
+
+                    let place_btn = egui::Button::new(
+                        egui::RichText::new(if is_placing {
+                            "Klik di Garis Jalur (Aktif • Esc Selesai)"
+                        } else {
+                            "+ Pasang Lampu Merah di Jalur"
+                        })
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                    )
+                    .fill(if is_placing {
+                        egui::Color32::from_rgb(5, 150, 105)
+                    } else {
+                        egui::Color32::from_rgb(225, 29, 72)
+                    })
+                    .min_size(egui::vec2(ui.available_width(), 24.0));
+                    if ui
+                        .add_enabled(!cfg.lanes.is_empty(), place_btn)
+                        .on_hover_text(
+                            "Klik di atas garis jalur pada peta untuk menempelkan Garis Henti & Lampu Merah 3D otomatis menghadap kendaraan",
+                        )
+                        .clicked()
+                    {
+                        if is_placing {
+                            state.placing_traffic_light_for_anim_id = None;
+                            state.tool_mode = ToolMode::Select;
+                        } else {
+                            state.traffic_scale_preview = None;
+                            route_edit.clear();
+                            state.placing_traffic_light_for_anim_id = Some(a.id);
+                            state.tool_mode = ToolMode::PlaceTrafficLight;
+                            state.status_banner = Some(format!(
+                                "Mode Pasang Lampu Merah (Fase {}): Klik di atas garis jalur pada peta (Esc selesai).",
+                                state.placing_traffic_light_phase_idx + 1
+                            ));
+                        }
+                    }
+
+                    ui.add_space(4.0);
+                    let auto_btn = egui::Button::new(
+                        egui::RichText::new("Auto-Pasang di Simpang")
+                            .size(10.5)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(14, 116, 144))
+                    .min_size(egui::vec2(ui.available_width(), 22.0));
+                    if ui
+                        .add_enabled(!cfg.lanes.is_empty(), auto_btn)
+                        .on_hover_text(
+                            "Deteksi perpotongan antar jalur & pasang Lampu Merah otomatis 10m sebelum simpang (jalur sejajar berbagi fase, jalur silang beda fase)",
+                        )
+                        .clicked()
+                    {
+                        let added =
+                            auto_place_intersection_traffic_lights(&mut cfg, state.geo_anchor);
+                        if added > 0 {
+                            cfg_changed = true;
+                            if let Some(last_tl) = cfg.traffic_lights.last() {
+                                state.selected_traffic_light = Some((a.id, last_tl.id));
+                            }
+                            state.status_banner = Some(format!(
+                                "{added} Lampu Merah 3D otomatis dipasang! Klik lampu di peta atau daftar untuk Move / Rotate / Scale."
+                            ));
+                        } else {
+                            state.status_banner = Some(
+                                "Semua jalur aktif sudah memiliki Lampu Merah. Klik '+ Pasang Lampu Merah' untuk tambah lagi."
+                                    .into(),
+                            );
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
+
+                // --- Signal Phases Editor ---
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(15, 23, 42))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 62, 92)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let total_cycle: f64 =
+                            cfg.signal_phases.iter().map(|p| p.span_sec()).sum();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Fase Giliran (Siklus {total_cycle:.1}s)"
+                                ))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(186, 230, 253)),
+                            );
+                            if editable {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("+ Fase").clicked()
+                                            && cfg.signal_phases.len() < 8
+                                        {
+                                            let n = cfg.signal_phases.len() + 1;
+                                            cfg.signal_phases
+                                                .push(TrafficSignalPhase::new(format!("Fase {n}")));
+                                            cfg_changed = true;
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                        ui.add_space(4.0);
+
+                        let mut remove_phase_idx: Option<usize> = None;
+                        let phase_len = cfg.signal_phases.len();
+                        for pi in 0..phase_len {
+                            let assigned_cnt = cfg
+                                .traffic_lights
+                                .iter()
+                                .filter(|tl| tl.phase_idx == pi)
+                                .count();
+                            ui.horizontal(|ui| {
+                                if editable {
+                                    let w = (ui.available_width() - 78.0).clamp(54.0, 110.0);
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(
+                                                &mut cfg.signal_phases[pi].name,
+                                            )
+                                            .desired_width(w),
+                                        )
+                                        .changed()
+                                    {
+                                        cfg_changed = true;
+                                    }
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(&cfg.signal_phases[pi].name)
+                                            .size(10.5)
+                                            .strong(),
+                                    );
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{assigned_cnt} lampu"))
+                                        .size(9.5)
+                                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                                );
+                                if editable && phase_len > 1 {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .small_button(
+                                                    egui::RichText::new("x")
+                                                        .color(egui::Color32::from_rgb(248, 113, 113)),
+                                                )
+                                                .clicked()
+                                            {
+                                                remove_phase_idx = Some(pi);
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                            ui.add_enabled_ui(editable, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("H:")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(74, 222, 128)),
+                                    );
+                                    let prev_g = cfg.signal_phases[pi].green_sec;
+                                    numeric_spinner_w(
+                                        ui,
+                                        ("ts_ph_g", a.id, pi),
+                                        &mut cfg.signal_phases[pi].green_sec,
+                                        56.0,
+                                        SpinnerConfig {
+                                            min: 2.0,
+                                            max: 180.0,
+                                            step: 1.0,
+                                            drag_speed: 0.25,
+                                            decimals: 0,
+                                            suffix: "s",
+                                            wrap_around: false,
+                                        },
+                                    );
+                                    if (cfg.signal_phases[pi].green_sec - prev_g).abs() > 1e-6 {
+                                        cfg_changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new("K:")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(250, 204, 21)),
+                                    );
+                                    let prev_y = cfg.signal_phases[pi].yellow_sec;
+                                    numeric_spinner_w(
+                                        ui,
+                                        ("ts_ph_y", a.id, pi),
+                                        &mut cfg.signal_phases[pi].yellow_sec,
+                                        50.0,
+                                        SpinnerConfig {
+                                            min: 1.0,
+                                            max: 15.0,
+                                            step: 0.5,
+                                            drag_speed: 0.1,
+                                            decimals: 1,
+                                            suffix: "s",
+                                            wrap_around: false,
+                                        },
+                                    );
+                                    if (cfg.signal_phases[pi].yellow_sec - prev_y).abs() > 1e-6 {
+                                        cfg_changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new("AR:")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(248, 113, 113)),
+                                    );
+                                    let prev_ar = cfg.signal_phases[pi].all_red_sec;
+                                    numeric_spinner_w(
+                                        ui,
+                                        ("ts_ph_ar", a.id, pi),
+                                        &mut cfg.signal_phases[pi].all_red_sec,
+                                        50.0,
+                                        SpinnerConfig {
+                                            min: 0.0,
+                                            max: 10.0,
+                                            step: 0.5,
+                                            drag_speed: 0.1,
+                                            decimals: 1,
+                                            suffix: "s",
+                                            wrap_around: false,
+                                        },
+                                    );
+                                    if (cfg.signal_phases[pi].all_red_sec - prev_ar).abs() > 1e-6 {
+                                        cfg_changed = true;
+                                    }
+                                });
+                            });
+                            if pi + 1 < phase_len {
+                                ui.add_space(3.0);
+                            }
+                        }
+
+                        if let Some(rm_idx) = remove_phase_idx
+                            && cfg.signal_phases.len() > 1
+                        {
+                            cfg.signal_phases.remove(rm_idx);
+                            let max_p = cfg.signal_phases.len() - 1;
+                            for tl in &mut cfg.traffic_lights {
+                                if tl.phase_idx > rm_idx {
+                                    tl.phase_idx -= 1;
+                                } else if tl.phase_idx > max_p {
+                                    tl.phase_idx = max_p;
+                                }
+                            }
+                            cfg_changed = true;
+                        }
+
+                        ui.add_space(4.0);
+                        ui.add_enabled_ui(editable, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Offset Siklus:")
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                                );
+                                let prev_off = cfg.signal_cycle_offset_sec;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("ts_cyc_off", a.id),
+                                    &mut cfg.signal_cycle_offset_sec,
+                                    82.0,
+                                    SpinnerConfig {
+                                        min: 0.0,
+                                        max: 600.0,
+                                        step: 1.0,
+                                        drag_speed: 0.25,
+                                        decimals: 1,
+                                        suffix: " s",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (cfg.signal_cycle_offset_sec - prev_off).abs() > 1e-6 {
+                                    cfg_changed = true;
+                                }
+                            });
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Zona Larang Salip:")
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(252, 165, 165)),
+                                )
+                                .on_hover_text(
+                                    "Jarak sebelum garis henti di mana kendaraan dilarang menyalip (100% saat Merah/Kuning, ~55% saat Hijau; 0 m = bebas menyalip)",
+                                );
+                                let prev_z = cfg.signal_no_overtake_zone_m;
+                                numeric_spinner_w(
+                                    ui,
+                                    ("ts_no_ot_zone", a.id),
+                                    &mut cfg.signal_no_overtake_zone_m,
+                                    86.0,
+                                    SpinnerConfig {
+                                        min: 0.0,
+                                        max: 1000.0,
+                                        step: 5.0,
+                                        drag_speed: 1.0,
+                                        decimals: 0,
+                                        suffix: " m",
+                                        wrap_around: false,
+                                    },
+                                );
+                                if (cfg.signal_no_overtake_zone_m - prev_z).abs() > 1e-6 {
+                                    cfg_changed = true;
+                                }
+                            });
+                        });
+                    });
+
+                ui.add_space(6.0);
+
+                // --- Placed 3D Traffic Lights List + Full Move / Rotate / Scale Transform Controls ---
+                if cfg.traffic_lights.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Belum ada Lampu Merah terpasang. Klik '+ Pasang Lampu Merah di Jalur' atau 'Auto-Pasang di Simpang' di atas.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(251, 191, 36)),
+                    );
+                } else {
+                    let mut delete_light_idx: Option<usize> = None;
+                    let live_colors: std::collections::HashMap<Uuid, TrafficLightColor> = state
+                        .traffic_signal_live_status
+                        .get(&a.id)
+                        .map(|s| {
+                            s.light_states
+                                .iter()
+                                .map(|lp| (lp.light_id, lp.color))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let lane_choices: Vec<(Uuid, String, f64)> = cfg
+                        .lanes
+                        .iter()
+                        .map(|l| (l.id, l.name.clone(), l.total_length_m()))
+                        .collect();
+                    let phase_names: Vec<String> =
+                        cfg.signal_phases.iter().map(|p| p.name.clone()).collect();
+                    let lane_w_m = cfg.lane_width_m;
+                    let ot_side = cfg.overtake_side;
+
+                    for tl_idx in 0..cfg.traffic_lights.len() {
+                        let tl_id = cfg.traffic_lights[tl_idx].id;
+                        let is_tl_sel = state.selected_traffic_light == Some((a.id, tl_id));
+                        let dot_col = match live_colors.get(&tl_id).copied() {
+                            Some(TrafficLightColor::Green) => egui::Color32::from_rgb(34, 197, 94),
+                            Some(TrafficLightColor::Yellow) => egui::Color32::from_rgb(234, 179, 8),
+                            Some(TrafficLightColor::Red) => egui::Color32::from_rgb(239, 68, 68),
+                            None => {
+                                if cfg.traffic_lights[tl_idx].phase_idx == 0 {
+                                    egui::Color32::from_rgb(34, 197, 94)
+                                } else {
+                                    egui::Color32::from_rgb(239, 68, 68)
+                                }
+                            }
+                        };
+
+                        egui::Frame::new()
+                            .fill(if is_tl_sel {
+                                egui::Color32::from_rgb(34, 24, 48)
+                            } else {
+                                egui::Color32::from_rgb(15, 23, 42)
+                            })
+                            .stroke(egui::Stroke::new(
+                                if is_tl_sel { 1.4 } else { 1.0 },
+                                if is_tl_sel {
+                                    egui::Color32::from_rgb(250, 204, 21)
+                                } else {
+                                    egui::Color32::from_rgb(44, 62, 92)
+                                },
+                            ))
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(9.0, 9.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(rect.center(), 4.2, dot_col);
+
+                                    if editable {
+                                        if ui
+                                            .checkbox(&mut cfg.traffic_lights[tl_idx].enabled, "")
+                                            .changed()
+                                        {
+                                            cfg_changed = true;
+                                        }
+                                        let name_w =
+                                            (ui.available_width() - 96.0).clamp(60.0, 125.0);
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(
+                                                    &mut cfg.traffic_lights[tl_idx].name,
+                                                )
+                                                .desired_width(name_w),
+                                            )
+                                            .changed()
+                                        {
+                                            cfg_changed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(&cfg.traffic_lights[tl_idx].name)
+                                                .size(10.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        );
+                                    }
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if editable
+                                                && ui
+                                                    .small_button(
+                                                        egui::RichText::new("Hapus").color(
+                                                            egui::Color32::from_rgb(248, 113, 113),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                            {
+                                                delete_light_idx = Some(tl_idx);
+                                            }
+                                            let giz_btn = egui::Button::new(
+                                                egui::RichText::new(if is_tl_sel {
+                                                    "Aktif"
+                                                } else {
+                                                    "Pilih"
+                                                })
+                                                .size(9.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                            )
+                                            .fill(if is_tl_sel {
+                                                egui::Color32::from_rgb(217, 119, 6)
+                                            } else {
+                                                egui::Color32::from_rgb(30, 58, 138)
+                                            })
+                                            .small();
+                                            if ui.add(giz_btn).clicked() {
+                                                if is_tl_sel {
+                                                    state.selected_traffic_light = None;
+                                                } else {
+                                                    state.traffic_scale_preview = None;
+                                                    route_edit.clear();
+                                                    state.selected_traffic_light =
+                                                        Some((a.id, tl_id));
+                                                    if !state.tool_mode.is_transform_tool() {
+                                                        state.tool_mode = ToolMode::MoveMarker;
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+
+                                // Quick lane & phase binding row
+                                ui.add_space(3.0);
+                                ui.add_enabled_ui(editable, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let cur_lane_name = lane_choices
+                                            .iter()
+                                            .find(|(id, _, _)| {
+                                                *id == cfg.traffic_lights[tl_idx].lane_id
+                                            })
+                                            .map(|(_, n, _)| n.clone())
+                                            .unwrap_or_else(|| "(Pilih Jalur)".into());
+                                        egui::ComboBox::from_id_salt(("tl_lane", a.id, tl_id))
+                                            .selected_text(cur_lane_name)
+                                            .width(105.0)
+                                            .show_ui(ui, |ui| {
+                                                for (lid, lname, _) in &lane_choices {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut cfg.traffic_lights[tl_idx].lane_id,
+                                                            *lid,
+                                                            lname,
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        cfg_changed = true;
+                                                    }
+                                                }
+                                            });
+                                        let cur_phase_name = phase_names
+                                            .get(cfg.traffic_lights[tl_idx].phase_idx)
+                                            .cloned()
+                                            .unwrap_or_else(|| {
+                                                format!(
+                                                    "Fase {}",
+                                                    cfg.traffic_lights[tl_idx].phase_idx + 1
+                                                )
+                                            });
+                                        egui::ComboBox::from_id_salt(("tl_phase", a.id, tl_id))
+                                            .selected_text(cur_phase_name)
+                                            .width(82.0)
+                                            .show_ui(ui, |ui| {
+                                                for (pi, pname) in phase_names.iter().enumerate() {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut cfg.traffic_lights[tl_idx]
+                                                                .phase_idx,
+                                                            pi,
+                                                            pname,
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        cfg_changed = true;
+                                                    }
+                                                }
+                                            });
+                                    });
+                                });
+
+                                // Expanded 3D Move / Rotate / Scale & Stop-Line controls for the selected light
+                                if is_tl_sel {
+                                    ui.add_space(4.0);
+                                    ui.separator();
+                                    ui.add_space(3.0);
+
+                                    if editable {
+                                        // 3D Gizmo quick mode buttons: Move / Rotate / Scale + Focus
+                                        ui.horizontal(|ui| {
+                                            let is_mv = matches!(
+                                                state.tool_mode,
+                                                ToolMode::Select | ToolMode::MoveMarker
+                                            );
+                                            let is_rot = state.tool_mode == ToolMode::RotateMarker;
+                                            let is_scl = state.tool_mode == ToolMode::ScaleMarker;
+                                            if ui
+                                                .selectable_label(is_mv, "Move (2)")
+                                                .clicked()
+                                            {
+                                                state.tool_mode = ToolMode::MoveMarker;
+                                            }
+                                            if ui
+                                                .selectable_label(is_rot, "Rotate (3)")
+                                                .clicked()
+                                            {
+                                                state.tool_mode = ToolMode::RotateMarker;
+                                            }
+                                            if ui
+                                                .selectable_label(is_scl, "Scale (4)")
+                                                .clicked()
+                                            {
+                                                state.tool_mode = ToolMode::ScaleMarker;
+                                            }
+                                            if ui.small_button("Focus").clicked() {
+                                                let p = cfg.traffic_lights[tl_idx].pos_lnglat;
+                                                let l = state
+                                                    .geo_anchor
+                                                    .lng_lat_alt_to_local(p[0], p[1], p[2]);
+                                                tcam.target_local =
+                                                    bevy::math::Vec2::new(l[0], l[2]);
+                                            }
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.checkbox(
+                                            &mut state.traffic_light_move_sync_stop_line,
+                                            "Sinkron Garis Henti saat Move Gizmo",
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .small_button("Snap Tiang ke Garis Henti")
+                                                .clicked()
+                                                && let Some(lane) = cfg.lanes.iter().find(|l| {
+                                                    l.id == cfg.traffic_lights[tl_idx].lane_id
+                                                })
+                                                && let Some((pos, rot)) =
+                                                    default_traffic_light_transform(
+                                                        lane,
+                                                        state.geo_anchor,
+                                                        cfg.traffic_lights[tl_idx].stop_s_m,
+                                                        lane_w_m,
+                                                        ot_side,
+                                                    )
+                                            {
+                                                cfg.traffic_lights[tl_idx].pos_lnglat = pos;
+                                                cfg.traffic_lights[tl_idx].rot_deg = rot;
+                                                cfg_changed = true;
+                                            }
+                                            if ui
+                                                .small_button("Hadap ke Jalur")
+                                                .clicked()
+                                                && let Some(lane) = cfg.lanes.iter().find(|l| {
+                                                    l.id == cfg.traffic_lights[tl_idx].lane_id
+                                                })
+                                                && let Some((_, fwd, _)) = sample_lane_local_frame(
+                                                    lane,
+                                                    state.geo_anchor,
+                                                    cfg.traffic_lights[tl_idx].stop_s_m,
+                                                )
+                                            {
+                                                let yaw = (-fwd.0).atan2(-fwd.1).to_degrees();
+                                                cfg.traffic_lights[tl_idx].rot_deg =
+                                                    [0.0, (yaw * 10.0).round() / 10.0, 0.0];
+                                                cfg_changed = true;
+                                            }
+                                        });
+                                    }
+
+                                    ui.add_space(4.0);
+                                    ui.add_enabled_ui(editable, |ui| {
+                                        let max_s = lane_choices
+                                            .iter()
+                                            .find(|(id, _, _)| {
+                                                *id == cfg.traffic_lights[tl_idx].lane_id
+                                            })
+                                            .map(|(_, _, len)| (*len - 2.0).max(4.0))
+                                            .unwrap_or(200.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Garis Henti:")
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(186, 230, 253)),
+                                            );
+                                            let prev_s = cfg.traffic_lights[tl_idx].stop_s_m;
+                                            numeric_spinner_w(
+                                                ui,
+                                                ("tl_stop_s", a.id, tl_id),
+                                                &mut cfg.traffic_lights[tl_idx].stop_s_m,
+                                                92.0,
+                                                SpinnerConfig {
+                                                    min: 2.0,
+                                                    max: max_s,
+                                                    step: 1.0,
+                                                    drag_speed: 0.35,
+                                                    decimals: 1,
+                                                    suffix: " m",
+                                                    wrap_around: false,
+                                                },
+                                            );
+                                            if (cfg.traffic_lights[tl_idx].stop_s_m - prev_s).abs()
+                                                > 1e-6
+                                            {
+                                                cfg_changed = true;
+                                            }
+                                        });
+
+                                        // Altitude & Position readout
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Alt (Y):")
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                            let prev_alt =
+                                                cfg.traffic_lights[tl_idx].pos_lnglat[2];
+                                            numeric_spinner_w(
+                                                ui,
+                                                ("tl_alt", a.id, tl_id),
+                                                &mut cfg.traffic_lights[tl_idx].pos_lnglat[2],
+                                                82.0,
+                                                SpinnerConfig {
+                                                    min: -50.0,
+                                                    max: 2000.0,
+                                                    step: 0.5,
+                                                    drag_speed: 0.1,
+                                                    decimals: 2,
+                                                    suffix: " m",
+                                                    wrap_around: false,
+                                                },
+                                            );
+                                            if (cfg.traffic_lights[tl_idx].pos_lnglat[2] - prev_alt)
+                                                .abs()
+                                                > 1e-6
+                                            {
+                                                cfg_changed = true;
+                                            }
+                                        });
+
+                                        // Rotation (X, Y, Z degrees)
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Rotasi:")
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                            for (axis_i, lbl) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                                                ui.label(
+                                                    egui::RichText::new(lbl)
+                                                        .size(9.5)
+                                                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                                                );
+                                                let prev_r =
+                                                    cfg.traffic_lights[tl_idx].rot_deg[axis_i];
+                                                numeric_spinner_w(
+                                                    ui,
+                                                    ("tl_rot", a.id, tl_id, axis_i),
+                                                    &mut cfg.traffic_lights[tl_idx].rot_deg[axis_i],
+                                                    54.0,
+                                                    SpinnerConfig {
+                                                        min: -360.0,
+                                                        max: 360.0,
+                                                        step: 5.0,
+                                                        drag_speed: 0.8,
+                                                        decimals: 1,
+                                                        suffix: "°",
+                                                        wrap_around: true,
+                                                    },
+                                                );
+                                                if (cfg.traffic_lights[tl_idx].rot_deg[axis_i]
+                                                    - prev_r)
+                                                    .abs()
+                                                    > 1e-6
+                                                {
+                                                    cfg_changed = true;
+                                                }
+                                            }
+                                        });
+
+                                        // Uniform & Per-Axis Scale
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Skala:")
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                            let mut uni = cfg.traffic_lights[tl_idx].scale[0];
+                                            let prev_u = uni;
+                                            numeric_spinner_w(
+                                                ui,
+                                                ("tl_scl_uni", a.id, tl_id),
+                                                &mut uni,
+                                                72.0,
+                                                SpinnerConfig {
+                                                    min: 0.15,
+                                                    max: 15.0,
+                                                    step: 0.1,
+                                                    drag_speed: 0.03,
+                                                    decimals: 2,
+                                                    suffix: "x",
+                                                    wrap_around: false,
+                                                },
+                                            );
+                                            if (uni - prev_u).abs() > 1e-6 {
+                                                cfg.traffic_lights[tl_idx].scale = [uni, uni, uni];
+                                                cfg_changed = true;
+                                            }
+                                            if ui.small_button("Reset 1x").clicked() {
+                                                cfg.traffic_lights[tl_idx].scale = [1.0, 1.0, 1.0];
+                                                cfg_changed = true;
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            for (axis_i, lbl) in [(0, "SX"), (1, "SY"), (2, "SZ")] {
+                                                ui.label(
+                                                    egui::RichText::new(lbl)
+                                                        .size(9.5)
+                                                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                                                );
+                                                let prev_sc =
+                                                    cfg.traffic_lights[tl_idx].scale[axis_i];
+                                                numeric_spinner_w(
+                                                    ui,
+                                                    ("tl_scl_ax", a.id, tl_id, axis_i),
+                                                    &mut cfg.traffic_lights[tl_idx].scale[axis_i],
+                                                    54.0,
+                                                    SpinnerConfig {
+                                                        min: 0.15,
+                                                        max: 15.0,
+                                                        step: 0.1,
+                                                        drag_speed: 0.03,
+                                                        decimals: 2,
+                                                        suffix: "",
+                                                        wrap_around: false,
+                                                    },
+                                                );
+                                                if (cfg.traffic_lights[tl_idx].scale[axis_i]
+                                                    - prev_sc)
+                                                    .abs()
+                                                    > 1e-6
+                                                {
+                                                    cfg_changed = true;
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                            });
+                        ui.add_space(3.0);
+                    }
+
+                    if let Some(di) = delete_light_idx {
+                        let rm_id = cfg.traffic_lights[di].id;
+                        cfg.traffic_lights.remove(di);
+                        if state.selected_traffic_light == Some((a.id, rm_id)) {
+                            state.selected_traffic_light = None;
+                        }
+                        cfg_changed = true;
+                    }
+                }
+            },
+        );
+    }
 
     // 3. Shared Vehicle 3D Pool Picker (ALL 3D Catalog + Category Filter + 2-Model Front-to-Back Scale Preview!)
     inspector_card(
@@ -9074,10 +10041,10 @@ fn draw_traffic_inspector_cards(
                                     &mut cfg.vehicle_pool[idx].scale,
                                     spin_w,
                                     SpinnerConfig {
-                                        min: 0.05,
+                                        min: 0.01,
                                         max: 20.0,
-                                        step: 0.05,
-                                        drag_speed: 0.02,
+                                        step: 0.01,
+                                        drag_speed: 0.01,
                                         decimals: 2,
                                         suffix: "x",
                                         wrap_around: false,
@@ -11586,10 +12553,10 @@ fn draw_traffic_queue_vehicle_pool_card(
                                     &mut vehicle_pool[idx].scale,
                                     spin_w,
                                     SpinnerConfig {
-                                        min: 0.05,
+                                        min: 0.01,
                                         max: 20.0,
-                                        step: 0.05,
-                                        drag_speed: 0.02,
+                                        step: 0.01,
+                                        drag_speed: 0.01,
                                         decimals: 2,
                                         suffix: "x",
                                         wrap_around: false,

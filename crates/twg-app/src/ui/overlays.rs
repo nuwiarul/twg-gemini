@@ -241,13 +241,26 @@ pub fn draw_projected_labels(
                 state.draft_points_lnglat.len()
             ),
             ToolMode::DrawTrafficLane => format!(
-                "Gambar Jalur Traffic ({}): {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
+                "Gambar Jalur {} ({}): {} titik — Min 2 titik, Enter selesai, Backspace undo, Esc batal",
+                if state.drawing_traffic_is_signal {
+                    "Lampu Merah"
+                } else {
+                    "Traffic"
+                },
                 if state.drawing_traffic_lane_for_anim_id.is_some() {
                     "Tambah Jalur"
                 } else {
                     "Jalur 1"
                 },
                 state.draft_points_lnglat.len()
+            ),
+            ToolMode::PlaceTrafficLight => format!(
+                "Mode Pasang Lampu Merah 3D (Fase {}): Klik di atas garis jalur untuk menempelkan lampu — Esc selesai",
+                state.placing_traffic_light_phase_idx + 1
+            ),
+            ToolMode::PlaceBillboard => format!(
+                "Mode Pasang Billboard / Videotron 3D ({}): Klik lokasi di peta untuk menempatkan — Esc batal",
+                state.new_billboard_name
             ),
             ToolMode::DrawTrafficQueueLane => format!(
                 "Gambar {} ({} titik) — Min 2 titik, Enter selesai, Backspace undo, Esc batal",

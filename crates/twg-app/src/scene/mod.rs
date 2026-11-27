@@ -1,5 +1,6 @@
 pub mod asset_preview;
 pub mod basic_mesh;
+pub mod billboard;
 pub mod buildings;
 pub mod gizmo;
 pub mod lines;
@@ -141,7 +142,11 @@ pub fn anim_primary_focus_lnglat(
     all_anims: &[twg_shared::models::Anim],
     markers: &[twg_shared::models::Marker],
 ) -> Option<(f64, f64)> {
-    if twg_shared::traffic_anim::is_traffic_anim(anim) {
+    if twg_shared::billboard_anim::is_billboard_anim(anim) {
+        let p = twg_shared::billboard_anim::billboard_anim_position(anim);
+        return Some((p[0], p[1]));
+    }
+    if twg_shared::traffic_anim::is_traffic_flow_or_signal(anim) {
         let cfg = twg_shared::traffic_anim::parse_traffic_anim_config(anim);
         if let Some(p) = cfg
             .lanes

@@ -9,7 +9,9 @@ use twg_shared::{
         PatwalUnitRole, RouteFormationKind, anim_bound_marker_ids, is_multi_route_anim,
         parse_multi_route_config, sample_multi_route_poses,
     },
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config, write_traffic_anim_config},
+    traffic_anim::{
+        is_traffic_flow_or_signal, parse_traffic_anim_config, write_traffic_anim_config,
+    },
     traffic_diversion::{
         is_traffic_diversion_anim, parse_traffic_diversion_config, write_traffic_diversion_config,
     },
@@ -104,7 +106,7 @@ impl RouteEditState {
 /// - `traffic_queue`: even `lane_idx = c*2` -> `corridors[c].queue_geom`, odd `lane_idx = c*2+1` -> `corridors[c].clear_geom`
 /// - regular routes: `anim.geom`
 pub fn editable_anim_geom(anim: &Anim, traffic_lane_idx: Option<usize>) -> Vec<[f64; 3]> {
-    if is_traffic_anim(anim) {
+    if is_traffic_flow_or_signal(anim) {
         let cfg = parse_traffic_anim_config(anim);
         let idx = traffic_lane_idx.unwrap_or(0);
         cfg.lanes
@@ -150,7 +152,7 @@ pub fn write_editable_anim_geom(
     traffic_lane_idx: Option<usize>,
     geom: Vec<[f64; 3]>,
 ) {
-    if is_traffic_anim(anim) {
+    if is_traffic_flow_or_signal(anim) {
         let mut cfg = parse_traffic_anim_config(anim);
         let idx = traffic_lane_idx.unwrap_or(0);
         if let Some(lane) = cfg.lanes.get_mut(idx) {
@@ -197,7 +199,7 @@ pub fn hit_test_traffic_lane_index(
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) -> Option<usize> {
-    if is_traffic_anim(anim) {
+    if is_traffic_flow_or_signal(anim) {
         let cfg = parse_traffic_anim_config(anim);
         let mut best: Option<(usize, f32)> = None;
         for (idx, lane) in cfg.lanes.iter().enumerate() {
@@ -339,7 +341,7 @@ pub fn hit_test_any_route_line(
         {
             continue;
         }
-        if twg_shared::traffic_anim::is_traffic_anim(anim) {
+        if twg_shared::traffic_anim::is_traffic_flow_or_signal(anim) {
             let cfg = twg_shared::traffic_anim::parse_traffic_anim_config(anim);
             for lane in &cfg.lanes {
                 if lane.geom.len() < 2 {

@@ -15,7 +15,10 @@ use twg_shared::{
         shoot_anim_is_continuous, shoot_anim_kind,
     },
     spawn_hide_anim::{SpawnHideAction, is_spawn_hide_anim, parse_spawn_hide_config},
-    traffic_anim::{is_traffic_anim, parse_traffic_anim_config},
+    traffic_anim::{
+        TrafficLightColor, is_traffic_anim, is_traffic_flow_or_signal, is_traffic_signal_anim,
+        parse_traffic_anim_config,
+    },
     traffic_diversion::{is_traffic_diversion_anim, parse_traffic_diversion_config},
     traffic_queue::{
         QueueManualAction, is_traffic_gridlock_anim, is_traffic_manual_anim,
@@ -647,10 +650,39 @@ pub fn draw_play_animation_panel(
                             }
                             continue;
                         }
+                        if twg_shared::billboard_anim::is_billboard_anim(anim) {
+                            use super::billboard_anim::BillboardPlayAction;
+                            match super::billboard_anim::draw_play_card(
+                                ui,
+                                state,
+                                playback,
+                                anim,
+                                true,
+                            ) {
+                                Some(BillboardPlayAction::Play) => action_play = Some(anim.id),
+                                Some(BillboardPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(BillboardPlayAction::Resume) => action_resume = Some(anim.id),
+                                Some(BillboardPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(BillboardPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        let local =
+                                            state.geo_anchor.lng_lat_alt_to_local(lng, lat, 0.0);
+                                        tcam.target_local = bevy::math::Vec2::new(local[0], local[2]);
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
                         let shoot_kind = shoot_anim_kind(anim);
                         let is_shoot = shoot_kind.is_some();
                         let is_particle = is_particle_anim(anim);
                         let is_traffic = is_traffic_anim(anim);
+                        let is_traffic_signal = is_traffic_signal_anim(anim);
                         let is_traffic_gridlock = is_traffic_gridlock_anim(anim);
                         let is_traffic_manual = is_traffic_manual_anim(anim);
                         let is_traffic_queue = is_traffic_queue_anim(anim);
@@ -664,8 +696,13 @@ pub fn draw_play_animation_panel(
                         } else {
                             false
                         };
-                        let tr_cfg = if is_traffic {
+                        let tr_cfg = if is_traffic || is_traffic_signal {
                             Some(parse_traffic_anim_config(anim))
+                        } else {
+                            None
+                        };
+                        let ts_live = if is_traffic_signal {
+                            state.traffic_signal_live_status.get(&anim.id).cloned()
                         } else {
                             None
                         };
@@ -899,6 +936,45 @@ pub fn draw_play_animation_panel(
                                             egui::Color32::from_rgb(254, 202, 202),
                                             egui::Color32::from_rgb(239, 68, 68),
                                         ),
+                                    }
+                                } else if is_traffic_signal {
+                                    if let Some(ref live) = ts_live {
+                                        if live.is_all_red {
+                                            (
+                                                "ALL-RED",
+                                                egui::Color32::from_rgb(136, 19, 55),
+                                                egui::Color32::from_rgb(253, 164, 175),
+                                                egui::Color32::from_rgb(225, 29, 72),
+                                            )
+                                        } else {
+                                            match live.active_color {
+                                                TrafficLightColor::Green => (
+                                                    "LAMPU HIJAU",
+                                                    egui::Color32::from_rgb(6, 78, 59),
+                                                    egui::Color32::from_rgb(110, 231, 183),
+                                                    egui::Color32::from_rgb(16, 185, 129),
+                                                ),
+                                                TrafficLightColor::Yellow => (
+                                                    "LAMPU KUNING",
+                                                    egui::Color32::from_rgb(113, 63, 18),
+                                                    egui::Color32::from_rgb(254, 240, 138),
+                                                    egui::Color32::from_rgb(234, 179, 8),
+                                                ),
+                                                TrafficLightColor::Red => (
+                                                    "LAMPU MERAH",
+                                                    egui::Color32::from_rgb(136, 19, 55),
+                                                    egui::Color32::from_rgb(253, 164, 175),
+                                                    egui::Color32::from_rgb(225, 29, 72),
+                                                ),
+                                            }
+                                        }
+                                    } else {
+                                        (
+                                            "LAMPU MERAH",
+                                            egui::Color32::from_rgb(136, 19, 55),
+                                            egui::Color32::from_rgb(253, 164, 175),
+                                            egui::Color32::from_rgb(225, 29, 72),
+                                        )
                                     }
                                 } else if is_traffic {
                                     (
@@ -1144,6 +1220,8 @@ pub fn draw_play_animation_panel(
                                                 egui::Color32::from_rgb(45, 212, 191),
                                             ),
                                         }
+                                    } else if is_traffic_signal {
+                                        ("[LAMPU MERAH]", egui::Color32::from_rgb(251, 113, 133))
                                     } else if is_traffic {
                                         ("[TRAFFIC]", egui::Color32::from_rgb(251, 191, 36))
                                     } else if is_traffic_gridlock {
@@ -1295,18 +1373,83 @@ pub fn draw_play_animation_panel(
                                         .iter()
                                         .filter(|l| l.enabled && l.geom.len() >= 2)
                                         .count();
-                                    let info_line = format!(
-                                        "{active_lanes} Jalur  •  {} Model Pool  •  {:.0}–{:.0} km/j{}",
-                                        trc.vehicle_pool.len(),
-                                        trc.min_speed_mps * 3.6,
-                                        trc.max_speed_mps * 3.6,
-                                        if trc.allow_overtaking { "  •  Salip" } else { "" }
-                                    );
+                                    let (info_line, info_col) = if is_traffic_signal {
+                                        if let Some(ref live) = ts_live
+                                            && matches!(
+                                                status,
+                                                AnimRunStatus::Playing | AnimRunStatus::Paused
+                                            )
+                                        {
+                                            let (c_lbl, c_col) = if live.is_all_red {
+                                                ("ALL-RED", egui::Color32::from_rgb(253, 164, 175))
+                                            } else {
+                                                match live.active_color {
+                                                    TrafficLightColor::Green => (
+                                                        "HIJAU",
+                                                        egui::Color32::from_rgb(110, 231, 183),
+                                                    ),
+                                                    TrafficLightColor::Yellow => (
+                                                        "KUNING",
+                                                        egui::Color32::from_rgb(254, 240, 138),
+                                                    ),
+                                                    TrafficLightColor::Red => (
+                                                        "MERAH",
+                                                        egui::Color32::from_rgb(253, 164, 175),
+                                                    ),
+                                                }
+                                            };
+                                            (
+                                                format!(
+                                                    "{} ({c_lbl} {:.1}s)  •  {} kendaraan ({} berhenti)",
+                                                    if live.active_phase_name.is_empty() {
+                                                        "APILL"
+                                                    } else {
+                                                        &live.active_phase_name
+                                                    },
+                                                    live.remaining_sec,
+                                                    live.total_vehicles,
+                                                    live.stopped_vehicles
+                                                ),
+                                                c_col,
+                                            )
+                                        } else {
+                                            let lights = trc
+                                                .traffic_lights
+                                                .iter()
+                                                .filter(|l| l.enabled)
+                                                .count();
+                                            let phases = trc.effective_signal_phases().len();
+                                            (
+                                                format!(
+                                                    "{active_lanes} Jalur  •  {lights} Lampu ({phases} Fase)  •  {:.0}–{:.0} km/j{}",
+                                                    trc.min_speed_mps * 3.6,
+                                                    trc.max_speed_mps * 3.6,
+                                                    if trc.allow_overtaking {
+                                                        "  •  Salip"
+                                                    } else {
+                                                        ""
+                                                    }
+                                                ),
+                                                egui::Color32::from_rgb(253, 164, 175),
+                                            )
+                                        }
+                                    } else {
+                                        (
+                                            format!(
+                                                "{active_lanes} Jalur  •  {} Model Pool  •  {:.0}–{:.0} km/j{}",
+                                                trc.vehicle_pool.len(),
+                                                trc.min_speed_mps * 3.6,
+                                                trc.max_speed_mps * 3.6,
+                                                if trc.allow_overtaking { "  •  Salip" } else { "" }
+                                            ),
+                                            egui::Color32::from_rgb(253, 230, 138),
+                                        )
+                                    };
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(info_line)
                                                 .size(11.0)
-                                                .color(egui::Color32::from_rgb(253, 230, 138)),
+                                                .color(info_col),
                                         )
                                         .truncate(),
                                     );
@@ -2506,12 +2649,22 @@ fn anim_matches_play_search(
             haystack.push(' ');
             haystack.push_str(&cfg.label_text);
         }
-    } else if is_traffic_anim(anim) {
+    } else if twg_shared::billboard_anim::is_billboard_anim(anim) {
+        haystack.push_str(" billboard videotron layar video gambar media ");
+        let cfg = twg_shared::billboard_anim::parse_billboard_anim_config(anim);
+        haystack.push_str(cfg.media_mode.label());
+    } else if is_traffic_flow_or_signal(anim) {
         let cfg = parse_traffic_anim_config(anim);
-        haystack.push_str(" traffic lalu lintas kendaraan jalan salip ");
+        haystack.push_str(
+            " traffic lalu lintas kendaraan jalan salip lampu merah apill simpang signal ",
+        );
         for l in &cfg.lanes {
             haystack.push(' ');
             haystack.push_str(&l.name);
+        }
+        for tl in &cfg.traffic_lights {
+            haystack.push(' ');
+            haystack.push_str(&tl.name);
         }
         for v in &cfg.vehicle_pool {
             haystack.push(' ');
