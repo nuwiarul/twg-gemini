@@ -799,7 +799,7 @@ pub fn draw_lines_and_routes_system(
         }
     }
 
-    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane / DrawTrafficDiversionLane / DrawWaterPolygon draft
+    // Active DrawRoute / DrawTrafficLane / DrawTrafficQueueLane / DrawTrafficDiversionLane / DrawWaterPolygon / DrawTacticalArrow draft
     if matches!(
         state.tool_mode,
         ToolMode::DrawRoute
@@ -807,10 +807,14 @@ pub fn draw_lines_and_routes_system(
             | ToolMode::DrawTrafficQueueLane
             | ToolMode::DrawTrafficDiversionLane
             | ToolMode::DrawWaterPolygon
+            | ToolMode::DrawTacticalArrow
     ) && !state.draft_points_lnglat.is_empty()
     {
         let color = if state.tool_mode == ToolMode::DrawWaterPolygon {
             Color::srgb(0.12, 0.78, 0.98)
+        } else if state.tool_mode == ToolMode::DrawTacticalArrow {
+            let (hex, _) = state.new_tactical_arrow_preset.default_colors();
+            parse_hex_color(hex, 1.0)
         } else if state.tool_mode == ToolMode::DrawTrafficDiversionLane {
             match state.drawing_diversion_target {
                 Some((_, Some((_, 1)))) => Color::srgb(0.08, 0.92, 0.58),

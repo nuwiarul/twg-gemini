@@ -57,7 +57,9 @@ use crate::{
         scenario_audio::{ScenarioAudio, scenario_audio_system},
         shoot_fx::{ShootFxVisualPool, shoot_fx_visual_system},
         skybox::{FillSkyLight, PrimarySunLight, SkyboxManager, sync_skybox_system},
+        tactical_arrow::{TacticalArrowVisualPool, tactical_arrow_visual_system},
         traffic::{TrafficVisualPool, traffic_visual_system},
+        video_recorder::{VideoRecorderState, video_recorder_system},
         water_cannon::{WaterCannonVisualPool, water_cannon_visual_system},
     },
     state::{
@@ -143,7 +145,9 @@ fn main() {
         .init_resource::<ShootFxVisualPool>()
         .init_resource::<ParticleFxPool>()
         .init_resource::<PointerArrowVisualPool>()
+        .init_resource::<TacticalArrowVisualPool>()
         .init_resource::<TrafficVisualPool>()
+        .init_resource::<VideoRecorderState>()
         .init_resource::<SkyboxManager>()
         .init_resource::<MarkerWorldBounds>()
         .init_resource::<BasicMeshTextureCache>()
@@ -216,9 +220,11 @@ fn main() {
                     shoot_fx_visual_system,
                     particle_fx_visual_system,
                     pointer_arrow_visual_system,
+                    tactical_arrow_visual_system,
                     traffic_visual_system,
                     billboard_visual_system,
                     environment_fx_visual_system,
+                    video_recorder_system,
                 )
                     .chain(),
             )
@@ -1135,6 +1141,9 @@ fn process_net_events_system(
                 let is_pointer = twg_shared::pointer_anim::is_pointer_arrow_anim(&a);
                 let is_model_action = twg_shared::model_action_anim::is_model_action_anim(&a);
                 let is_dialog = twg_shared::dialog_anim::is_dialog_anim(&a);
+                let is_tactical_arrow =
+                    twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(&a);
+                let is_hud_banner = twg_shared::hud_banner_anim::is_hud_banner_anim(&a);
                 let spawn_hide_act = twg_shared::spawn_hide_anim::spawn_hide_action(&a);
                 let is_spawn_hide = spawn_hide_act.is_some();
                 let group_mode_opt = twg_shared::group_anim::group_anim_mode(&a);
@@ -1154,6 +1163,8 @@ fn process_net_events_system(
                     && !is_pointer
                     && !is_model_action
                     && !is_dialog
+                    && !is_tactical_arrow
+                    && !is_hud_banner
                     && !is_spawn_hide
                     && !is_group
                     && bound_empty;
@@ -1168,6 +1179,14 @@ fn process_net_events_system(
                 state.sort_anims_by_order();
                 if is_audio {
                     state.status_banner = Some(format!("Play Suara '{anim_name}' dibuat — pilih Sound dari Assets di Inspector."));
+                } else if is_tactical_arrow {
+                    state.status_banner = Some(format!(
+                        "Panah Taktis '{anim_name}' dibuat — atur warna, lebar, kurva & kecepatan aliran di Inspector!"
+                    ));
+                } else if is_hud_banner {
+                    state.status_banner = Some(format!(
+                        "HUD Banner / Running Text '{anim_name}' dibuat — atur teks, tema warna & durasi di Inspector!"
+                    ));
                 } else if is_dialog {
                     state.dialog_preview_line_idx = Some((anim_id, 0));
                     state.status_banner = Some(format!(

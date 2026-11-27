@@ -5,7 +5,10 @@ mod billboard_anim;
 pub(crate) mod camera_anim;
 pub(crate) mod dialog_anim;
 pub(crate) mod environment_anim;
+pub(crate) mod hud_banner_anim;
 pub(crate) mod model_action_anim;
+pub(crate) mod tactical_arrow_anim;
+pub(crate) mod video_recorder_ui;
 mod bottom_bar;
 mod formation_pad;
 mod layar_besar_page;
@@ -49,6 +52,8 @@ use crate::{
         pointer_arrow::PointerArrowVisualPool,
         polygon_edit::{PolygonEditState, PolygonHoverTarget, draw_polygon_vertex_editor},
         route_edit::{RouteEditState, RouteHoverTarget, draw_route_editor_overlay},
+        tactical_arrow::TacticalArrowVisualPool,
+        video_recorder::VideoRecorderState,
     },
     state::{AppScreen, AppState, PlaybackState, PlotExit, ToolMode, UiPointerState},
 };
@@ -57,12 +62,18 @@ use crate::{
 pub fn egui_root_system(
     mut commands: Commands,
     mut contexts: EguiContexts,
+    time: Res<Time>,
     mut state: ResMut<AppState>,
-    (mut playback, mut play_rts): (ResMut<PlaybackState>, ResMut<PlayRtsState>),
-    (overrides, marker_bounds, pointer_pool): (
+    (mut playback, mut play_rts, mut recorder): (
+        ResMut<PlaybackState>,
+        ResMut<PlayRtsState>,
+        ResMut<VideoRecorderState>,
+    ),
+    (overrides, marker_bounds, pointer_pool, tactical_arrow_pool): (
         Res<PlaybackOverrides>,
         Res<MarkerWorldBounds>,
         Res<PointerArrowVisualPool>,
+        Res<TacticalArrowVisualPool>,
     ),
     gizmo_state: Res<TransformGizmoState>,
     (mut poly_edit, plot_line_edit, mut route_edit): (
@@ -291,8 +302,16 @@ pub fn egui_root_system(
             &overrides,
             &marker_bounds,
             &pointer_pool,
+            &tactical_arrow_pool,
             &camera,
             cam_gtf,
+        );
+        overlays::draw_hud_banners(
+            ctx,
+            center_rect,
+            &state,
+            &playback,
+            time.elapsed_secs_f64(),
         );
         overlays::draw_compass_and_telemetry_hud(
             ctx,
@@ -309,6 +328,7 @@ pub fn egui_root_system(
             &mut tcam,
             &mut playback,
             &mut play_rts,
+            &mut recorder,
             &api,
             &ws,
             &sync_bridge,
@@ -344,6 +364,7 @@ pub fn egui_root_system(
             &mut tcam,
             &mut playback,
             &mut play_rts,
+            &mut recorder,
             &api,
             &ws,
         );
@@ -383,8 +404,16 @@ pub fn egui_root_system(
         &overrides,
         &marker_bounds,
         &pointer_pool,
+        &tactical_arrow_pool,
         &camera,
         cam_gtf,
+    );
+    overlays::draw_hud_banners(
+        ctx,
+        center_rect,
+        &state,
+        &playback,
+        time.elapsed_secs_f64(),
     );
 
     draw_transform_gizmo(
@@ -590,6 +619,7 @@ pub fn egui_root_system(
                 | ToolMode::PickDialogSpeaker
                 | ToolMode::PlaceParticle
                 | ToolMode::DrawWaterPolygon
+                | ToolMode::DrawTacticalArrow
                 | ToolMode::PlaceRainZone
         )
     {

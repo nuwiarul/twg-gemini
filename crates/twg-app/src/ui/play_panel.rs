@@ -58,6 +58,7 @@ pub fn draw_play_animation_panel(
     tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
     play_rts: &mut PlayRtsState,
+    recorder: &mut crate::scene::video_recorder::VideoRecorderState,
     api: &ApiClientBridge,
     ws: &WsClientBridge,
 ) -> f32 {
@@ -165,6 +166,10 @@ pub fn draw_play_animation_panel(
             });
 
             ui.add_space(4.0);
+            if super::video_recorder_ui::VIDEO_RECORDER_UI_ENABLED {
+                super::video_recorder_ui::draw_play_panel_recorder_card(ui, recorder);
+                ui.add_space(4.0);
+            }
             if is_tactical_live {
                 let live_info = if can_big_screen {
                     "Mode Live: Animasi, RTS, Gizmo, Kamera & Load/Reload sinkron ke Layar Besar."
@@ -702,6 +707,49 @@ pub fn draw_play_animation_panel(
                                         fly_to = Some((lng, lat));
                                     }
                                 }
+                                None => {}
+                            }
+                            continue;
+                        }
+                        if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(anim) {
+                            use super::tactical_arrow_anim::TacticalArrowPlayAction;
+                            match super::tactical_arrow_anim::draw_play_card(
+                                ui,
+                                playback,
+                                anim,
+                                *global_idx,
+                            ) {
+                                Some(TacticalArrowPlayAction::Play) => action_play = Some(anim.id),
+                                Some(TacticalArrowPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(TacticalArrowPlayAction::Resume) => {
+                                    action_resume = Some(anim.id)
+                                }
+                                Some(TacticalArrowPlayAction::Stop) => action_stop = Some(anim.id),
+                                Some(TacticalArrowPlayAction::Focus) => {
+                                    if let Some((lng, lat)) = anim_primary_focus_lnglat(
+                                        anim,
+                                        &state.anims,
+                                        &state.markers,
+                                    ) {
+                                        fly_to = Some((lng, lat));
+                                    }
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
+                        if twg_shared::hud_banner_anim::is_hud_banner_anim(anim) {
+                            use super::hud_banner_anim::HudBannerPlayAction;
+                            match super::hud_banner_anim::draw_play_card(
+                                ui,
+                                playback,
+                                anim,
+                                *global_idx,
+                            ) {
+                                Some(HudBannerPlayAction::Play) => action_play = Some(anim.id),
+                                Some(HudBannerPlayAction::Pause) => action_pause = Some(anim.id),
+                                Some(HudBannerPlayAction::Resume) => action_resume = Some(anim.id),
+                                Some(HudBannerPlayAction::Stop) => action_stop = Some(anim.id),
                                 None => {}
                             }
                             continue;
@@ -2782,6 +2830,29 @@ fn anim_matches_play_search(
             if !line.text.is_empty() {
                 haystack.push(' ');
                 haystack.push_str(&line.text);
+            }
+        }
+    } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(anim) {
+        let cfg = twg_shared::tactical_arrow_anim::parse_tactical_arrow_config(anim);
+        haystack.push_str(" panah taktis alur serangan evakuasi massa penyekatan arrow ");
+        haystack.push_str(cfg.preset.label());
+        if !cfg.label_text.is_empty() {
+            haystack.push(' ');
+            haystack.push_str(&cfg.label_text);
+        }
+    } else if twg_shared::hud_banner_anim::is_hud_banner_anim(anim) {
+        let cfg = twg_shared::hud_banner_anim::parse_hud_banner_config(anim);
+        haystack.push_str(" banner judul babak lower third running text ticker hud informasi ");
+        haystack.push_str(cfg.style.label());
+        for part in [
+            &cfg.badge_text,
+            &cfg.title_text,
+            &cfg.subtitle_text,
+            &cfg.ticker_text,
+        ] {
+            if !part.is_empty() {
+                haystack.push(' ');
+                haystack.push_str(part);
             }
         }
     } else if twg_shared::billboard_anim::is_billboard_anim(anim) {

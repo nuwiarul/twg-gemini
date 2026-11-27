@@ -1232,6 +1232,12 @@ pub fn anim_is_playable(anim: &Anim, markers: &[Marker]) -> bool {
     if crate::dialog_anim::is_dialog_anim(anim) {
         return crate::dialog_anim::parse_dialog_anim_config(anim).has_playable_setup(markers);
     }
+    if crate::tactical_arrow_anim::is_tactical_arrow_anim(anim) {
+        return anim.geom.len() >= 2;
+    }
+    if crate::hud_banner_anim::is_hud_banner_anim(anim) {
+        return crate::hud_banner_anim::parse_hud_banner_config(anim).is_playable();
+    }
     if crate::particle_anim::is_particle_anim(anim) {
         return !anim.geom.is_empty();
     }

@@ -18,7 +18,9 @@ pub mod route_edit;
 pub mod scenario_audio;
 pub mod shoot_fx;
 pub mod skybox;
+pub mod tactical_arrow;
 pub mod traffic;
+pub mod video_recorder;
 pub mod water_cannon;
 
 pub fn parse_hex_color(hex: &str, alpha: f32) -> bevy::prelude::Color {

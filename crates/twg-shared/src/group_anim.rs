@@ -377,6 +377,12 @@ pub fn anim_is_continuous_unbounded(anim: &Anim) -> bool {
     if crate::environment_anim::is_rain_anim(anim) {
         return crate::environment_anim::parse_rain_anim_config(anim).continuous;
     }
+    if crate::tactical_arrow_anim::is_tactical_arrow_anim(anim) {
+        return crate::tactical_arrow_anim::parse_tactical_arrow_config(anim).continuous;
+    }
+    if crate::hud_banner_anim::is_hud_banner_anim(anim) {
+        return crate::hud_banner_anim::parse_hud_banner_config(anim).hold_until_stop;
+    }
     if crate::model_action_anim::is_model_action_anim(anim) {
         return crate::model_action_anim::parse_model_action_config(anim).is_continuous();
     }

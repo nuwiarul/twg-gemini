@@ -759,6 +759,74 @@ fn draw_tool_settings(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBr
                 });
             });
         }
+        ToolMode::DrawTacticalArrow => {
+            let redrawing_name = state
+                .redrawing_tactical_arrow_anim_id
+                .and_then(|aid| state.anims.iter().find(|a| a.id == aid))
+                .map(|a| a.name.clone());
+            let title = if redrawing_name.is_some() {
+                "Gambar Ulang Jalur Panah Taktis"
+            } else {
+                "Gambar Panah Alur Taktis 3D"
+            };
+            inspector_card(ui, title, true, |ui| {
+                if let Some(nm) = redrawing_name {
+                    ui.label(
+                        egui::RichText::new(format!("Animasi: {nm}"))
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(252, 165, 165)),
+                    );
+                } else {
+                    ui.label("Nama Panah Taktis:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.new_tactical_arrow_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Titik jalur: {} (min 2 titik). Klik di peta untuk menambah titik.",
+                        state.draft_points_lnglat.len()
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let can_finish = state.draft_points_lnglat.len() >= 2;
+                    if ui
+                        .add_enabled(
+                            can_finish,
+                            egui::Button::new(
+                                egui::RichText::new("Selesai (Enter)")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105)),
+                        )
+                        .clicked()
+                    {
+                        finish_active_draft(state, api);
+                    }
+                    if ui
+                        .add_enabled(
+                            !state.draft_points_lnglat.is_empty(),
+                            egui::Button::new("Undo"),
+                        )
+                        .clicked()
+                    {
+                        state.draft_points_lnglat.pop();
+                    }
+                    if ui.small_button("Batal (Esc)").clicked() {
+                        state.draft_points_lnglat.clear();
+                        state.redrawing_tactical_arrow_anim_id = None;
+                        state.tool_mode = ToolMode::Select;
+                    }
+                });
+            });
+        }
         ToolMode::DrawRoute => {
             let is_patwal_mode =
                 state.new_route_is_multi && state.new_route_formation == RouteFormationKind::Patwal;
@@ -3053,6 +3121,10 @@ fn draw_editor_preview_card(
         "Pilih 1 Objek 3D (model Animasi) & klip aksi tambahan di Inspector terlebih dahulu".into()
     } else if twg_shared::dialog_anim::is_dialog_anim(a) {
         "Tambahkan minimal 1 baris dialog dengan Pembicara dan teks terlebih dahulu".into()
+    } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+        "Gambar jalur Panah Taktis minimal 2 titik di peta terlebih dahulu".into()
+    } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+        "Isi Judul atau teks Running Text terlebih dahulu".into()
     } else if is_group {
         "Tambahkan minimal 1 animasi anggota ke dalam grup untuk menjalankan preview".into()
     } else if is_traffic_flow_or_signal(a) {
@@ -3737,6 +3809,12 @@ fn draw_anim_inspector(
     } else if twg_shared::dialog_anim::is_dialog_anim(&a) {
         draw_editor_preview_card(ui, state, playback, route_edit, &a);
         super::dialog_anim::draw_inspector(ui, state, &mut a, editable);
+    } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::tactical_arrow_anim::draw_inspector(ui, state, &mut a, editable);
+    } else if twg_shared::hud_banner_anim::is_hud_banner_anim(&a) {
+        draw_editor_preview_card(ui, state, playback, route_edit, &a);
+        super::hud_banner_anim::draw_inspector(ui, state, &mut a, editable);
     } else if is_particle_anim(&a) {
         draw_particle_inspector_cards(ui, state, &mut a, editable);
     } else if is_traffic_flow_or_signal(&a) {
@@ -5336,6 +5414,10 @@ fn draw_anim_inspector(
             "Pilih 1 Objek 3D (model Animasi) & klip aksi tambahan terlebih dahulu"
         } else if twg_shared::dialog_anim::is_dialog_anim(&a) {
             "Tambahkan minimal 1 baris dialog dengan Pembicara dan teks terlebih dahulu"
+        } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(&a) {
+            "Gambar jalur Panah Taktis minimal 2 titik di peta terlebih dahulu"
+        } else if twg_shared::hud_banner_anim::is_hud_banner_anim(&a) {
+            "Isi Judul atau teks Running Text terlebih dahulu"
         } else if is_shoot_anim(&a) {
             "Pilih 1 Model 3D sumber animasi Shoot terlebih dahulu"
         } else {
@@ -9047,6 +9129,12 @@ fn short_anim_badge_for_picker(a: &twg_shared::models::Anim) -> &'static str {
         "AKSI 3D"
     } else if twg_shared::dialog_anim::is_dialog_anim(a) {
         "DIALOG"
+    } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+        "ALUR 3D"
+    } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+        twg_shared::hud_banner_anim::parse_hud_banner_config(a)
+            .style
+            .short_tag()
     } else if let Some(sk) = shoot_anim_kind(a) {
         sk.short_tag()
     } else if twg_shared::billboard_anim::is_billboard_anim(a) {

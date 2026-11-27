@@ -1006,6 +1006,7 @@ pub enum ToolMode {
     PlaceTrafficLight,
     PlaceBillboard,
     DrawWaterPolygon,
+    DrawTacticalArrow,
     PlaceRainZone,
     PickRouteMarker,
     PickShootMarker,
@@ -1037,6 +1038,7 @@ impl ToolMode {
             Self::PlaceTrafficLight => "Pasang Lampu Merah",
             Self::PlaceBillboard => "Pasang Billboard",
             Self::DrawWaterPolygon => "Gambar Area Air",
+            Self::DrawTacticalArrow => "Gambar Panah Taktis",
             Self::PlaceRainZone => "Zona Hujan Lokal",
             Self::PickRouteMarker => "Pilih Unit",
             Self::PickShootMarker => "Pilih Unit Shoot",
@@ -1113,7 +1115,7 @@ impl AnimCategory {
             "play_sound" | "billboard" => Self::Audio,
             "camera_static" | "camera_follow" => Self::Camera,
             "water_sim" | "rain_sim" => Self::Environment,
-            "model_action" | "dialog" => Self::Other,
+            "model_action" | "dialog" | "tactical_arrow" | "hud_banner" => Self::Other,
             "route" | "single_route" | "route_multi" | "convoy_route" => Self::Route,
             s if s == "traffic_flow" || s.starts_with("traffic_") => Self::Route,
             s if s == "shoot" || s.starts_with("shoot_") => Self::Shoot,
@@ -1139,6 +1141,36 @@ impl AnimCategory {
                 Self::Other
             }
             _ => Self::Route,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OtherAnimSubTab {
+    #[default]
+    TacticalArrow,
+    HudBanner,
+    Dialog,
+    ModelAction,
+    PointerArrow,
+}
+
+impl OtherAnimSubTab {
+    pub const ALL: &'static [Self] = &[
+        Self::TacticalArrow,
+        Self::HudBanner,
+        Self::Dialog,
+        Self::ModelAction,
+        Self::PointerArrow,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TacticalArrow => "Panah Taktis",
+            Self::HudBanner => "Banner / Ticker",
+            Self::Dialog => "Dialog 3D",
+            Self::ModelAction => "Aksi 3D",
+            Self::PointerArrow => "Panah Penunjuk",
         }
     }
 }
@@ -1528,6 +1560,10 @@ impl PlaybackState {
                 !twg_shared::dialog_anim::parse_dialog_anim_config(a)
                     .playable_lines()
                     .is_empty()
+            } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+                a.geom.len() >= 2
+            } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+                twg_shared::hud_banner_anim::parse_hud_banner_config(a).is_playable()
             } else if twg_shared::spawn_hide_anim::is_spawn_hide_anim(a) {
                 let cfg = twg_shared::spawn_hide_anim::parse_spawn_hide_config(a);
                 cfg.include_in_play_all && !cfg.marker_ids.is_empty()
@@ -1723,6 +1759,7 @@ pub struct AppState {
     pub text_edit: Option<TextMarker>,
     pub anim_edit: Option<Anim>,
     pub anim_category_filter: AnimCategory,
+    pub other_anim_subtab: OtherAnimSubTab,
     pub anim_list_filter: Option<AnimCategory>,
     pub picking_marker_for_anim_id: Option<Uuid>,
     pub picking_shoot_for_anim_id: Option<Uuid>,
@@ -1802,6 +1839,11 @@ pub struct AppState {
     pub new_dialog_name: String,
     pub dialog_preview_line_idx: Option<(Uuid, usize)>,
     pub dialog_status: HashMap<Uuid, String>,
+    pub new_tactical_arrow_preset: twg_shared::tactical_arrow_anim::TacticalArrowPreset,
+    pub new_tactical_arrow_name: String,
+    pub redrawing_tactical_arrow_anim_id: Option<Uuid>,
+    pub new_hud_banner_style: twg_shared::hud_banner_anim::HudBannerStyle,
+    pub new_hud_banner_name: String,
     /// Whether scrubbing/selecting a Shoot animation with a character action clip shows its live pose at `trigger_frame` on the 3D map.
     pub shoot_pose_preview_enabled: bool,
     /// Whether the bound marker's `Idle` pose is displayed side-by-side in the Plot Editor for visual scale comparison.
@@ -2023,6 +2065,7 @@ impl AppState {
             text_edit: None,
             anim_edit: None,
             anim_category_filter: AnimCategory::Route,
+            other_anim_subtab: OtherAnimSubTab::TacticalArrow,
             anim_list_filter: None,
             picking_marker_for_anim_id: None,
             picking_shoot_for_anim_id: None,
@@ -2065,6 +2108,11 @@ impl AppState {
             new_dialog_name: "Dialog 1".to_string(),
             dialog_preview_line_idx: None,
             dialog_status: HashMap::new(),
+            new_tactical_arrow_preset: twg_shared::tactical_arrow_anim::TacticalArrowPreset::Attack,
+            new_tactical_arrow_name: "Panah Taktis 1".to_string(),
+            redrawing_tactical_arrow_anim_id: None,
+            new_hud_banner_style: twg_shared::hud_banner_anim::HudBannerStyle::TitleCard,
+            new_hud_banner_name: "Banner Tahap 1".to_string(),
             shoot_pose_preview_enabled: true,
             shoot_pose_compare_idle: false,
             action_clip_durations: HashMap::new(),

@@ -1844,7 +1844,14 @@ fn draw_layers_tab(
                             || "model".contains(&filter)
                             || "dialog".contains(&filter)
                             || "bicara".contains(&filter)
-                            || "bubble".contains(&filter))
+                            || "bubble".contains(&filter)
+                            || "alur".contains(&filter)
+                            || "taktis".contains(&filter)
+                            || "serangan".contains(&filter)
+                            || "evakuasi".contains(&filter)
+                            || "banner".contains(&filter)
+                            || "ticker".contains(&filter)
+                            || "running".contains(&filter))
                 })
                 .count();
             let other_header = if has_active_filter {
@@ -1877,6 +1884,13 @@ fn draw_layers_tab(
                         && !"dialog".contains(&filter)
                         && !"bicara".contains(&filter)
                         && !"bubble".contains(&filter)
+                        && !"alur".contains(&filter)
+                        && !"taktis".contains(&filter)
+                        && !"serangan".contains(&filter)
+                        && !"evakuasi".contains(&filter)
+                        && !"banner".contains(&filter)
+                        && !"ticker".contains(&filter)
+                        && !"running".contains(&filter)
                     {
                         continue;
                     }
@@ -1909,6 +1923,10 @@ fn draw_layers_tab(
                                         ("[AKSI 3D]", egui::Color32::from_rgb(251, 191, 36))
                                     } else if twg_shared::dialog_anim::is_dialog_anim(a) {
                                         ("[DIALOG]", egui::Color32::from_rgb(56, 189, 248))
+                                    } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+                                        ("[ALUR 3D]", egui::Color32::from_rgb(248, 113, 113))
+                                    } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+                                        ("[BANNER]", egui::Color32::from_rgb(165, 180, 252))
                                     } else if is_pointer_arrow_anim(a) {
                                         ("[PANAH]", egui::Color32::from_rgb(250, 204, 21))
                                     } else {
@@ -3642,37 +3660,104 @@ fn draw_animations_tab(
 
     ui.add_space(6.0);
 
-    match state.anim_category_filter {
-        AnimCategory::Route => draw_route_create_card(ui, state, editable),
-        AnimCategory::Shoot => draw_shoot_create_card(ui, state, editable),
-        AnimCategory::Particle => draw_particle_create_card(ui, state, editable),
-        AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
-        AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
-        AnimCategory::Other => {
-            super::dialog_anim::draw_create(ui, state, api, editable);
-            ui.add_space(6.0);
-            super::model_action_anim::draw_create(ui, state, api, editable);
-            ui.add_space(6.0);
-            draw_other_create_card(ui, state, editable);
-        }
-        AnimCategory::Audio => {
-            super::audio_anim::draw_create(ui, state, api, editable);
-            super::billboard_anim::draw_create(ui, state, editable);
-        }
-        AnimCategory::Camera => {
-            super::camera_anim::draw_create(ui, state, tcam, api, editable);
-        }
-        AnimCategory::Environment => {
-            super::environment_anim::draw_create(ui, state, api, editable);
-        }
-    }
+    egui::ScrollArea::vertical()
+        .id_salt("anim_tab_master_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            match state.anim_category_filter {
+                AnimCategory::Route => draw_route_create_card(ui, state, editable),
+                AnimCategory::Shoot => draw_shoot_create_card(ui, state, editable),
+                AnimCategory::Particle => draw_particle_create_card(ui, state, editable),
+                AnimCategory::SpawnHide => draw_spawn_hide_create_card(ui, state, api, editable),
+                AnimCategory::Group => draw_group_create_card(ui, state, api, editable),
+                AnimCategory::Other => {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(12, 19, 31))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 48, 72)))
+                        .corner_radius(5.0)
+                        .inner_margin(egui::Margin::same(4))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                for &sub in crate::state::OtherAnimSubTab::ALL {
+                                    let active = state.other_anim_subtab == sub;
+                                    let fill = if active {
+                                        match sub {
+                                            crate::state::OtherAnimSubTab::TacticalArrow => {
+                                                egui::Color32::from_rgb(185, 28, 28)
+                                            }
+                                            crate::state::OtherAnimSubTab::HudBanner => {
+                                                egui::Color32::from_rgb(79, 70, 229)
+                                            }
+                                            crate::state::OtherAnimSubTab::Dialog => {
+                                                egui::Color32::from_rgb(2, 132, 199)
+                                            }
+                                            crate::state::OtherAnimSubTab::ModelAction => {
+                                                egui::Color32::from_rgb(217, 119, 6)
+                                            }
+                                            crate::state::OtherAnimSubTab::PointerArrow => {
+                                                egui::Color32::from_rgb(161, 98, 7)
+                                            }
+                                        }
+                                    } else {
+                                        egui::Color32::from_rgb(22, 30, 45)
+                                    };
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new(sub.label())
+                                            .size(10.0)
+                                            .strong()
+                                            .color(if active {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                egui::Color32::from_rgb(148, 163, 184)
+                                            }),
+                                    )
+                                    .fill(fill)
+                                    .small();
+                                    if ui.add(btn).clicked() {
+                                        state.other_anim_subtab = sub;
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(5.0);
+                    match state.other_anim_subtab {
+                        crate::state::OtherAnimSubTab::TacticalArrow => {
+                            super::tactical_arrow_anim::draw_create(ui, state, editable);
+                        }
+                        crate::state::OtherAnimSubTab::HudBanner => {
+                            super::hud_banner_anim::draw_create(ui, state, api, editable);
+                        }
+                        crate::state::OtherAnimSubTab::Dialog => {
+                            super::dialog_anim::draw_create(ui, state, api, editable);
+                        }
+                        crate::state::OtherAnimSubTab::ModelAction => {
+                            super::model_action_anim::draw_create(ui, state, api, editable);
+                        }
+                        crate::state::OtherAnimSubTab::PointerArrow => {
+                            draw_other_create_card(ui, state, editable);
+                        }
+                    }
+                }
+                AnimCategory::Audio => {
+                    super::audio_anim::draw_create(ui, state, api, editable);
+                    super::billboard_anim::draw_create(ui, state, editable);
+                }
+                AnimCategory::Camera => {
+                    super::camera_anim::draw_create(ui, state, tcam, api, editable);
+                }
+                AnimCategory::Environment => {
+                    super::environment_anim::draw_create(ui, state, api, editable);
+                }
+            }
 
-    ui.add_space(7.0);
-    ui.separator();
-    ui.add_space(5.0);
+            ui.add_space(7.0);
+            ui.separator();
+            ui.add_space(5.0);
 
-    // Section 2: Master Ordered Animation List (Global 'Semua' default + Category Filters + Up/Down Sort!)
-    draw_ordered_animation_list(ui, state, tcam, playback, editable);
+            // Section 2: Master Ordered Animation List (Global 'Semua' default + Category Filters + Up/Down Sort!)
+            draw_ordered_animation_list(ui, state, tcam, playback, editable);
+        });
 }
 
 fn draw_group_create_card(
@@ -5156,26 +5241,20 @@ fn draw_ordered_animation_list(
     let mut reorder_action: Option<(uuid::Uuid, bool)> = None;
     let mut fly_to: Option<(f64, f64)> = None;
 
-    egui::ScrollArea::vertical()
-        .id_salt("anim_tab_ordered_list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if visible_anims.is_empty() {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(if total_count == 0 {
-                        "Belum ada animasi.\nPilih kategori dan buat animasi melalui tombol di atas."
-                    } else {
-                        "Tidak ada animasi di filter kategori ini.\nPilih 'Semua' untuk melihat seluruh urutan skenario."
-                    })
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(148, 163, 184)),
-                );
-                return;
-            }
-
-            let vis_len = visible_anims.len();
-            for (vis_pos, (global_idx, a)) in visible_anims.iter().enumerate() {
+    if visible_anims.is_empty() {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(if total_count == 0 {
+                "Belum ada animasi.\nPilih kategori dan buat animasi melalui tombol di atas."
+            } else {
+                "Tidak ada animasi di filter kategori ini.\nPilih 'Semua' untuk melihat seluruh urutan skenario."
+            })
+            .size(11.0)
+            .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
+    } else {
+        let vis_len = visible_anims.len();
+        for (vis_pos, (global_idx, a)) in visible_anims.iter().enumerate() {
                 let is_sel = state.selected == SelectedEntity::Anim(a.id);
                 let is_locked = state.locked_entity_ids.contains(&a.id);
                 let is_multi = is_multi_route_anim(a);
@@ -5282,6 +5361,11 @@ fn draw_ordered_animation_list(
                             ("AKSI 3D", egui::Color32::from_rgb(217, 119, 6))
                         } else if twg_shared::dialog_anim::is_dialog_anim(a) {
                             ("DIALOG", egui::Color32::from_rgb(2, 132, 199))
+                        } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+                            ("ALUR 3D", egui::Color32::from_rgb(185, 28, 28))
+                        } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+                            let st = twg_shared::hud_banner_anim::parse_hud_banner_config(a).style;
+                            (st.short_tag(), egui::Color32::from_rgb(79, 70, 229))
                         } else if is_pointer_arrow_anim(a) {
                             ("PANAH 3D", egui::Color32::from_rgb(180, 83, 9))
                         } else {
@@ -5563,6 +5647,10 @@ fn draw_ordered_animation_list(
                             super::model_action_anim::anim_summary(state, a)
                         } else if twg_shared::dialog_anim::is_dialog_anim(a) {
                             super::dialog_anim::anim_summary(state, a)
+                        } else if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a) {
+                            super::tactical_arrow_anim::anim_summary(a)
+                        } else if twg_shared::hud_banner_anim::is_hud_banner_anim(a) {
+                            super::hud_banner_anim::anim_summary(a)
                         } else if is_pointer_arrow_anim(a) {
                             let cfg = parse_pointer_arrow_config(a);
                             let unit_name = a
@@ -5744,7 +5832,7 @@ fn draw_ordered_animation_list(
                     });
                 ui.add_space(4.0);
             }
-        });
+    }
 
     if let Some((aid, move_up)) = reorder_action {
         let changed = state.move_anim_in_order(aid, move_up, list_filter);

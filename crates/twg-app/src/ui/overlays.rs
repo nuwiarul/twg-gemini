@@ -7,6 +7,7 @@ use crate::{
         basic_mesh::BasicMeshShape, gizmo::compute_gizmo_world_radius,
         markers::MarkerWorldBounds, parse_hex_color, play_rts::PlayRtsState,
         playback::PlaybackOverrides, pointer_arrow::PointerArrowVisualPool,
+        tactical_arrow::TacticalArrowVisualPool,
     },
     state::{AnimRunStatus, AppState, PlaybackState, ToolMode},
 };
@@ -20,6 +21,7 @@ pub fn draw_projected_labels(
     overrides: &PlaybackOverrides,
     marker_bounds: &MarkerWorldBounds,
     pointer_pool: &PointerArrowVisualPool,
+    tactical_arrow_pool: &TacticalArrowVisualPool,
     camera: &Camera,
     cam_gtf: &GlobalTransform,
 ) {
@@ -124,6 +126,31 @@ pub fn draw_projected_labels(
                     lbl.font_size,
                     lbl.show_bg,
                 );
+            }
+        }
+    }
+
+    // Active 3D Tactical Flow Arrow floating midpoint labels
+    for lbl in &tactical_arrow_pool.active_labels {
+        if let Ok(screen) = camera.world_to_viewport(cam_gtf, lbl.world_pos) {
+            let pos = egui::pos2(screen.x, screen.y);
+            if clip_rect.contains(pos) {
+                let tc = parse_hex_color(&lbl.accent_hex, 1.0).to_srgba();
+                let alpha_u8 = (lbl.alpha.clamp(0.0, 1.0) * 255.0) as u8;
+                let text_col = egui::Color32::from_rgba_unmultiplied(
+                    (tc.red * 255.0) as u8,
+                    (tc.green * 255.0) as u8,
+                    (tc.blue * 255.0) as u8,
+                    alpha_u8,
+                );
+                let bc = parse_hex_color(&lbl.color_hex, 1.0).to_srgba();
+                let border_col = egui::Color32::from_rgba_unmultiplied(
+                    (bc.red * 255.0) as u8,
+                    (bc.green * 255.0) as u8,
+                    (bc.blue * 255.0) as u8,
+                    (lbl.alpha.clamp(0.0, 1.0) * 230.0) as u8,
+                );
+                draw_pointer_label(&painter, pos, &lbl.text, text_col, border_col, 13.0, true);
             }
         }
     }
@@ -374,6 +401,11 @@ pub fn draw_projected_labels(
             ToolMode::DrawWaterPolygon => format!(
                 "Mode Gambar Area Air ({}): Klik minimal 3 titik ({} titik) — Klik titik #1 atau Enter selesai, Esc batal",
                 state.new_water_name,
+                state.draft_points_lnglat.len()
+            ),
+            ToolMode::DrawTacticalArrow => format!(
+                "Mode Gambar Panah Taktis ({}): Klik minimal 2 titik ({} titik) — Enter selesai, Backspace undo, Esc batal",
+                state.new_tactical_arrow_name,
                 state.draft_points_lnglat.len()
             ),
             ToolMode::PlaceRainZone => format!(
@@ -1105,4 +1137,432 @@ fn draw_speech_bubble(
         body_galley,
         text_col,
     );
+}
+
+/// Renders active broadcast-style **HUD Banners** (Title Card, Lower-Third, and Running Text / Ticker)
+/// cleanly over the 3D viewport in Play Skenario, Layar Besar, and live Plot Editor preview.
+pub fn draw_hud_banners(
+    ctx: &egui::Context,
+    clip_rect: egui::Rect,
+    state: &AppState,
+    playback: &PlaybackState,
+    wall_time_sec: f64,
+) {
+    use twg_shared::hud_banner_anim::{
+        HudBannerConfig, HudBannerEval, HudBannerPosition, HudBannerStyle, is_hud_banner_anim,
+        parse_hud_banner_config,
+    };
+
+    let playback_active = playback.is_playback_active();
+    let mut active_banners: Vec<(HudBannerConfig, HudBannerEval)> = Vec::new();
+
+    if playback_active {
+        for anim in &state.anims {
+            if !is_hud_banner_anim(anim) || state.hidden_entity_ids.contains(&anim.id) {
+                continue;
+            }
+            let status = playback.track_status(anim.id);
+            if status != AnimRunStatus::Playing && status != AnimRunStatus::Paused {
+                continue;
+            }
+            let elapsed = playback
+                .tracks
+                .get(&anim.id)
+                .map(|t| t.distance_m)
+                .unwrap_or(0.0);
+            let cfg = parse_hud_banner_config(anim);
+            let eval = cfg.evaluate_at(elapsed);
+            if eval.visible {
+                active_banners.push((cfg, eval));
+            }
+        }
+    } else if let Some(edit_anim) = state.anim_edit.as_ref()
+        && state.selected == crate::SelectedEntity::Anim(edit_anim.id)
+        && is_hud_banner_anim(edit_anim)
+        && !state.hidden_entity_ids.contains(&edit_anim.id)
+    {
+        let cfg = parse_hud_banner_config(edit_anim);
+        let eval = cfg.preview_eval(wall_time_sec);
+        if eval.visible {
+            active_banners.push((cfg, eval));
+        }
+    }
+
+    if active_banners.is_empty() {
+        return;
+    }
+
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("twg_hud_banners"),
+        ))
+        .with_clip_rect(clip_rect);
+
+    let has_running_text = active_banners
+        .iter()
+        .any(|(c, _)| c.style == HudBannerStyle::RunningText);
+    let bottom_ticker_reserve = if has_running_text { 46.0 } else { 0.0 };
+
+    let mut top_stack_y = clip_rect.top() + 26.0;
+    let mut bottom_left_y = clip_rect.bottom() - 24.0 - bottom_ticker_reserve;
+    let mut bottom_center_y = clip_rect.bottom() - 24.0 - bottom_ticker_reserve;
+    let mut center_stack_offset = 0.0_f32;
+
+    for (cfg, eval) in active_banners {
+        let alpha = eval.alpha.clamp(0.0, 1.0);
+        let slide = (1.0 - eval.enter_progress.clamp(0.0, 1.0)) * 18.0;
+
+        let acc_s = parse_hex_color(&cfg.accent_color, 1.0).to_srgba();
+        let bg_s = parse_hex_color(&cfg.bg_color, 1.0).to_srgba();
+        let txt_s = parse_hex_color(&cfg.text_color, 1.0).to_srgba();
+
+        let accent_col = egui::Color32::from_rgba_unmultiplied(
+            (acc_s.red * 255.0) as u8,
+            (acc_s.green * 255.0) as u8,
+            (acc_s.blue * 255.0) as u8,
+            (alpha * 255.0) as u8,
+        );
+        let bg_col = egui::Color32::from_rgba_unmultiplied(
+            (bg_s.red * 255.0) as u8,
+            (bg_s.green * 255.0) as u8,
+            (bg_s.blue * 255.0) as u8,
+            (alpha * cfg.bg_opacity * 255.0) as u8,
+        );
+        let text_col = egui::Color32::from_rgba_unmultiplied(
+            (txt_s.red * 255.0) as u8,
+            (txt_s.green * 255.0) as u8,
+            (txt_s.blue * 255.0) as u8,
+            (alpha * 255.0) as u8,
+        );
+        let sub_col = egui::Color32::from_rgba_unmultiplied(
+            (txt_s.red * 215.0) as u8,
+            (txt_s.green * 222.0) as u8,
+            (txt_s.blue * 232.0) as u8,
+            (alpha * 220.0) as u8,
+        );
+        let shadow_col = egui::Color32::from_rgba_unmultiplied(0, 0, 0, (alpha * 115.0) as u8);
+
+        match cfg.style {
+            HudBannerStyle::RunningText => {
+                let bar_h = (36.0 * cfg.font_scale).clamp(28.0, 56.0);
+                let bar_rect = egui::Rect::from_min_max(
+                    egui::pos2(clip_rect.left(), clip_rect.bottom() - bar_h + slide),
+                    egui::pos2(clip_rect.right(), clip_rect.bottom() + slide),
+                );
+                painter.rect_filled(bar_rect, 0.0, bg_col);
+                painter.line_segment(
+                    [bar_rect.left_top(), bar_rect.right_top()],
+                    egui::Stroke::new(2.0, accent_col),
+                );
+
+                // Left label badge ("SITUASI LIVE")
+                let badge_txt = if cfg.badge_text.trim().is_empty() {
+                    "INFO".to_string()
+                } else {
+                    cfg.badge_text.trim().to_uppercase()
+                };
+                let badge_font = egui::FontId::proportional((12.5 * cfg.font_scale).clamp(10.0, 22.0));
+                let badge_galley = painter.layout_no_wrap(
+                    badge_txt,
+                    badge_font,
+                    egui::Color32::from_rgba_unmultiplied(10, 15, 25, (alpha * 255.0) as u8),
+                );
+                let badge_w = badge_galley.size().x + 22.0;
+                let badge_rect = egui::Rect::from_min_size(
+                    bar_rect.left_top(),
+                    egui::vec2(badge_w, bar_h),
+                );
+                painter.rect_filled(badge_rect, 0.0, accent_col);
+                painter.galley(
+                    egui::pos2(
+                        badge_rect.left() + 11.0,
+                        badge_rect.center().y - badge_galley.size().y * 0.5,
+                    ),
+                    badge_galley,
+                    egui::Color32::from_rgba_unmultiplied(10, 15, 25, (alpha * 255.0) as u8),
+                );
+
+                // Seamless horizontal scrolling text in the remainder of the bar
+                let track_rect = egui::Rect::from_min_max(
+                    egui::pos2(badge_rect.right() + 6.0, bar_rect.top()),
+                    egui::pos2(bar_rect.right() - 8.0, bar_rect.bottom()),
+                );
+                if track_rect.width() > 40.0 {
+                    let ticker_painter = painter.with_clip_rect(track_rect);
+                    let font = egui::FontId::proportional((14.0 * cfg.font_scale).clamp(11.0, 24.0));
+                    let item = format!("{}     •     ", cfg.ticker_text.trim());
+                    let g = ticker_painter.layout_no_wrap(item.clone(), font.clone(), text_col);
+                    let seg_w = g.size().x.max(120.0);
+                    let offset = ((eval.scroll_sec * cfg.ticker_speed_px as f64) % (seg_w as f64)) as f32;
+                    let text_y = track_rect.center().y - g.size().y * 0.5;
+                    let mut x = track_rect.left() - offset;
+                    while x < track_rect.right() {
+                        let g_copy = ticker_painter.layout_no_wrap(item.clone(), font.clone(), text_col);
+                        ticker_painter.galley(egui::pos2(x, text_y), g_copy, text_col);
+                        x += seg_w;
+                    }
+                }
+            }
+            HudBannerStyle::TitleCard => {
+                let max_w = (clip_rect.width() * 0.72).clamp(280.0, 720.0);
+                let pad_x = 22.0;
+                let pad_y = 14.0;
+                let badge_font = egui::FontId::proportional((11.5 * cfg.font_scale).clamp(9.5, 20.0));
+                let title_font = egui::FontId::proportional((21.0 * cfg.font_scale).clamp(14.0, 36.0));
+                let sub_font = egui::FontId::proportional((13.0 * cfg.font_scale).clamp(10.5, 22.0));
+
+                let badge_g = if !cfg.badge_text.trim().is_empty() {
+                    Some(painter.layout_no_wrap(
+                        cfg.badge_text.trim().to_uppercase(),
+                        badge_font,
+                        accent_col,
+                    ))
+                } else {
+                    None
+                };
+                let title_g = if !cfg.title_text.trim().is_empty() {
+                    Some(painter.layout(
+                        cfg.title_text.trim().to_string(),
+                        title_font,
+                        text_col,
+                        max_w - pad_x * 2.0,
+                    ))
+                } else {
+                    None
+                };
+                let sub_g = if !cfg.subtitle_text.trim().is_empty() {
+                    Some(painter.layout(
+                        cfg.subtitle_text.trim().to_string(),
+                        sub_font,
+                        sub_col,
+                        max_w - pad_x * 2.0,
+                    ))
+                } else {
+                    None
+                };
+
+                let content_w = [
+                    badge_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                    title_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                    sub_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                ]
+                .into_iter()
+                .fold(220.0_f32, f32::max);
+                let mut content_h = 0.0_f32;
+                if let Some(g) = &badge_g {
+                    content_h += g.size().y + 5.0;
+                }
+                if let Some(g) = &title_g {
+                    content_h += g.size().y;
+                }
+                if let Some(g) = &sub_g {
+                    content_h += 5.0 + g.size().y;
+                }
+
+                let box_w = (content_w + pad_x * 2.0).min(max_w);
+                let box_h = content_h + pad_y * 2.0;
+
+                let rect = match cfg.position {
+                    HudBannerPosition::TopCenter => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(clip_rect.center().x, top_stack_y + box_h * 0.5 - slide),
+                            egui::vec2(box_w, box_h),
+                        );
+                        top_stack_y += box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::Center => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(
+                                clip_rect.center().x,
+                                clip_rect.center().y + center_stack_offset - slide,
+                            ),
+                            egui::vec2(box_w, box_h),
+                        );
+                        center_stack_offset += box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::BottomLeft => {
+                        let r = egui::Rect::from_min_size(
+                            egui::pos2(clip_rect.left() + 24.0 - slide, bottom_left_y - box_h),
+                            egui::vec2(box_w, box_h),
+                        );
+                        bottom_left_y -= box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::BottomCenter => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(
+                                clip_rect.center().x,
+                                bottom_center_y - box_h * 0.5 + slide,
+                            ),
+                            egui::vec2(box_w, box_h),
+                        );
+                        bottom_center_y -= box_h + 10.0;
+                        r
+                    }
+                };
+
+                painter.rect_filled(rect.translate(egui::vec2(0.0, 4.0)), 10.0, shadow_col);
+                painter.rect_filled(rect, 10.0, bg_col);
+                painter.rect_stroke(
+                    rect,
+                    10.0,
+                    egui::Stroke::new(1.5, accent_col),
+                    egui::StrokeKind::Inside,
+                );
+                // Top accent bar
+                let accent_bar = egui::Rect::from_min_size(
+                    rect.left_top() + egui::vec2(14.0, 0.0),
+                    egui::vec2((rect.width() - 28.0).max(20.0), 3.5),
+                );
+                painter.rect_filled(accent_bar, 2.0, accent_col);
+
+                let mut y = rect.top() + pad_y;
+                if let Some(g) = badge_g {
+                    let x = rect.center().x - g.size().x * 0.5;
+                    let gh = g.size().y;
+                    painter.galley(egui::pos2(x, y), g, accent_col);
+                    y += gh + 5.0;
+                }
+                if let Some(g) = title_g {
+                    let x = rect.center().x - g.size().x * 0.5;
+                    let gh = g.size().y;
+                    painter.galley(egui::pos2(x, y), g, text_col);
+                    y += gh + 5.0;
+                }
+                if let Some(g) = sub_g {
+                    let x = rect.center().x - g.size().x * 0.5;
+                    painter.galley(egui::pos2(x, y), g, sub_col);
+                }
+            }
+            HudBannerStyle::LowerThird => {
+                let max_w = (clip_rect.width() * 0.56).clamp(250.0, 560.0);
+                let pad_left = 18.0;
+                let pad_right = 18.0;
+                let pad_y = 10.0;
+                let badge_font = egui::FontId::proportional((10.5 * cfg.font_scale).clamp(9.0, 18.0));
+                let title_font = egui::FontId::proportional((16.5 * cfg.font_scale).clamp(12.5, 28.0));
+                let sub_font = egui::FontId::proportional((12.0 * cfg.font_scale).clamp(10.0, 20.0));
+
+                let badge_g = if !cfg.badge_text.trim().is_empty() {
+                    Some(painter.layout_no_wrap(
+                        cfg.badge_text.trim().to_uppercase(),
+                        badge_font,
+                        accent_col,
+                    ))
+                } else {
+                    None
+                };
+                let title_g = if !cfg.title_text.trim().is_empty() {
+                    Some(painter.layout(
+                        cfg.title_text.trim().to_string(),
+                        title_font,
+                        text_col,
+                        max_w - pad_left - pad_right,
+                    ))
+                } else {
+                    None
+                };
+                let sub_g = if !cfg.subtitle_text.trim().is_empty() {
+                    Some(painter.layout(
+                        cfg.subtitle_text.trim().to_string(),
+                        sub_font,
+                        sub_col,
+                        max_w - pad_left - pad_right,
+                    ))
+                } else {
+                    None
+                };
+
+                let content_w = [
+                    badge_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                    title_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                    sub_g.as_ref().map(|g| g.size().x).unwrap_or(0.0),
+                ]
+                .into_iter()
+                .fold(180.0_f32, f32::max);
+                let mut content_h = 0.0_f32;
+                if let Some(g) = &badge_g {
+                    content_h += g.size().y + 3.0;
+                }
+                if let Some(g) = &title_g {
+                    content_h += g.size().y;
+                }
+                if let Some(g) = &sub_g {
+                    content_h += 3.0 + g.size().y;
+                }
+
+                let box_w = (content_w + pad_left + pad_right).min(max_w);
+                let box_h = content_h + pad_y * 2.0;
+
+                let rect = match cfg.position {
+                    HudBannerPosition::TopCenter => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(clip_rect.center().x, top_stack_y + box_h * 0.5 - slide),
+                            egui::vec2(box_w, box_h),
+                        );
+                        top_stack_y += box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::Center => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(
+                                clip_rect.center().x,
+                                clip_rect.center().y + center_stack_offset - slide,
+                            ),
+                            egui::vec2(box_w, box_h),
+                        );
+                        center_stack_offset += box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::BottomCenter => {
+                        let r = egui::Rect::from_center_size(
+                            egui::pos2(
+                                clip_rect.center().x,
+                                bottom_center_y - box_h * 0.5 + slide,
+                            ),
+                            egui::vec2(box_w, box_h),
+                        );
+                        bottom_center_y -= box_h + 10.0;
+                        r
+                    }
+                    HudBannerPosition::BottomLeft => {
+                        let r = egui::Rect::from_min_size(
+                            egui::pos2(clip_rect.left() + 24.0 - slide, bottom_left_y - box_h),
+                            egui::vec2(box_w, box_h),
+                        );
+                        bottom_left_y -= box_h + 10.0;
+                        r
+                    }
+                };
+
+                painter.rect_filled(rect.translate(egui::vec2(0.0, 3.0)), 6.0, shadow_col);
+                painter.rect_filled(rect, 6.0, bg_col);
+                // Thick vertical broadcast accent bar on the left edge
+                let left_bar = egui::Rect::from_min_size(
+                    rect.left_top(),
+                    egui::vec2(5.5, rect.height()),
+                );
+                painter.rect_filled(left_bar, 3.0, accent_col);
+
+                let mut y = rect.top() + pad_y;
+                let x = rect.left() + pad_left;
+                if let Some(g) = badge_g {
+                    let gh = g.size().y;
+                    painter.galley(egui::pos2(x, y), g, accent_col);
+                    y += gh + 3.0;
+                }
+                if let Some(g) = title_g {
+                    let gh = g.size().y;
+                    painter.galley(egui::pos2(x, y), g, text_col);
+                    y += gh + 3.0;
+                }
+                if let Some(g) = sub_g {
+                    painter.galley(egui::pos2(x, y), g, sub_col);
+                }
+            }
+        }
+    }
 }

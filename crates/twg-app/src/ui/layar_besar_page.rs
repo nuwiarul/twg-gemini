@@ -27,6 +27,7 @@ pub fn draw_layar_besar_overlay(
     tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
     play_rts: &mut PlayRtsState,
+    recorder: &mut crate::scene::video_recorder::VideoRecorderState,
     api: &ApiClientBridge,
     ws: &WsClientBridge,
     sync_bridge: &AssetSyncBridge,
@@ -105,6 +106,8 @@ pub fn draw_layar_besar_overlay(
                                 .strong()
                                 .color(ws_col),
                         );
+
+                        super::video_recorder_ui::draw_compact_recorder_button(ui, recorder);
 
                         let refresh_tip = if state.active_skenario.is_some() {
                             "Refresh Layar Besar ke kondisi skenario kosong & sambung ulang koneksi live (F5)"

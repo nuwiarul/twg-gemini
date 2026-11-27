@@ -3520,6 +3520,7 @@ pub fn map_interaction_system(
                     | ToolMode::DrawBasicPolygon
                     | ToolMode::DrawGroundPolygon
                     | ToolMode::DrawWaterPolygon
+                    | ToolMode::DrawTacticalArrow
                     | ToolMode::DrawRoute
                     | ToolMode::DrawTrafficLane
                     | ToolMode::DrawTrafficQueueLane
@@ -3531,6 +3532,13 @@ pub fn map_interaction_system(
             return;
         }
         if keys.just_pressed(KeyCode::Escape) {
+            if state.tool_mode == ToolMode::DrawTacticalArrow {
+                state.draft_points_lnglat.clear();
+                state.redrawing_tactical_arrow_anim_id = None;
+                state.tool_mode = ToolMode::Select;
+                state.status_banner = Some("Penggambaran Panah Taktis dibatalkan.".into());
+                return;
+            }
             if state.tool_mode == ToolMode::DrawTrafficLane {
                 state.draft_points_lnglat.clear();
                 state.drawing_traffic_lane_for_anim_id = None;
@@ -4806,6 +4814,7 @@ pub fn map_interaction_system(
         | ToolMode::DrawBasicPolygon
         | ToolMode::DrawGroundPolygon
         | ToolMode::DrawWaterPolygon
+        | ToolMode::DrawTacticalArrow
         | ToolMode::DrawRoute
         | ToolMode::DrawTrafficLane
         | ToolMode::DrawTrafficQueueLane
@@ -6086,6 +6095,121 @@ pub fn finish_active_draft(state: &mut AppState, api: &ApiClientBridge) {
                     });
                 }
                 state.new_water_name = kind.default_name(w_cnt + 1);
+            }
+            state.tool_mode = ToolMode::Select;
+        }
+        ToolMode::DrawTacticalArrow => {
+            if pts.len() < 2 {
+                state.status_banner =
+                    Some("Panah Taktis butuh minimal 2 titik jalur (klik di peta).".into());
+                return;
+            }
+            let geom: Vec<[f64; 3]> = pts.iter().map(|p| [p[0], p[1], 0.0]).collect();
+            if let Some(anim_id) = state.redrawing_tactical_arrow_anim_id.take() {
+                if let Some(anim) = state.anims.iter_mut().find(|a| a.id == anim_id) {
+                    anim.geom = geom;
+                    let updated = anim.clone();
+                    state.selected = SelectedEntity::Anim(anim_id);
+                    state.anim_edit = Some(updated.clone());
+                    state.dirty_anim_ids.insert(anim_id);
+                    if !state.offline_preview
+                        && let Some(auth) = current_auth(state)
+                    {
+                        api.send(ApiCommand::UpdateAnim {
+                            auth,
+                            id: anim_id,
+                            req: UpdateAnimRequest {
+                                marker_id: updated.marker_id,
+                                name: updated.name.clone(),
+                                anim_type: updated.anim_type,
+                                sort_order: updated.sort_order,
+                                speed: updated.speed,
+                                duration_sec: updated.duration_sec,
+                                replay: updated.replay,
+                                autoplay: updated.autoplay,
+                                geom: updated.geom,
+                                data: updated.data,
+                            },
+                        });
+                    }
+                    state.status_banner = Some(format!(
+                        "Jalur Panah Taktis '{}' diperbarui ({} titik).",
+                        updated.name,
+                        pts.len()
+                    ));
+                }
+            } else {
+                let preset = state.new_tactical_arrow_preset;
+                let ta_cnt = state
+                    .anims
+                    .iter()
+                    .filter(|a| twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(a))
+                    .count()
+                    + 1;
+                let name = if state.new_tactical_arrow_name.trim().is_empty() {
+                    format!("{} {ta_cnt}", preset.label())
+                } else {
+                    state.new_tactical_arrow_name.trim().to_string()
+                };
+                let mut cfg = twg_shared::tactical_arrow_anim::TacticalArrowConfig::default();
+                cfg.apply_preset(preset);
+                let sort_order = (state.anims.len() + 1) as i32;
+                let now = chrono::Utc::now();
+                let mut anim = Anim {
+                    id: Uuid::new_v4(),
+                    operasi_id: sk.operasi_id,
+                    skenario_id: sk.id,
+                    marker_id: None,
+                    name: name.clone(),
+                    anim_type: twg_shared::tactical_arrow_anim::ANIM_TYPE_TACTICAL_ARROW
+                        .to_string(),
+                    sort_order,
+                    speed: 1.0,
+                    duration_sec: 0.0,
+                    replay: false,
+                    autoplay: false,
+                    geom,
+                    data: serde_json::json!({}),
+                    created_at: now,
+                    updated_at: now,
+                };
+                twg_shared::tactical_arrow_anim::write_tactical_arrow_config(&mut anim, &cfg);
+
+                if state.offline_preview {
+                    let aid = anim.id;
+                    state.selected = SelectedEntity::Anim(aid);
+                    state.anim_edit = Some(anim.clone());
+                    state.marker_edit = None;
+                    state.building_edit = None;
+                    state.line_edit = None;
+                    state.text_edit = None;
+                    state.anims.push(anim);
+                    state.sort_anims_by_order();
+                    state.status_banner = Some(format!(
+                        "Panah Taktis '{name}' dibuat ({} titik) — atur warna, lebar & kecepatan panah di Inspector!",
+                        pts.len()
+                    ));
+                } else if let Some(auth) = current_auth(state) {
+                    api.send(ApiCommand::CreateAnim {
+                        auth,
+                        req: CreateAnimRequest {
+                            operasi_id: sk.operasi_id,
+                            skenario_id: sk.id,
+                            marker_id: None,
+                            name,
+                            anim_type: twg_shared::tactical_arrow_anim::ANIM_TYPE_TACTICAL_ARROW
+                                .to_string(),
+                            sort_order,
+                            speed: 1.0,
+                            duration_sec: anim.duration_sec,
+                            replay: false,
+                            autoplay: false,
+                            geom: anim.geom,
+                            data: anim.data,
+                        },
+                    });
+                }
+                state.new_tactical_arrow_name = format!("{} {}", preset.label(), ta_cnt + 1);
             }
             state.tool_mode = ToolMode::Select;
         }

@@ -126,6 +126,7 @@ pub fn playback_system(
                 | ToolMode::DrawTrafficLane
                 | ToolMode::DrawTrafficQueueLane
                 | ToolMode::DrawTrafficDiversionLane
+                | ToolMode::DrawTacticalArrow
                 | ToolMode::PickRouteMarker
                 | ToolMode::PickShootMarker
                 | ToolMode::PickPointerMarker
@@ -443,6 +444,60 @@ pub fn playback_system(
                 }
             } else if track.status == AnimRunStatus::Stopped {
                 dialog_status_updates.push((anim.id, None));
+            }
+            continue;
+        }
+
+        // Animated Tactical Flow Arrow (`tactical_arrow`) advances elapsed seconds in `track.distance_m`.
+        if twg_shared::tactical_arrow_anim::is_tactical_arrow_anim(anim) {
+            let cfg = twg_shared::tactical_arrow_anim::parse_tactical_arrow_config(anim);
+            let total_dur = cfg.finite_duration_sec();
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = total_dur;
+
+            if track.status == AnimRunStatus::Playing {
+                if anim.geom.len() < 2 {
+                    track.status = AnimRunStatus::Stopped;
+                    track.trigger_seq = 0;
+                } else {
+                    track.distance_m += step_dt;
+                    if !cfg.continuous && total_dur > 1e-4 && track.distance_m >= total_dur {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= total_dur.max(0.1);
+                        } else {
+                            track.distance_m = total_dur;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // HUD Banner / Lower-Third / Running Text (`hud_banner`) advances elapsed seconds in `track.distance_m`.
+        if twg_shared::hud_banner_anim::is_hud_banner_anim(anim) {
+            let cfg = twg_shared::hud_banner_anim::parse_hud_banner_config(anim);
+            let total_dur = cfg.finite_duration_sec();
+            let track = playback.tracks.entry(anim.id).or_default();
+            track.total_length_m = total_dur;
+
+            if track.status == AnimRunStatus::Playing {
+                if !cfg.is_playable() {
+                    track.status = AnimRunStatus::Stopped;
+                    track.trigger_seq = 0;
+                } else {
+                    track.distance_m += step_dt;
+                    if !cfg.hold_until_stop && total_dur > 1e-4 && track.distance_m >= total_dur {
+                        track.completed_cycles = track.completed_cycles.saturating_add(1);
+                        if anim.replay {
+                            track.distance_m %= total_dur.max(0.1);
+                        } else {
+                            track.distance_m = total_dur;
+                            track.status = AnimRunStatus::Finished;
+                        }
+                    }
+                }
             }
             continue;
         }
