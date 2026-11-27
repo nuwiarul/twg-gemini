@@ -158,7 +158,12 @@ pub struct ActionSubtreeSlot {
     pub base_auto_scale: Option<f32>,
     /// Last applied uniform scale (`base_auto_scale * user_scale_multiplier`) to avoid redundant writes.
     pub applied_scale: f32,
+    /// Seconds this action rig has remained hidden/inactive; auto-despawned once it reaches the idle grace period.
+    pub idle_secs: f32,
 }
+
+const IDLE_RIG_DESPAWN_DELAY_SECS: f32 = 5.0;
+const MAX_IDLE_RIG_DESPAWNS_PER_FRAME: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MarkerLodTier {
@@ -190,6 +195,8 @@ pub struct TacticalMarkerEntity {
     pub walk_child: Option<Entity>,
     pub walk_anim_graph: Option<SubtreeAnimGraph>,
     pub walk_scale_calibrated: bool,
+    /// Seconds `walk_child` has stayed hidden/unused while resting; auto-despawned after grace period.
+    pub walk_idle_secs: f32,
     pub action_slots: HashMap<String, ActionSubtreeSlot>,
     pub embedded_action_graphs: HashMap<String, (Handle<AnimationGraph>, AnimationNodeIndex)>,
     pub active_action_key: Option<String>,
@@ -240,7 +247,8 @@ impl TacticalMarkerEntity {
         if Some(entity) == self.lod2_child {
             return true;
         }
-        let show_walk = self.is_walking_now && self.walk_child.is_some();
+        let show_walk =
+            self.is_walking_now && self.walk_child.is_some() && self.walk_scale_calibrated;
         if show_walk {
             Some(entity) == self.idle_child
                 || self.action_slots.values().any(|s| s.child_entity == entity)
@@ -1226,6 +1234,7 @@ fn resolve_cached_model_meta<'a>(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn sync_markers_system(
     mut commands: Commands,
+    time: Res<Time>,
     state: Res<AppState>,
     playback: Res<PlaybackState>,
     overrides: Res<PlaybackOverrides>,
@@ -1244,11 +1253,13 @@ pub fn sync_markers_system(
     mut child_vis_q: Query<&mut Visibility, Without<TacticalMarkerEntity>>,
     mut model_meta_cache: Local<HashMap<String, CachedModelLodMeta>>,
     mut cached_catalog_len: Local<usize>,
+    mut preloaded_walk_assets: Local<HashMap<String, (Handle<Gltf>, Handle<WorldAsset>)>>,
 ) {
     if !state.is_3d_map_screen() {
         for (entity, _, _, _) in &existing_q {
             commands.entity(entity).despawn();
         }
+        preloaded_walk_assets.clear();
         bench.lod0_active_count = 0;
         bench.lod2_active_count = 0;
         bench.far_culled_count = 0;
@@ -1258,9 +1269,11 @@ pub fn sync_markers_system(
     // Invalidate per-model LOD metadata cache if catalog changed (e.g. new upload or refresh)
     if *cached_catalog_len != state.catalog.len() {
         model_meta_cache.clear();
+        preloaded_walk_assets.clear();
         *cached_catalog_len = state.catalog.len();
     }
 
+    let dt_sec = time.delta_secs().min(0.25);
     let playback_active = playback.is_playback_active();
     let cam_pos = cam_q
         .single()
@@ -1310,6 +1323,7 @@ pub fn sync_markers_system(
     let mut far_culled_count = 0usize;
     // Amortize LOD tier swaps during fast camera panning so crossing the 120m ring never spikes frame time
     let mut lod_switches_this_frame = 0usize;
+    let mut idle_walk_despawns_this_frame = 0usize;
     const MAX_LOD_SWITCHES_PER_FRAME: usize = 96;
 
     for (entity, mut comp, mut tf, mut vis) in &mut existing_q {
@@ -1438,6 +1452,7 @@ pub fn sync_markers_system(
                         comp.idle_anim_graph = None;
                         comp.walk_anim_graph = None;
                         comp.walk_scale_calibrated = false;
+                        comp.walk_idle_secs = 0.0;
 
                         if comp.lod2_child.is_none()
                             && let Some(lp) = &comp.lod2_model_path
@@ -1493,21 +1508,31 @@ pub fn sync_markers_system(
                 }
             }
 
-            // Only manage Walk lazy-spawn & Idle<->Walk visibility when in LOD0!
+            // Only manage Walk lazy-spawn, idle auto-despawn & Idle<->Walk visibility when in LOD0!
             if comp.lod_tier == MarkerLodTier::Lod0 {
                 lod0_count += 1;
+                let walk_in_use = is_moving && comp.active_action_key.is_none();
                 if is_moving
                     && comp.walk_child.is_none()
+                    && comp.active_action_key.is_none()
                     && let Some(wp) = &comp.walk_model_path
                 {
-                    let walk_gltf = asset_server.load(wp.clone());
-                    let walk_scene =
-                        asset_server.load(GltfAssetLabel::Scene(0).from_asset(wp.clone()));
+                    let (walk_gltf, walk_scene) = preloaded_walk_assets
+                        .entry(wp.clone())
+                        .or_insert_with(|| {
+                            (
+                                asset_server.load(wp.clone()),
+                                asset_server.load(GltfAssetLabel::Scene(0).from_asset(wp.clone())),
+                            )
+                        })
+                        .clone();
+                    // Spawn Hidden first so `idle_child` remains visible until `walk_child` finishes
+                    // instantiating & calibrating scale (prevents 1-2s invisible gap on first move!).
                     let wc = commands
                         .spawn((
                             WorldAssetRoot(walk_scene),
                             Transform::IDENTITY,
-                            Visibility::Inherited,
+                            Visibility::Hidden,
                         ))
                         .id();
                     commands.entity(entity).add_child(wc);
@@ -1516,11 +1541,34 @@ pub fn sync_markers_system(
                     comp.walk_players_cache.clear();
                     comp.walk_has_no_anims = false;
                     comp.walk_scale_calibrated = false;
+                    comp.walk_idle_secs = 0.0;
                     comp.bounds_dirty = true;
+                } else if walk_in_use {
+                    if comp.walk_idle_secs != 0.0 {
+                        comp.walk_idle_secs = 0.0;
+                    }
+                } else if lazy_walk && comp.walk_child.is_some() {
+                    // Auto-despawn hidden Walk bone rig after idle grace period so resting units
+                    // drop back to 0 skeleton bones even in LOD0! Keep `walk_gltf_handle` cached
+                    // so respawning on the next move hits AssetServer memory cache immediately.
+                    comp.walk_idle_secs += dt_sec;
+                    if comp.walk_idle_secs >= IDLE_RIG_DESPAWN_DELAY_SECS
+                        && idle_walk_despawns_this_frame < MAX_IDLE_RIG_DESPAWNS_PER_FRAME
+                        && let Some(we) = comp.walk_child.take()
+                    {
+                        commands.entity(we).despawn();
+                        comp.walk_players_cache.clear();
+                        comp.walk_anim_graph = None;
+                        comp.walk_scale_calibrated = false;
+                        comp.walk_idle_secs = 0.0;
+                        comp.bounds_dirty = true;
+                        idle_walk_despawns_this_frame += 1;
+                    }
                 }
 
                 if comp.active_action_key.is_none() {
-                    let show_walk = is_moving && comp.walk_child.is_some();
+                    let show_walk =
+                        is_moving && comp.walk_child.is_some() && comp.walk_scale_calibrated;
                     if let Some(idle_e) = comp.idle_child
                         && let Ok(mut iv) = child_vis_q.get_mut(idle_e)
                     {
@@ -1728,6 +1776,7 @@ pub fn sync_markers_system(
                         walk_child: None,
                         walk_anim_graph: None,
                         walk_scale_calibrated: true,
+                        walk_idle_secs: 0.0,
                         action_slots: HashMap::new(),
                         embedded_action_graphs: HashMap::new(),
                         active_action_key: None,
@@ -1758,6 +1807,21 @@ pub fn sync_markers_system(
         let walk_path_opt = meta.walk_path;
         let lod2_path_opt = meta.lod2_path;
         let lod2_scale_ratio = meta.lod2_scale_ratio;
+
+        // Zero-entity background preload of unique Walk GLB assets used in this scenario:
+        // Keeps 0 skeleton bones / 0 ECS entities while idle, yet eliminates the 1-2s disk load
+        // delay when a unit starts moving for the very first time!
+        if let Some(wp) = &walk_path_opt
+            && !preloaded_walk_assets.contains_key(wp)
+        {
+            preloaded_walk_assets.insert(
+                wp.clone(),
+                (
+                    asset_server.load(wp.clone()),
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(wp.clone())),
+                ),
+            );
+        }
 
         let spawn_as_lod2 = auto_lod
             && lod2_path_opt.is_some()
@@ -1794,14 +1858,15 @@ pub fn sync_markers_system(
                     None
                 };
                 let spawn_walk_now = walk_path_opt.is_some() && (!lazy_walk || is_moving);
-                let walk_gltf_h: Option<Handle<Gltf>> = if spawn_walk_now {
+                let preloaded_pair = if spawn_walk_now {
                     walk_path_opt
                         .as_ref()
-                        .map(|wp| asset_server.load(wp.clone()))
+                        .and_then(|wp| preloaded_walk_assets.get(wp).cloned())
                 } else {
                     None
                 };
-                let show_walk = is_moving && spawn_walk_now;
+                let walk_gltf_h: Option<Handle<Gltf>> =
+                    preloaded_pair.as_ref().map(|(g, _)| g.clone());
                 let ic = if has_glb {
                     let scene_h =
                         asset_server.load(GltfAssetLabel::Scene(0).from_asset(render_path.clone()));
@@ -1810,36 +1875,22 @@ pub fn sync_markers_system(
                             .spawn((
                                 WorldAssetRoot(scene_h),
                                 Transform::IDENTITY,
-                                if show_walk {
-                                    Visibility::Hidden
-                                } else {
-                                    Visibility::Inherited
-                                },
+                                Visibility::Inherited,
                             ))
                             .id(),
                     )
                 } else {
                     None
                 };
-                let wc = if spawn_walk_now {
-                    walk_path_opt.as_ref().map(|wp| {
-                        let walk_scene =
-                            asset_server.load(GltfAssetLabel::Scene(0).from_asset(wp.clone()));
-                        commands
-                            .spawn((
-                                WorldAssetRoot(walk_scene),
-                                Transform::IDENTITY,
-                                if show_walk {
-                                    Visibility::Inherited
-                                } else {
-                                    Visibility::Hidden
-                                },
-                            ))
-                            .id()
-                    })
-                } else {
-                    None
-                };
+                let wc = preloaded_pair.map(|(_, walk_scene)| {
+                    commands
+                        .spawn((
+                            WorldAssetRoot(walk_scene),
+                            Transform::IDENTITY,
+                            Visibility::Hidden,
+                        ))
+                        .id()
+                });
                 (MarkerLodTier::Lod0, gltf_h, ic, walk_gltf_h, wc, None)
             };
 
@@ -1862,6 +1913,7 @@ pub fn sync_markers_system(
                     walk_child,
                     walk_anim_graph: None,
                     walk_scale_calibrated: false,
+                    walk_idle_secs: 0.0,
                     action_slots: HashMap::new(),
                     embedded_action_graphs: HashMap::new(),
                     active_action_key: None,
@@ -2236,22 +2288,100 @@ fn calibrate_and_apply_action_slot_scale(
     true
 }
 
+#[derive(Default)]
+pub struct PreloadedActionCache {
+    sig: (Option<Uuid>, usize, usize, usize, usize),
+    assets: HashMap<String, (Handle<Gltf>, Handle<WorldAsset>)>,
+}
+
+/// Collects unique relative paths of uploaded `extra_animations` (`run`/`lari`, `shoot`,
+/// `melambai`, `lempar`, `pingsan`, etc.) actually referenced by animations in the active scenario
+/// so they can be preloaded in background (0 entities, 0 bones) for instant first-time playback.
+fn collect_scenario_action_asset_paths(state: &AppState) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut push_unique = |rel: &str| {
+        if !rel.is_empty()
+            && (state.available_model_paths.contains(rel) || state.assets_root.join(rel).exists())
+            && !paths.iter().any(|p| p == rel)
+        {
+            paths.push(rel.to_string());
+        }
+    };
+
+    let resolve_slug = |marker_id: Uuid, slug: &str| -> Option<String> {
+        let slug = slug.trim();
+        if slug.is_empty() || slug.starts_with("embedded:") {
+            return None;
+        }
+        let m = state.markers.iter().find(|x| x.id == marker_id)?;
+        let cat = state.catalog.iter().find(|c| c.model_path == m.model_path)?;
+        cat.extra_animations
+            .iter()
+            .find(|a| a.slug == slug)
+            .map(|a| a.model_path.clone())
+    };
+
+    for anim in &state.anims {
+        if twg_shared::model_action_anim::is_model_action_anim(anim) {
+            if let Some(mid) = anim.marker_id {
+                let cfg = twg_shared::model_action_anim::parse_model_action_config(anim);
+                if let Some(rel) = resolve_slug(mid, &cfg.action_slug) {
+                    push_unique(&rel);
+                }
+            }
+        } else if twg_shared::shoot_anim::is_shoot_anim(anim) {
+            if let Some(mid) = anim.marker_id {
+                let cfg = twg_shared::shoot_anim::parse_shoot_model_action_config(anim);
+                if cfg.is_enabled()
+                    && let Some(rel) = resolve_slug(mid, &cfg.action_slug)
+                {
+                    push_unique(&rel);
+                }
+            }
+        } else if anim.anim_type == "route" || twg_shared::route_formation::is_multi_route_anim(anim)
+        {
+            let move_cfg = twg_shared::route_formation::parse_route_move_anim_config(anim);
+            for mid in twg_shared::route_formation::anim_bound_marker_ids(anim) {
+                let eff = move_cfg.effective_for_marker(mid);
+                if eff.mode == twg_shared::route_formation::RouteMoveAnimMode::Walk {
+                    continue;
+                }
+                if let Some(m) = state.markers.iter().find(|x| x.id == mid)
+                    && let Some(cat) = state.catalog.iter().find(|c| c.model_path == m.model_path)
+                    && let Some(slug) = twg_shared::route_formation::resolve_route_move_action_slug(
+                        &eff,
+                        &cat.extra_animations,
+                    )
+                    && let Some(act) = cat.extra_animations.iter().find(|a| a.slug == slug)
+                {
+                    push_unique(&act.model_path);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
 /// Drives embedded glTF AnimationPlayers independently per marker:
 /// - Markers with separate Idle + Walk `.glb` files play Walk ONLY while moving and Idle when resting.
 /// - Single-file dual-clip animated markers (e.g. `*_anim_1.glb` vehicles/helicopters with `Idle|Idle`
 ///   and `Idle|Walk`) switch cleanly to their Walk clip while moving along any route and Idle at rest.
 /// - Custom `model_action` clips (`extra_animations` uploaded on Animated models, or embedded GLB clips)
 ///   override Idle while active, with automatic Route Priority handoff (auto-stop when moving -> Walk).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn animate_markers_system(
     mut commands: Commands,
+    time: Res<Time>,
     mut state: ResMut<AppState>,
     mut playback: ResMut<PlaybackState>,
     bench: Res<crate::scene::benchmark::PerformanceBenchmarkState>,
     asset_server: Res<AssetServer>,
-    gltfs: Res<Assets<Gltf>>,
-    anim_clips: Res<Assets<AnimationClip>>,
-    mut anim_graphs: ResMut<Assets<AnimationGraph>>,
+    (gltfs, anim_clips, mut anim_graphs): (
+        Res<Assets<Gltf>>,
+        Res<Assets<AnimationClip>>,
+        ResMut<Assets<AnimationGraph>>,
+    ),
     cam_q: Query<&GlobalTransform, With<crate::map::camera::TacticalCamera>>,
     mut marker_q: Query<(Entity, &mut TacticalMarkerEntity, &Transform)>,
     mut pending_lod2_strip_q: Query<(Entity, &mut Lod2StripSkinningPending)>,
@@ -2259,10 +2389,47 @@ pub fn animate_markers_system(
     mesh_aabb_q: Query<(&GlobalTransform, &Aabb)>,
     mut child_vis_q: Query<&mut Visibility, Without<TacticalMarkerEntity>>,
     mut anim_player_q: Query<(Entity, &mut AnimationPlayer, Option<&AnimationGraphHandle>)>,
+    mut preloaded_actions: Local<PreloadedActionCache>,
 ) {
     if !state.is_3d_map_screen() {
+        if !preloaded_actions.assets.is_empty() {
+            preloaded_actions.assets.clear();
+            preloaded_actions.sig = (None, 0, 0, 0, 0);
+        }
         return;
     }
+
+    // Zero-entity background preload of unique `extra_animations` (`run`/`lari`, `shoot`,
+    // `melambai`, etc.) referenced by animations in the active scenario. Only re-scans when
+    // scenario/anims/catalog/files change (0 CPU cost per frame when unchanged).
+    let action_sig = (
+        state.active_skenario.as_ref().map(|s| s.id),
+        state.anims.len(),
+        state.catalog.len(),
+        state.available_model_paths.len(),
+        state.dirty_anim_ids.len(),
+    );
+    if preloaded_actions.sig != action_sig {
+        let needed = collect_scenario_action_asset_paths(&state);
+        preloaded_actions
+            .assets
+            .retain(|k, _| needed.iter().any(|n| n == k));
+        for rel_path in needed {
+            preloaded_actions
+                .assets
+                .entry(rel_path.clone())
+                .or_insert_with(|| {
+                    (
+                        asset_server.load(rel_path.clone()),
+                        asset_server.load(GltfAssetLabel::Scene(0).from_asset(rel_path)),
+                    )
+                });
+        }
+        preloaded_actions.sig = action_sig;
+    }
+
+    let dt_sec = time.delta_secs().min(0.25);
+    let mut idle_action_despawns_this_frame = 0usize;
 
     // One-shot zero-skinning stripper for newly instantiated LOD2 subtrees:
     // Ensures far `*_idle_lod2.glb` / `*_lod2.glb` meshes NEVER run GPU skinning or AnimationPlayer,
@@ -2602,9 +2769,18 @@ pub fn animate_markers_system(
                             if let Some(old) = comp.action_slots.remove(&slug) {
                                 commands.entity(old.child_entity).despawn();
                             }
-                            let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
-                            let scene_h = asset_server
-                                .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                            let (gltf_h, scene_h) = preloaded_actions
+                                .assets
+                                .entry(rel_path.clone())
+                                .or_insert_with(|| {
+                                    (
+                                        asset_server.load(rel_path.clone()),
+                                        asset_server.load(
+                                            GltfAssetLabel::Scene(0).from_asset(rel_path.clone()),
+                                        ),
+                                    )
+                                })
+                                .clone();
                             let child_e = commands
                                 .spawn((
                                     WorldAssetRoot(scene_h),
@@ -2622,6 +2798,7 @@ pub fn animate_markers_system(
                                     anim_graph: None,
                                     base_auto_scale: None,
                                     applied_scale: 1.0,
+                                    idle_secs: 0.0,
                                 },
                             );
                         }
@@ -2741,9 +2918,18 @@ pub fn animate_markers_system(
                         if let Some(old) = comp.action_slots.remove(&slug) {
                             commands.entity(old.child_entity).despawn();
                         }
-                        let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
-                        let scene_h = asset_server
-                            .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                        let (gltf_h, scene_h) = preloaded_actions
+                            .assets
+                            .entry(rel_path.clone())
+                            .or_insert_with(|| {
+                                (
+                                    asset_server.load(rel_path.clone()),
+                                    asset_server.load(
+                                        GltfAssetLabel::Scene(0).from_asset(rel_path.clone()),
+                                    ),
+                                )
+                            })
+                            .clone();
                         let child_e = commands
                             .spawn((
                                 WorldAssetRoot(scene_h),
@@ -2761,6 +2947,7 @@ pub fn animate_markers_system(
                                 anim_graph: None,
                                 base_auto_scale: None,
                                 applied_scale: 1.0,
+                                    idle_secs: 0.0,
                             },
                         );
                     }
@@ -2927,9 +3114,18 @@ pub fn animate_markers_system(
                             if let Some(old) = comp.action_slots.remove(&slug) {
                                 commands.entity(old.child_entity).despawn();
                             }
-                            let gltf_h: Handle<Gltf> = asset_server.load(rel_path.clone());
-                            let scene_h = asset_server
-                                .load(GltfAssetLabel::Scene(0).from_asset(rel_path.clone()));
+                            let (gltf_h, scene_h) = preloaded_actions
+                                .assets
+                                .entry(rel_path.clone())
+                                .or_insert_with(|| {
+                                    (
+                                        asset_server.load(rel_path.clone()),
+                                        asset_server.load(
+                                            GltfAssetLabel::Scene(0).from_asset(rel_path.clone()),
+                                        ),
+                                    )
+                                })
+                                .clone();
                             let child_e = commands
                                 .spawn((
                                     WorldAssetRoot(scene_h),
@@ -2947,6 +3143,7 @@ pub fn animate_markers_system(
                                     anim_graph: None,
                                     base_auto_scale: None,
                                     applied_scale: 1.0,
+                                    idle_secs: 0.0,
                                 },
                             );
                         }
@@ -3058,8 +3255,14 @@ pub fn animate_markers_system(
                             .insert(Transform::from_scale(Vec3::splat(ratio)));
                     }
                     comp.walk_scale_calibrated = true;
+                    comp.bounds_dirty = true;
                 }
-            } else if comp.walk_child.is_none() {
+            } else if let Some(walk_e) = comp.walk_child {
+                if measure_subtree_max_span(walk_e, &children_q, &mesh_aabb_q).is_some() {
+                    comp.walk_scale_calibrated = true;
+                    comp.bounds_dirty = true;
+                }
+            } else {
                 comp.walk_scale_calibrated = true;
             }
         }
@@ -3111,6 +3314,38 @@ pub fn animate_markers_system(
                 if *av != desired {
                     *av = desired;
                 }
+            }
+        }
+
+        // Auto-despawn inactive `action_slots` rigs after the idle grace period so units that
+        // finish custom actions / Run clips drop back to 0 hidden skeleton bones and re-enter
+        // the O(1) static fast-path skip!
+        if bench.lazy_walk_spawn && !comp.action_slots.is_empty() {
+            let comp_inner = &mut *comp;
+            let active_key_ref = comp_inner.active_action_key.as_deref();
+            let mut expired_slugs: Vec<String> = Vec::new();
+            for (slug, slot) in comp_inner.action_slots.iter_mut() {
+                if active_key_ref == Some(slug.as_str()) {
+                    if slot.idle_secs != 0.0 {
+                        slot.idle_secs = 0.0;
+                    }
+                } else {
+                    slot.idle_secs += dt_sec;
+                    if slot.idle_secs >= IDLE_RIG_DESPAWN_DELAY_SECS
+                        && idle_action_despawns_this_frame < MAX_IDLE_RIG_DESPAWNS_PER_FRAME
+                    {
+                        expired_slugs.push(slug.clone());
+                        idle_action_despawns_this_frame += 1;
+                    }
+                }
+            }
+            if !expired_slugs.is_empty() {
+                for slug in expired_slugs {
+                    if let Some(old) = comp_inner.action_slots.remove(&slug) {
+                        commands.entity(old.child_entity).despawn();
+                    }
+                }
+                comp_inner.bounds_dirty = true;
             }
         }
 
@@ -3375,15 +3610,21 @@ pub fn selection_gizmo_system(
     let mut stack: Vec<Entity> = Vec::with_capacity(16);
     let mut recomputed_this_frame = 0usize;
     let max_recompute_budget = if high_density { 180 } else { usize::MAX };
+    let has_rts_selection = playback.play_test_mode
+        && (!play_rts.selected_unit_ids.is_empty()
+            || play_rts.selected_gizmo_marker_id.is_some()
+            || play_rts.hovered_marker_id.is_some());
 
     for (root_entity, mut comp, vis, root_tf, root_gtf) in &mut marker_roots_q {
         if *vis == Visibility::Hidden {
             marker_bounds.bounds.remove(&comp.id);
-            comp.last_bounds_affine = bevy::math::Affine3A::ZERO;
-            comp.bounds_dirty = true;
+            if !comp.bounds_dirty || comp.last_bounds_affine != bevy::math::Affine3A::ZERO {
+                comp.last_bounds_affine = bevy::math::Affine3A::ZERO;
+                comp.bounds_dirty = true;
+            }
             continue;
         }
-        let is_rts_active = playback.play_test_mode
+        let is_rts_active = has_rts_selection
             && (play_rts.selected_unit_ids.contains(&comp.id)
                 || play_rts.selected_gizmo_marker_id == Some(comp.id)
                 || play_rts.hovered_marker_id == Some(comp.id));
@@ -3395,19 +3636,11 @@ pub fn selection_gizmo_system(
         let has_bounds = marker_bounds.bounds.contains_key(&comp.id);
         let gtf_affine = root_gtf.affine();
         let gtf_changed = gtf_affine != comp.last_bounds_affine;
-        let tf_pending_propagate = root_tf
-            .translation
-            .distance_squared(root_gtf.translation())
-            > 1e-4
-            || root_tf.scale.distance_squared(root_gtf.scale()) > 1e-4
-            || root_tf.rotation.angle_between(root_gtf.rotation()) > 1e-3;
 
-        if !comp.bounds_dirty
-            && !gtf_changed
-            && !tf_pending_propagate
-            && has_bounds
-            && !is_priority
-        {
+        // O(1) zero-decomposition fast-path for static markers:
+        // Whenever `sync_markers_system` modifies `Transform`, it already sets `bounds_dirty = true`,
+        // and once `PostUpdate` propagates `GlobalTransform`, `gtf_changed` becomes `true`.
+        if !comp.bounds_dirty && !gtf_changed && has_bounds && !is_priority {
             continue;
         }
         if !is_priority && recomputed_this_frame >= max_recompute_budget {
@@ -3416,6 +3649,13 @@ pub fn selection_gizmo_system(
         if high_density && !has_bounds && !is_priority && (*frame_idx % 4 != 0) {
             continue;
         }
+
+        let tf_pending_propagate = root_tf
+            .translation
+            .distance_squared(root_gtf.translation())
+            > 1e-4
+            || root_tf.scale.distance_squared(root_gtf.scale()) > 1e-4
+            || root_tf.rotation.angle_between(root_gtf.rotation()) > 1e-3;
 
         let mut wmin = Vec3::splat(f32::INFINITY);
         let mut wmax = Vec3::splat(f32::NEG_INFINITY);
