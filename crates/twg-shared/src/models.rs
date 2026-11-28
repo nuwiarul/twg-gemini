@@ -777,6 +777,10 @@ pub struct ModelAssetDto {
     pub name: String,
     pub category: String,
     pub model_type: ModelAssetType,
+    #[serde(default)]
+    pub operasi_id: Option<Uuid>,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
     pub model_file: ModelFileMeta,
     #[serde(default)]
     pub lod2_file: Option<ModelFileMeta>,
@@ -821,6 +825,7 @@ impl ModelAssetDto {
             slug: self.slug.clone(),
             name: self.name.clone(),
             category: self.category.clone(),
+            operasi_id: self.operasi_id,
             model_type: self.model_type,
             model_path: self.model_file.rel_path.clone(),
             lod2_path: self.lod2_file.as_ref().map(|f| f.rel_path.clone()),
@@ -1037,6 +1042,10 @@ pub struct MediaAssetDto {
     pub name: String,
     pub media_type: MediaAssetType,
     pub category: String,
+    #[serde(default)]
+    pub operasi_id: Option<Uuid>,
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
     pub mime_type: String,
     /// Original uploaded file (for textures: symmetric SxS original, NEVER deleted on resize)
     pub original_file: ModelFileMeta,
@@ -1102,6 +1111,8 @@ pub struct ModelCatalogEntry {
     pub slug: String,
     pub name: String,
     pub category: String,
+    #[serde(default)]
+    pub operasi_id: Option<Uuid>,
     #[serde(default)]
     pub model_type: ModelAssetType,
     pub model_path: String,

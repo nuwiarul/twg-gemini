@@ -2209,10 +2209,10 @@ fn draw_marker_inspector(
                     {
                         bm.material_kind = BasicMeshMaterialKind::ImageTexture;
                         if bm.texture_rel_path.is_none()
-                            && let Some(first_tex) = state
-                                .media_assets
-                                .iter()
-                                .find(|a| a.media_type == MediaAssetType::Texture)
+                            && let Some(first_tex) = state.media_assets.iter().find(|a| {
+                                a.media_type == MediaAssetType::Texture
+                                    && state.is_media_asset_allowed_in_active_operasi(a)
+                            })
                         {
                             bm.texture_asset_id = Some(first_tex.id);
                             bm.texture_rel_path = Some(first_tex.active_file.rel_path.clone());
@@ -2288,14 +2288,24 @@ fn draw_marker_inspector(
                         let textures: Vec<(Uuid, String, String)> = state
                             .media_assets
                             .iter()
-                            .filter(|a| a.media_type == MediaAssetType::Texture)
-                            .map(|a| (a.id, a.name.clone(), a.active_file.rel_path.clone()))
+                            .filter(|a| {
+                                a.media_type == MediaAssetType::Texture
+                                    && state.is_media_asset_allowed_in_active_operasi(a)
+                            })
+                            .map(|a| {
+                                let label = if a.operasi_id.is_some() {
+                                    format!("[Import] {}", a.name)
+                                } else {
+                                    a.name.clone()
+                                };
+                                (a.id, label, a.active_file.rel_path.clone())
+                            })
                             .collect();
 
                         if textures.is_empty() {
                             ui.colored_label(
                                 egui::Color32::from_rgb(250, 204, 21),
-                                "Belum ada Image Texture. Tambahkan melalui menu Assets -> Texture.",
+                                "Belum ada Image Texture. Upload di Assets -> Texture atau tab Import.",
                             );
                         } else {
                             let selected_tex_name = bm
@@ -6550,7 +6560,7 @@ fn draw_water_cannon_inspector_cards(
             let mut spread_pct = cfg.spread * 100.0;
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Sebaran (Jet ↔ Spray):")
+                    egui::RichText::new("Sebaran (Jet <-> Spray):")
                         .size(10.5)
                         .color(egui::Color32::LIGHT_GRAY),
                 );

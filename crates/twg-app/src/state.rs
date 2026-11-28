@@ -181,6 +181,8 @@ pub struct UserTableState {
     pub form_role: UserRole,
     pub form_satker_id: Option<Uuid>,
     pub assets_selected_ids: HashSet<Uuid>,
+    pub assets_preview_id: Option<Uuid>,
+    pub assets_only_selected: bool,
     pub assets_search: String,
     pub assets_category: String,
     pub submitting: bool,
@@ -203,6 +205,8 @@ impl Default for UserTableState {
             form_role: UserRole::User,
             form_satker_id: None,
             assets_selected_ids: HashSet::new(),
+            assets_preview_id: None,
+            assets_only_selected: false,
             assets_search: String::new(),
             assets_category: "all".to_string(),
             submitting: false,
@@ -239,6 +243,8 @@ impl UserTableState {
     pub fn open_assign_assets(&mut self, u: &UserDto) {
         self.modal_mode = UserModalMode::AssignAssets(Box::new(u.clone()));
         self.assets_selected_ids = u.allowed_model_asset_ids.iter().copied().collect();
+        self.assets_preview_id = u.allowed_model_asset_ids.first().copied();
+        self.assets_only_selected = false;
         self.assets_search.clear();
         self.assets_category = "all".to_string();
         self.submitting = false;
@@ -253,6 +259,8 @@ impl UserTableState {
 
     pub fn close_modal(&mut self) {
         self.modal_mode = UserModalMode::None;
+        self.assets_preview_id = None;
+        self.assets_only_selected = false;
         self.submitting = false;
         self.form_error = None;
     }
@@ -1156,6 +1164,77 @@ pub enum LeftTab {
     Catalog,
     BasicMesh,
     Animations,
+    Import,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlotImportPanelState {
+    pub section: AssetsSection,
+    pub search: String,
+    pub preview_open: bool,
+    pub preview_model_id: Option<Uuid>,
+    pub preview_media_id: Option<Uuid>,
+    pub show_upload_form: bool,
+    pub confirm_delete_id: Option<Uuid>,
+    pub submitting: bool,
+    pub error: Option<String>,
+    pub success: Option<String>,
+    // 3D model upload fields
+    pub model_name: String,
+    pub model_category: String,
+    pub model_type: ModelAssetType,
+    pub model_default_height: f64,
+    pub model_file_path: Option<PathBuf>,
+    pub idle_file_path: Option<PathBuf>,
+    pub walk_file_path: Option<PathBuf>,
+    // Media (Texture / Sound / Video) upload fields
+    pub media_name: String,
+    pub media_crop_mode: String,
+    pub media_file_path: Option<PathBuf>,
+}
+
+impl Default for PlotImportPanelState {
+    fn default() -> Self {
+        Self {
+            section: AssetsSection::Models3d,
+            search: String::new(),
+            preview_open: false,
+            preview_model_id: None,
+            preview_media_id: None,
+            show_upload_form: false,
+            confirm_delete_id: None,
+            submitting: false,
+            error: None,
+            success: None,
+            model_name: String::new(),
+            model_category: "units".to_string(),
+            model_type: ModelAssetType::Static,
+            model_default_height: 10.0,
+            model_file_path: None,
+            idle_file_path: None,
+            walk_file_path: None,
+            media_name: String::new(),
+            media_crop_mode: "crop".to_string(),
+            media_file_path: None,
+        }
+    }
+}
+
+impl PlotImportPanelState {
+    pub fn reset_upload_fields(&mut self) {
+        self.model_name.clear();
+        self.model_file_path = None;
+        self.idle_file_path = None;
+        self.walk_file_path = None;
+        self.media_name.clear();
+        self.media_file_path = None;
+        self.submitting = false;
+        self.error = None;
+    }
+
+    pub fn close_preview(&mut self) {
+        self.preview_open = false;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1814,6 +1893,8 @@ pub struct AppState {
 
     pub tool_mode: ToolMode,
     pub left_tab: LeftTab,
+    pub left_tab_offset: usize,
+    pub import_panel: PlotImportPanelState,
     pub selected: SelectedEntity,
     pub layer_search: String,
     pub layer_vis_filter: LayerVisibilityFilter,
@@ -2131,6 +2212,8 @@ impl AppState {
             media_reload_nonce: 0,
             tool_mode: ToolMode::Select,
             left_tab: LeftTab::Layers,
+            left_tab_offset: 0,
+            import_panel: PlotImportPanelState::default(),
             selected: SelectedEntity::None,
             layer_search: String::new(),
             layer_vis_filter: LayerVisibilityFilter::All,
@@ -2552,6 +2635,12 @@ impl AppState {
             .is_some_and(|u| u.role.is_global_admin())
     }
 
+    /// True if the active user can open the `Assets 3D` screen (full CRUD for global admins,
+    /// read-only 3D preview for `admin_satker`, `user`, and `user_satker`).
+    pub fn can_view_assets_screen(&self) -> bool {
+        !self.is_big_screen_only_role()
+    }
+
     pub fn can_manage_satkers(&self) -> bool {
         self.current_user
             .as_ref()
@@ -2589,16 +2678,90 @@ impl AppState {
             .to_ascii_lowercase()
     }
 
-    /// True if the active user may place / select / edit / animate the given 3D model path.
-    /// Admins (`admin`, `admin_monitor`, `admin_satker`) and offline preview always have full access.
-    /// Standard users (`user`, `user_satker`) only have access to models assigned in their 3D Asset list.
-    pub fn is_model_path_allowed(&self, model_path: &str) -> bool {
+    pub fn active_operasi_id(&self) -> Option<Uuid> {
+        self.active_skenario.as_ref().map(|s| s.operasi_id)
+    }
+
+    /// True if the active user may view/preview the given master `ModelAssetDto` on the global
+    /// `Assets 3D` screen (always excludes per-operasi imported assets, which live inside their Operasi).
+    pub fn is_model_asset_allowed(&self, asset: &ModelAssetDto) -> bool {
+        if asset.operasi_id.is_some() {
+            return false;
+        }
         if self.is_big_screen_only_role() {
             return false;
         }
         if !self.is_standard_user() {
             return true;
         }
+        if self
+            .current_user
+            .as_ref()
+            .is_some_and(|u| u.allowed_model_asset_ids.contains(&asset.id))
+        {
+            return true;
+        }
+        self.is_master_model_path_allowed(&asset.model_file.rel_path)
+    }
+
+    /// True if the active user may place/select/edit/animate this `ModelAssetDto` inside the
+    /// currently open scenario's Operasi (allows ALL roles for assets imported into this Operasi,
+    /// strictly blocks assets imported into any OTHER Operasi).
+    #[allow(dead_code)]
+    pub fn is_model_asset_allowed_in_active_operasi(&self, asset: &ModelAssetDto) -> bool {
+        if self.is_big_screen_only_role() {
+            return false;
+        }
+        if let Some(op_id) = asset.operasi_id {
+            return self.active_operasi_id() == Some(op_id);
+        }
+        self.is_model_asset_allowed(asset)
+    }
+
+    /// True if this `MediaAssetDto` (Texture/Sound/Video) is accessible in the active Operasi:
+    /// global master media (`operasi_id = None`) is always accessible; imported media is only
+    /// accessible inside the Operasi it was imported into.
+    pub fn is_media_asset_allowed_in_active_operasi(&self, asset: &MediaAssetDto) -> bool {
+        match asset.operasi_id {
+            None => true,
+            Some(op_id) => self.active_operasi_id() == Some(op_id),
+        }
+    }
+
+    /// True if the active user may delete/edit an imported asset belonging to `operasi_id`.
+    /// Original uploader + Global Admin (`admin`, `admin_monitor`) + matching `admin_satker`.
+    pub fn can_manage_imported_asset(
+        &self,
+        operasi_id: Option<Uuid>,
+        created_by: Option<Uuid>,
+    ) -> bool {
+        if self.offline_preview || self.is_big_screen_only_role() {
+            return false;
+        }
+        if self.is_super_admin() {
+            return true;
+        }
+        let Some(op_id) = operasi_id else {
+            return false;
+        };
+        if self.active_operasi_id() != Some(op_id) {
+            return false;
+        }
+        if self
+            .current_user
+            .as_ref()
+            .is_some_and(|u| u.role.is_admin_satker())
+        {
+            let sk_satker = self.active_skenario.as_ref().and_then(|s| s.satker_id);
+            let my_satker = self.current_user.as_ref().and_then(|u| u.satker_id);
+            if my_satker.is_some() && sk_satker == my_satker {
+                return true;
+            }
+        }
+        created_by.is_some() && created_by == self.current_user_id()
+    }
+
+    fn is_master_model_path_allowed(&self, model_path: &str) -> bool {
         let target = Self::normalize_rbac_model_path(model_path);
         if target.is_empty() {
             return false;
@@ -2608,6 +2771,30 @@ impl AppState {
                 .iter()
                 .any(|p| Self::normalize_rbac_model_path(p) == target)
         })
+    }
+
+    /// True if the active user may place / select / edit / animate the given 3D model path.
+    /// - Models imported into the ACTIVE Operasi are allowed for ALL roles (including `user`/`user_satker`).
+    /// - Models imported into a DIFFERENT Operasi are blocked for ALL roles (Operasi isolation).
+    /// - Master models follow RBAC (`admin`/`admin_monitor`/`admin_satker` full access; standard users per-user list).
+    pub fn is_model_path_allowed(&self, model_path: &str) -> bool {
+        if self.is_big_screen_only_role() {
+            return false;
+        }
+        let target = Self::normalize_rbac_model_path(model_path);
+        if target.is_empty() {
+            return false;
+        }
+        if let Some(op_asset) = self.model_assets.iter().find(|m| {
+            m.operasi_id.is_some()
+                && Self::normalize_rbac_model_path(&m.model_file.rel_path) == target
+        }) {
+            return op_asset.operasi_id == self.active_operasi_id();
+        }
+        if !self.is_standard_user() {
+            return true;
+        }
+        self.is_master_model_path_allowed(&target)
     }
 
     pub fn can_edit_owned_entity(
@@ -2720,9 +2907,27 @@ impl AppState {
             .collect()
     }
 
-    /// True whenever the 3D scenario world should be rendered (Plot Skenario or Layar Besar).
+    /// True whenever the 3D scenario world should be rendered (Plot Skenario without active Import preview, or Layar Besar).
     pub fn is_3d_map_screen(&self) -> bool {
-        matches!(self.screen, AppScreen::PlotSkenario | AppScreen::LayarBesar)
+        (self.screen == AppScreen::PlotSkenario && !self.is_plot_import_preview_active())
+            || self.screen == AppScreen::LayarBesar
+    }
+
+    pub fn is_plot_import_preview_active(&self) -> bool {
+        self.screen == AppScreen::PlotSkenario && self.import_panel.preview_open
+    }
+
+    pub fn is_plot_import_3d_preview_active(&self) -> bool {
+        self.is_plot_import_preview_active()
+            && self.import_panel.section == AssetsSection::Models3d
+    }
+
+    pub fn is_plot_import_media_preview_active(&self) -> Option<MediaAssetType> {
+        if self.is_plot_import_preview_active() {
+            self.import_panel.section.media_type()
+        } else {
+            None
+        }
     }
 
     /// True when Play Skenario was opened from Tactical / Simulasi (realtime WS broadcast active).
@@ -2782,6 +2987,96 @@ impl AppState {
             )
     }
 
+    pub fn is_user_assets_assign_preview_active(&self) -> bool {
+        self.screen == AppScreen::Users
+            && matches!(self.user_table.modal_mode, UserModalMode::AssignAssets(_))
+    }
+
+    pub fn is_asset_3d_preview_active(&self) -> bool {
+        (self.screen == AppScreen::Assets && self.assets_section == AssetsSection::Models3d)
+            || self.is_user_assets_assign_preview_active()
+            || self.is_plot_import_3d_preview_active()
+    }
+
+    pub fn active_preview_asset(&self) -> Option<&ModelAssetDto> {
+        if self.is_user_assets_assign_preview_active() {
+            let id = self.user_table.assets_preview_id?;
+            return self.model_assets.iter().find(|m| m.id == id);
+        }
+        if self.is_plot_import_3d_preview_active() {
+            let id = self.import_panel.preview_model_id?;
+            let active_op = self.active_operasi_id()?;
+            return self
+                .model_assets
+                .iter()
+                .find(|m| m.id == id && m.operasi_id == Some(active_op));
+        }
+        if self.screen == AppScreen::Assets && self.assets_section == AssetsSection::Models3d {
+            let asset = self.selected_asset()?;
+            if self.is_model_asset_allowed(asset) {
+                return Some(asset);
+            }
+            return None;
+        }
+        None
+    }
+
+    pub fn active_preview_media(&self) -> Option<&MediaAssetDto> {
+        if self.is_plot_import_media_preview_active().is_some() {
+            let id = self.import_panel.preview_media_id?;
+            let active_op = self.active_operasi_id()?;
+            return self
+                .media_assets
+                .iter()
+                .find(|m| m.id == id && m.operasi_id == Some(active_op));
+        }
+        self.selected_media().filter(|m| m.operasi_id.is_none())
+    }
+
+    pub fn set_plot_import_preview_model(&mut self, id: Uuid) {
+        let changed = self.import_panel.preview_model_id != Some(id);
+        self.import_panel.section = AssetsSection::Models3d;
+        self.import_panel.preview_model_id = Some(id);
+        self.import_panel.preview_open = true;
+        if changed
+            && let Some(asset) = self.model_assets.iter().find(|m| m.id == id)
+        {
+            if asset.model_type == ModelAssetType::Static {
+                self.preview_variant = AssetPreviewVariant::Idle;
+            } else if let AssetPreviewVariant::Action(slug) = &self.preview_variant
+                && !asset.extra_animations.iter().any(|a| a.slug == *slug)
+            {
+                self.preview_variant = AssetPreviewVariant::Idle;
+            }
+        }
+    }
+
+    pub fn set_plot_import_preview_media(&mut self, id: Uuid, media_type: MediaAssetType) {
+        self.import_panel.section = match media_type {
+            MediaAssetType::Texture => AssetsSection::Texture,
+            MediaAssetType::Sound => AssetsSection::Sound,
+            MediaAssetType::Video => AssetsSection::Video,
+        };
+        self.import_panel.preview_media_id = Some(id);
+        self.import_panel.preview_open = true;
+    }
+
+    pub fn set_user_assign_preview_asset(&mut self, id: Uuid) {
+        let changed = self.user_table.assets_preview_id != Some(id);
+        self.user_table.assets_preview_id = Some(id);
+        if changed
+            && let Some(asset) = self.model_assets.iter().find(|m| m.id == id)
+        {
+            if asset.model_type == ModelAssetType::Static {
+                self.preview_variant = AssetPreviewVariant::Idle;
+            } else if let AssetPreviewVariant::Action(slug) = &self.preview_variant
+                && !asset.extra_animations.iter().any(|a| a.slug == *slug)
+            {
+                self.preview_variant = AssetPreviewVariant::Idle;
+            }
+        }
+    }
+
     pub fn restore_active_skenario_map_state(&mut self) {
         if let Some(sk) = &self.active_skenario {
             self.geo_anchor = GeoAnchor::new(sk.center_lng, sk.center_lat);
@@ -2803,6 +3098,10 @@ impl AppState {
             self.asset_form.load_from_asset(&asset);
             if asset.model_type == ModelAssetType::Static {
                 self.preview_variant = AssetPreviewVariant::Idle;
+            } else if let AssetPreviewVariant::Action(slug) = &self.preview_variant
+                && !asset.extra_animations.iter().any(|a| a.slug == *slug)
+            {
+                self.preview_variant = AssetPreviewVariant::Idle;
             }
         }
     }
@@ -2821,7 +3120,7 @@ impl AppState {
             let mut static_count = 0usize;
             let mut animated_count = 0usize;
             for m in &self.model_assets {
-                if m.category == cat.category {
+                if m.operasi_id.is_none() && m.category == cat.category {
                     total += 1;
                     match m.model_type {
                         ModelAssetType::Static => static_count += 1,
@@ -2855,12 +3154,12 @@ impl AppState {
         };
         let valid = self
             .selected_media()
-            .is_some_and(|m| m.media_type == mt);
+            .is_some_and(|m| m.operasi_id.is_none() && m.media_type == mt);
         if !valid {
             if let Some(first_id) = self
                 .media_assets
                 .iter()
-                .find(|m| m.media_type == mt)
+                .find(|m| m.operasi_id.is_none() && m.media_type == mt)
                 .map(|m| m.id)
             {
                 self.select_media(first_id);
@@ -2897,13 +3196,25 @@ impl AppState {
             self.catalog_category = "all".to_string();
         }
 
-        // Keep selection valid or pick the first available model
+        // Keep selection valid or pick the first available master model
         if let Some(sel) = self.selected_asset_id {
-            if !self.model_assets.iter().any(|m| m.id == sel) {
-                self.selected_asset_id = self.model_assets.first().map(|m| m.id);
+            if !self
+                .model_assets
+                .iter()
+                .any(|m| m.id == sel && m.operasi_id.is_none())
+            {
+                self.selected_asset_id = self
+                    .model_assets
+                    .iter()
+                    .find(|m| m.operasi_id.is_none())
+                    .map(|m| m.id);
             }
         } else {
-            self.selected_asset_id = self.model_assets.first().map(|m| m.id);
+            self.selected_asset_id = self
+                .model_assets
+                .iter()
+                .find(|m| m.operasi_id.is_none())
+                .map(|m| m.id);
         }
 
         if self.asset_form_mode == AssetFormMode::Inspect

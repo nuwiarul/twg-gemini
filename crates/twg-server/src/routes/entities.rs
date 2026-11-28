@@ -96,22 +96,80 @@ fn can_edit_owned_entity(
     false
 }
 
+async fn model_path_operasi_owner(
+    db: &PgPool,
+    model_path: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let target = normalize_model_path(model_path);
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let rows = sqlx::query(
+        "SELECT model_path, operasi_id FROM model_assets WHERE operasi_id IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    for row in rows {
+        let mp: String = row.try_get("model_path")?;
+        if normalize_model_path(&mp) == target {
+            let op_id: Option<Uuid> = row.try_get("operasi_id")?;
+            if op_id.is_some() {
+                return Ok(op_id);
+            }
+        }
+    }
+    Ok(None)
+}
+
 async fn user_has_model_path(
     db: &PgPool,
     user_id: Uuid,
+    operasi_id: Uuid,
     model_path: &str,
 ) -> Result<bool, sqlx::Error> {
     let target = normalize_model_path(model_path);
     if target.is_empty() {
         return Ok(false);
     }
+    // Any 3D model imported into this Operasi is accessible to ALL roles in this Operasi.
+    // Any 3D model imported into a DIFFERENT Operasi is strictly blocked.
+    if let Some(asset_op) = model_path_operasi_owner(db, &target).await? {
+        return Ok(asset_op == operasi_id);
+    }
     let (_, paths) = crate::routes::users::fetch_user_allowed_assets(db, user_id).await?;
     Ok(paths.iter().any(|p| normalize_model_path(p) == target))
+}
+
+async fn ensure_model_allowed_for_operasi(
+    db: &PgPool,
+    auth: &AuthUser,
+    operasi_id: Uuid,
+    model_path: &str,
+) -> AppResult<()> {
+    if let Some(asset_op) = model_path_operasi_owner(db, model_path).await? {
+        if asset_op != operasi_id {
+            return Err(AppError::Forbidden(
+                "Model 3D ini di-import pada Operasi lain dan tidak dapat digunakan di Operasi ini"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+    if auth.role.is_admin_like() {
+        return Ok(());
+    }
+    if user_has_model_path(db, auth.user_id, operasi_id, model_path).await? {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(
+        "Model 3D ini tidak ada dalam daftar Assets 3D Anda".into(),
+    ))
 }
 
 async fn ensure_user_can_mutate_marker(
     db: &PgPool,
     auth: &AuthUser,
+    operasi_id: Uuid,
     model_path: &str,
     metadata: &serde_json::Value,
     created_by: Option<Uuid>,
@@ -133,17 +191,13 @@ async fn ensure_user_can_mutate_marker(
             "Anda tidak memiliki persetujuan untuk mengedit Basic Mesh ini".into(),
         ));
     }
-    if user_has_model_path(db, auth.user_id, model_path).await? {
-        return Ok(());
-    }
-    Err(AppError::Forbidden(
-        "Model 3D ini tidak ada dalam daftar Assets 3D Anda".into(),
-    ))
+    ensure_model_allowed_for_operasi(db, auth, operasi_id, model_path).await
 }
 
 async fn ensure_user_can_use_anim_targets(
     db: &PgPool,
     auth: &AuthUser,
+    operasi_id: Uuid,
     marker_id: Option<Uuid>,
     data: &serde_json::Value,
 ) -> AppResult<()> {
@@ -175,31 +229,29 @@ async fn ensure_user_can_use_anim_targets(
     let unique_targets = dedup_uuids(&target_ids);
     if !unique_targets.is_empty() {
         let rows = sqlx::query(
-            "SELECT model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = ANY($1)",
+            "SELECT operasi_id, model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = ANY($1)",
         )
         .bind(&unique_targets)
         .fetch_all(db)
         .await?;
         for r in rows {
+            let m_op: Uuid = r.try_get("operasi_id")?;
             let mp: String = r.try_get("model_path")?;
             let meta: serde_json::Value = r.try_get("metadata")?;
             let cb: Option<Uuid> = r.try_get("created_by")?;
             let allowed = parse_uuid_vec(r.try_get("allowed_user_ids")?);
-            ensure_user_can_mutate_marker(db, auth, &mp, &meta, cb, &allowed).await?;
+            ensure_user_can_mutate_marker(db, auth, m_op, &mp, &meta, cb, &allowed).await?;
         }
     }
 
-    // Traffic animation vehicle pool: ensure standard user only includes models in their allowed list
+    // Traffic animation vehicle pool: allow user's assigned models + models imported in this Operasi
     if let Some(pool) = data.get("vehicle_pool").and_then(|v| v.as_array()) {
-        let (_, allowed_paths) = crate::routes::users::fetch_user_allowed_assets(db, auth.user_id).await?;
-        let allowed_set: HashSet<String> = allowed_paths
-            .iter()
-            .map(|p| normalize_model_path(p))
-            .collect();
         for entry in pool {
             if let Some(mp) = entry.get("model_path").and_then(|v| v.as_str()) {
                 let norm = normalize_model_path(mp);
-                if !norm.is_empty() && !allowed_set.contains(&norm) {
+                if !norm.is_empty()
+                    && !user_has_model_path(db, auth.user_id, operasi_id, &norm).await?
+                {
                     return Err(AppError::Forbidden(
                         "Pool kendaraan lalu lintas memuat model 3D di luar daftar Assets 3D Anda"
                             .into(),
@@ -245,12 +297,8 @@ pub async fn create_marker(
         req.metadata
     };
 
-    if auth.role.is_standard_user() && !is_basic_mesh_marker(&req.model_path, &meta) {
-        if !user_has_model_path(&state.db, auth.user_id, &req.model_path).await? {
-            return Err(AppError::Forbidden(
-                "Model 3D ini tidak ada dalam daftar Assets 3D Anda".into(),
-            ));
-        }
+    if !is_basic_mesh_marker(&req.model_path, &meta) {
+        ensure_model_allowed_for_operasi(&state.db, &auth, req.operasi_id, &req.model_path).await?;
     }
 
     let allowed = resolve_allowed_on_create(&auth, &req.allowed_user_ids);
@@ -309,12 +357,13 @@ pub async fn update_marker(
 ) -> AppResult<Json<ApiResponse<Marker>>> {
     ensure_can_edit(&auth)?;
     let existing = sqlx::query(
-        "SELECT skenario_id, model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = $1",
+        "SELECT operasi_id, skenario_id, model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("marker not found".into()))?;
+    let operasi_id: Uuid = existing.try_get("operasi_id")?;
     let skenario_id: Uuid = existing.try_get("skenario_id")?;
     verify_skenario_access(&state, &auth, skenario_id).await?;
 
@@ -326,6 +375,7 @@ pub async fn update_marker(
     ensure_user_can_mutate_marker(
         &state.db,
         &auth,
+        operasi_id,
         &existing_model_path,
         &existing_meta,
         existing_created_by,
@@ -385,12 +435,13 @@ pub async fn delete_marker(
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
     ensure_can_edit(&auth)?;
     let existing = sqlx::query(
-        "SELECT skenario_id, model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = $1",
+        "SELECT operasi_id, skenario_id, model_path, metadata, created_by, allowed_user_ids FROM markers WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("marker not found".into()))?;
+    let operasi_id: Uuid = existing.try_get("operasi_id")?;
     let skenario_id: Uuid = existing.try_get("skenario_id")?;
     verify_skenario_access(&state, &auth, skenario_id).await?;
 
@@ -402,6 +453,7 @@ pub async fn delete_marker(
     ensure_user_can_mutate_marker(
         &state.db,
         &auth,
+        operasi_id,
         &existing_model_path,
         &existing_meta,
         existing_created_by,
@@ -1175,7 +1227,8 @@ pub async fn create_anim(
         req.data
     };
 
-    ensure_user_can_use_anim_targets(&state.db, &auth, req.marker_id, &data).await?;
+    ensure_user_can_use_anim_targets(&state.db, &auth, req.operasi_id, req.marker_id, &data)
+        .await?;
 
     let allowed = resolve_allowed_on_create(&auth, &req.allowed_user_ids);
     let allowed_json = serde_json::to_value(&allowed).unwrap_or_else(|_| serde_json::json!([]));
@@ -1225,12 +1278,13 @@ pub async fn update_anim(
 ) -> AppResult<Json<ApiResponse<Anim>>> {
     ensure_can_edit(&auth)?;
     let existing = sqlx::query(
-        "SELECT skenario_id, created_by, allowed_user_ids FROM anims WHERE id = $1",
+        "SELECT operasi_id, skenario_id, created_by, allowed_user_ids FROM anims WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("anim not found".into()))?;
+    let operasi_id: Uuid = existing.try_get("operasi_id")?;
     let skenario_id: Uuid = existing.try_get("skenario_id")?;
     verify_skenario_access(&state, &auth, skenario_id).await?;
 
@@ -1251,7 +1305,8 @@ pub async fn update_anim(
 
     // If this anim was created by the user themselves (not delegated by admin), enforce marker asset list on targets
     if auth.role.is_standard_user() && existing_created_by == Some(auth.user_id) {
-        ensure_user_can_use_anim_targets(&state.db, &auth, req.marker_id, &data).await?;
+        ensure_user_can_use_anim_targets(&state.db, &auth, operasi_id, req.marker_id, &data)
+            .await?;
     }
 
     let next_allowed =

@@ -126,7 +126,7 @@ pub fn draw_top_bar(
                             state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Users));
                         }
 
-                        if state.is_super_admin()
+                        if state.can_view_assets_screen()
                             && ui.selectable_label(false, "Assets 3D").clicked()
                         {
                             state.pending_plot_exit = Some(PlotExit::Page(AppScreen::Assets));
@@ -1071,6 +1071,17 @@ pub(super) fn leave_plot(
         AppScreen::Assets => {
             playback.stop_play_test();
             state.play_session_mode = PlaySessionMode::LocalPreview;
+            state.user_table.close_modal();
+            if !state.is_super_admin() {
+                state.assets_section = crate::state::AssetsSection::Models3d;
+                state.asset_form_mode = crate::state::AssetFormMode::Inspect;
+            }
+            if !state.offline_preview
+                && state.is_standard_user()
+                && let Some(auth) = crate::scene::markers::current_auth(state)
+            {
+                api.send(crate::net::client::ApiCommand::RefreshCurrentUser { auth });
+            }
             state.screen = AppScreen::Assets;
         }
         AppScreen::Graphics => {
@@ -1089,6 +1100,8 @@ pub(super) fn leave_plot(
             state.active_skenario = None;
             state.selected_operasi_id = None;
             state.skenario_table.operasi = None;
+            state.selected_asset_id = None;
+            state.user_table.close_modal();
             state.ws_connected = false;
         }
         AppScreen::Profile => {

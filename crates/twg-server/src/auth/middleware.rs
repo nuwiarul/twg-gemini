@@ -163,3 +163,71 @@ pub async fn verify_skenario_access(
     }
     Ok(satker_id)
 }
+
+pub async fn verify_operasi_access(
+    state: &AppState,
+    user: &AuthUser,
+    operasi_id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    let row = sqlx::query("SELECT satker_id FROM operasis WHERE id = $1")
+        .bind(operasi_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("operasi tidak ditemukan".into()))?;
+
+    let satker_id: Option<Uuid> = row.try_get("satker_id")?;
+    if !user.can_access_satker(satker_id) {
+        return Err(AppError::Forbidden(
+            "Akses lintas Satker tidak diizinkan".into(),
+        ));
+    }
+    Ok(satker_id)
+}
+
+/// Validates whether `user` may upload a master asset (`operasi_id = None`) or
+/// an operasi-scoped imported asset (`operasi_id = Some(op_id)`).
+pub async fn verify_operasi_asset_upload(
+    state: &AppState,
+    user: &AuthUser,
+    operasi_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(op_id) = operasi_id else {
+        return user.require_super_admin_write();
+    };
+    if user.role.is_big_screen_only_role() {
+        return Err(AppError::Forbidden(
+            "Akun Layar Besar bersifat read-only dan tidak dapat mengunggah aset.".into(),
+        ));
+    }
+    let _ = verify_operasi_access(state, user, op_id).await?;
+    Ok(())
+}
+
+/// Validates whether `user` may edit/delete a master asset (`operasi_id = None`) or
+/// an operasi-scoped imported asset (`operasi_id = Some(op_id)`).
+/// For imported assets: original uploader (`created_by`) + global admins + matching `admin_satker`.
+pub async fn verify_operasi_asset_mutation(
+    state: &AppState,
+    user: &AuthUser,
+    operasi_id: Option<Uuid>,
+    created_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(op_id) = operasi_id else {
+        return user.require_super_admin_write();
+    };
+    if user.role.is_big_screen_only_role() {
+        return Err(AppError::Forbidden(
+            "Akun Layar Besar bersifat read-only.".into(),
+        ));
+    }
+    let op_satker = verify_operasi_access(state, user, op_id).await?;
+    if user.role.is_global_admin()
+        || user.can_mutate_satker(op_satker)
+        || created_by == Some(user.user_id)
+    {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(
+        "Hanya pengunggah asli atau Admin yang dapat mengubah/menghapus aset import ini.".into(),
+    ))
+}

@@ -98,6 +98,15 @@ pub enum WsServerMessage {
     OnlineUsers {
         operators: Vec<OnlineOperator>,
     },
+    /// Broadcast whenever a master or per-operasi asset is uploaded, updated, or deleted
+    /// so all connected devices immediately run a lightweight delta sync.
+    AssetsChanged {
+        #[serde(default)]
+        operasi_id: Option<Uuid>,
+        kind: String,
+        asset_id: Uuid,
+        actor_username: String,
+    },
     Error {
         message: String,
     },

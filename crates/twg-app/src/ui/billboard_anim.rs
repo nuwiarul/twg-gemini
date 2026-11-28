@@ -163,7 +163,9 @@ pub fn draw_inspector(
                         .show_ui(ui, |ui| {
                             let mut found = false;
                             for asset in &state.media_assets {
-                                if asset.media_type != MediaAssetType::Texture {
+                                if asset.media_type != MediaAssetType::Texture
+                                    || !state.is_media_asset_allowed_in_active_operasi(asset)
+                                {
                                     continue;
                                 }
                                 found = true;
@@ -171,10 +173,15 @@ pub fn draw_inspector(
                                     (Some(w), Some(h)) => format!(" · {w}×{h}"),
                                     _ => String::new(),
                                 };
+                                let tag = if asset.operasi_id.is_some() {
+                                    "[Import] "
+                                } else {
+                                    ""
+                                };
                                 if ui
                                     .selectable_label(
                                         cfg.image_asset_id == Some(asset.id),
-                                        format!("{}{dims}", asset.name),
+                                        format!("{tag}{}{dims}", asset.name),
                                     )
                                     .clicked()
                                 {
@@ -182,7 +189,7 @@ pub fn draw_inspector(
                                 }
                             }
                             if !found {
-                                ui.label("Belum ada Gambar / Texture di halaman Assets.");
+                                ui.label("Belum ada Gambar — upload di Assets atau tab Import.");
                             }
                         });
                     ui.add_space(4.0);
@@ -208,7 +215,9 @@ pub fn draw_inspector(
                         .show_ui(ui, |ui| {
                             let mut found = false;
                             for asset in &state.media_assets {
-                                if asset.media_type != MediaAssetType::Video {
+                                if asset.media_type != MediaAssetType::Video
+                                    || !state.is_media_asset_allowed_in_active_operasi(asset)
+                                {
                                     continue;
                                 }
                                 found = true;
@@ -216,10 +225,15 @@ pub fn draw_inspector(
                                     .duration_sec
                                     .map(|d| format!(" · {d:.1} dtk"))
                                     .unwrap_or_default();
+                                let tag = if asset.operasi_id.is_some() {
+                                    "[Import] "
+                                } else {
+                                    ""
+                                };
                                 if ui
                                     .selectable_label(
                                         cfg.video_asset_id == Some(asset.id),
-                                        format!("{}{dur}", asset.name),
+                                        format!("{tag}{}{dur}", asset.name),
                                     )
                                     .clicked()
                                 {
@@ -227,7 +241,7 @@ pub fn draw_inspector(
                                 }
                             }
                             if !found {
-                                ui.label("Belum ada Video di halaman Assets.");
+                                ui.label("Belum ada Video — upload di Assets atau tab Import.");
                             }
                         });
                     ui.add_space(4.0);

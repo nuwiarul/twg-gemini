@@ -480,17 +480,36 @@ pub fn draw_screen_nav_tabs(
         }
     }
 
-    if state.is_super_admin() {
+    if state.can_view_assets_screen() {
         let on_assets = state.screen == AppScreen::Assets;
+        let assets_tip = if state.is_standard_user() {
+            "Lihat preview 3D dari assets yang diberikan ke akun Anda"
+        } else if state.is_super_admin() {
+            "Kelola & preview Assets 3D, Texture, Sound, dan Video"
+        } else {
+            "Lihat preview 3D dari seluruh katalog Assets 3D"
+        };
         if ui
             .selectable_label(on_assets, egui::RichText::new("Assets 3D").strong())
+            .on_hover_text(assets_tip)
             .clicked()
             && !on_assets
         {
             playback.stop_play_test();
             state.play_session_mode = PlaySessionMode::LocalPreview;
             state.skenario_table.close_modal();
+            state.user_table.close_modal();
             state.restore_active_skenario_map_state();
+            if !state.is_super_admin() {
+                state.assets_section = crate::state::AssetsSection::Models3d;
+                state.asset_form_mode = crate::state::AssetFormMode::Inspect;
+            }
+            if !state.offline_preview
+                && state.is_standard_user()
+                && let Some(auth) = current_auth(state)
+            {
+                api.send(ApiCommand::RefreshCurrentUser { auth });
+            }
             state.screen = AppScreen::Assets;
             ws.send(WsOutCommand::Subscribe {
                 skenario_id: None,
@@ -550,6 +569,9 @@ pub fn perform_logout(state: &mut AppState, playback: &mut PlaybackState, ws: &W
     state.skenario_table.operasi = None;
     state.skenario_table.filter_operasi_id = None;
     state.skenario_table.operasi_options.clear();
+    state.selected_asset_id = None;
+    state.user_table.close_modal();
+    state.import_panel.close_preview();
     state.ws_connected = false;
 }
 

@@ -85,6 +85,8 @@ fn row_to_media_dto(row: &sqlx::postgres::PgRow) -> AppResult<MediaAssetDto> {
         name: row.try_get("name")?,
         media_type: MediaAssetType::from_db(&media_type_str),
         category: row.try_get("category")?,
+        operasi_id: row.try_get("operasi_id").ok().flatten(),
+        created_by: row.try_get("created_by").ok().flatten(),
         mime_type: row.try_get("mime_type")?,
         original_file: ModelFileMeta {
             download_url: asset_download_url(&original_path),
@@ -117,7 +119,7 @@ pub async fn fetch_all_media(db: &PgPool) -> AppResult<Vec<MediaAssetDto>> {
     let rows = sqlx::query(
         r#"
         SELECT
-            id, slug, name, media_type, category, mime_type,
+            id, slug, name, media_type, category, operasi_id, created_by, mime_type,
             original_path, original_sha256, original_size_bytes, original_width, original_height,
             active_path, active_sha256, active_size_bytes, active_width, active_height,
             thumbnail_path, thumbnail_sha256, thumbnail_size_bytes,
@@ -136,7 +138,7 @@ async fn fetch_media_by_id(db: &PgPool, id: Uuid) -> AppResult<MediaAssetDto> {
     let row = sqlx::query(
         r#"
         SELECT
-            id, slug, name, media_type, category, mime_type,
+            id, slug, name, media_type, category, operasi_id, created_by, mime_type,
             original_path, original_sha256, original_size_bytes, original_width, original_height,
             active_path, active_sha256, active_size_bytes, active_width, active_height,
             thumbnail_path, thumbnail_sha256, thumbnail_size_bytes,
@@ -184,14 +186,60 @@ pub async fn get_media_asset(
     Ok(Json(ApiResponse { data: dto }))
 }
 
+fn media_folder_prefix(operasi_id: Option<Uuid>, sub: &str) -> String {
+    match operasi_id {
+        Some(op_id) => format!("media/operasi_{}/{sub}", op_id.simple()),
+        None => format!("media/{sub}"),
+    }
+}
+
+fn media_slug_prefix(operasi_id: Option<Uuid>, media_type: MediaAssetType) -> String {
+    match operasi_id {
+        Some(op_id) => format!("op_{}/{}", op_id.simple(), media_type.as_str()),
+        None => media_type.as_str().to_string(),
+    }
+}
+
+async fn broadcast_media_assets_changed(
+    state: &AppState,
+    operasi_id: Option<Uuid>,
+    asset_id: Uuid,
+    actor_username: &str,
+) {
+    state
+        .ws_hub
+        .broadcast(
+            crate::ws::HubDelivery::All,
+            twg_shared::ws::WsServerMessage::AssetsChanged {
+                operasi_id,
+                kind: "media".into(),
+                asset_id,
+                actor_username: actor_username.to_string(),
+            },
+        )
+        .await;
+}
+
 pub async fn create_media_asset(
     State(state): State<AppState>,
     auth: AuthUser,
     multipart: Multipart,
 ) -> AppResult<Json<ApiResponse<MediaAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let form = parse_media_multipart(multipart).await?;
+    let operasi_id = match form
+        .fields
+        .get("operasi_id")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(
+            Uuid::parse_str(raw)
+                .map_err(|_| AppError::BadRequest("operasi_id tidak valid".into()))?,
+        ),
+        None => None,
+    };
+    crate::auth::middleware::verify_operasi_asset_upload(&state, &auth, operasi_id).await?;
+
     let name = form
         .fields
         .get("name")
@@ -240,29 +288,37 @@ pub async fn create_media_asset(
         .ok_or_else(|| AppError::BadRequest("File media wajib diunggah".into()))?;
 
     let base = sanitize_slug(&name);
-    let unique_base = make_unique_media_base(&state.db, media_type, &base, None).await?;
-    let slug = format!("{}/{unique_base}", media_type.as_str());
+    let slug_prefix = media_slug_prefix(operasi_id, media_type);
+    let unique_base = make_unique_media_base(&state.db, &slug_prefix, &base, None).await?;
+    let slug = format!("{slug_prefix}/{unique_base}");
     let assets_dir = &state.config.assets_dir;
     let id = Uuid::new_v4();
 
-    let processed =
-        process_and_store_media(assets_dir, media_type, &unique_base, &upload, &crop_mode).await?;
+    let processed = process_and_store_media(
+        assets_dir,
+        operasi_id,
+        media_type,
+        &unique_base,
+        &upload,
+        &crop_mode,
+    )
+    .await?;
 
     sqlx::query(
         r#"
         INSERT INTO media_assets (
-            id, slug, name, media_type, category, mime_type,
+            id, slug, name, media_type, category, operasi_id, mime_type,
             original_path, original_sha256, original_size_bytes, original_width, original_height,
             active_path, active_sha256, active_size_bytes, active_width, active_height,
             thumbnail_path, thumbnail_sha256, thumbnail_size_bytes,
             duration_sec, crop_mode, version, created_by
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9, $10, $11,
-            $12, $13, $14, $15, $16,
-            $17, $18, $19,
-            $20, $21, 1, $22
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17,
+            $18, $19, $20,
+            $21, $22, 1, $23
         )
         "#,
     )
@@ -271,6 +327,7 @@ pub async fn create_media_asset(
     .bind(&name)
     .bind(media_type.as_str())
     .bind(&category)
+    .bind(operasi_id)
     .bind(&processed.mime_type)
     .bind(&processed.rel_path)
     .bind(&processed.sha256)
@@ -296,6 +353,7 @@ pub async fn create_media_asset(
     .await?;
 
     let dto = fetch_media_by_id(&state.db, id).await?;
+    broadcast_media_assets_changed(&state, operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -305,9 +363,14 @@ pub async fn update_media_asset(
     AxumPath(id): AxumPath<Uuid>,
     multipart: Multipart,
 ) -> AppResult<Json<ApiResponse<MediaAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_media_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     let form = parse_media_multipart(multipart).await?;
 
     let name = form
@@ -343,15 +406,21 @@ pub async fn update_media_asset(
     let assets_dir = &state.config.assets_dir;
     let base = existing
         .slug
-        .split('/')
-        .nth(1)
+        .rsplit('/')
+        .next()
         .unwrap_or("media")
         .to_string();
 
     if let Some(upload) = form.file {
-        let processed =
-            process_and_store_media(assets_dir, existing.media_type, &base, &upload, &crop_mode)
-                .await?;
+        let processed = process_and_store_media(
+            assets_dir,
+            existing.operasi_id,
+            existing.media_type,
+            &base,
+            &upload,
+            &crop_mode,
+        )
+        .await?;
 
         let mut cleanup = Vec::new();
         if existing.original_file.rel_path != processed.rel_path {
@@ -440,6 +509,7 @@ pub async fn update_media_asset(
     }
 
     let dto = fetch_media_by_id(&state.db, id).await?;
+    broadcast_media_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -451,9 +521,14 @@ pub async fn resize_media_texture(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<ResizeTextureRequest>,
 ) -> AppResult<Json<ApiResponse<MediaAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_media_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     if existing.media_type != MediaAssetType::Texture {
         return Err(AppError::BadRequest(
             "Resize simetri hanya berlaku untuk asset tipe Image Texture".into(),
@@ -510,6 +585,7 @@ pub async fn resize_media_texture(
             let _ = tokio::fs::remove_file(assets_dir.join(&old_active_rel)).await;
         }
         let dto = fetch_media_by_id(&state.db, id).await?;
+        broadcast_media_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
         return Ok(Json(ApiResponse { data: dto }));
     }
 
@@ -533,11 +609,12 @@ pub async fn resize_media_texture(
     let ext = if is_png { "png" } else { "jpg" };
     let base = existing
         .slug
-        .split('/')
-        .nth(1)
+        .rsplit('/')
+        .next()
         .unwrap_or("texture")
         .to_string();
-    let new_active_rel = format!("media/textures/{base}_{target}x{target}.{ext}");
+    let tex_dir = media_folder_prefix(existing.operasi_id, "textures");
+    let new_active_rel = format!("{tex_dir}/{base}_{target}x{target}.{ext}");
     let new_active_abs = assets_dir.join(&new_active_rel);
     if let Some(parent) = new_active_abs.parent() {
         tokio::fs::create_dir_all(parent)
@@ -580,6 +657,7 @@ pub async fn resize_media_texture(
     }
 
     let dto = fetch_media_by_id(&state.db, id).await?;
+    broadcast_media_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -610,9 +688,14 @@ pub async fn delete_media_asset(
     auth: AuthUser,
     AxumPath(id): AxumPath<Uuid>,
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_media_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     sqlx::query("DELETE FROM media_assets WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -623,6 +706,7 @@ pub async fn delete_media_asset(
         let _ = tokio::fs::remove_file(assets_dir.join(&f.rel_path)).await;
     }
 
+    broadcast_media_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse {
         data: serde_json::json!({ "deleted": true, "id": id }),
     }))
@@ -643,6 +727,7 @@ struct ProcessedMedia {
 
 async fn process_and_store_media(
     assets_dir: &Path,
+    operasi_id: Option<Uuid>,
     media_type: MediaAssetType,
     base_slug: &str,
     upload: &UploadedMediaFile,
@@ -699,7 +784,8 @@ async fn process_and_store_media(
 
             let ext = if is_png { "png" } else { "jpg" };
             let mime = if is_png { "image/png" } else { "image/jpeg" };
-            let rel_path = format!("media/textures/{base_slug}_orig.{ext}");
+            let tex_dir = media_folder_prefix(operasi_id, "textures");
+            let rel_path = format!("{tex_dir}/{base_slug}_orig.{ext}");
             let abs = assets_dir.join(&rel_path);
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
@@ -730,7 +816,8 @@ async fn process_and_store_media(
                 "Format audio tidak didukung. Gunakan .mp3, .wav, .ogg, .flac, .aac, atau .m4a",
             )?;
             let mime = mime_for_ext(&ext).to_string();
-            let rel_path = format!("media/sounds/{base_slug}.{ext}");
+            let snd_dir = media_folder_prefix(operasi_id, "sounds");
+            let rel_path = format!("{snd_dir}/{base_slug}.{ext}");
             let abs = assets_dir.join(&rel_path);
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
@@ -763,7 +850,8 @@ async fn process_and_store_media(
                 "Format video tidak didukung. Gunakan .mp4, .webm, .mov, .mkv, atau .avi",
             )?;
             let mime = mime_for_ext(&ext).to_string();
-            let rel_path = format!("media/videos/{base_slug}.{ext}");
+            let vid_dir = media_folder_prefix(operasi_id, "videos");
+            let rel_path = format!("{vid_dir}/{base_slug}.{ext}");
             let abs = assets_dir.join(&rel_path);
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
@@ -777,7 +865,7 @@ async fn process_and_store_media(
             let probe = probe_media_with_ffprobe(&abs).await;
 
             // Best-effort thumbnail generation via ffmpeg
-            let thumb_rel = format!("media/videos/thumbs/{base_slug}_thumb.jpg");
+            let thumb_rel = format!("{vid_dir}/thumbs/{base_slug}_thumb.jpg");
             let thumb_abs = assets_dir.join(&thumb_rel);
             let (thumb_path, thumb_sha256, thumb_size_bytes) =
                 if generate_video_thumbnail(&abs, &thumb_abs).await {
@@ -1002,14 +1090,14 @@ fn sanitize_slug(raw: &str) -> String {
 
 async fn make_unique_media_base(
     db: &PgPool,
-    media_type: MediaAssetType,
+    slug_prefix: &str,
     base: &str,
     exclude_id: Option<Uuid>,
 ) -> AppResult<String> {
     let mut candidate = base.to_string();
     let mut suffix = 2u32;
     loop {
-        let slug = format!("{}/{candidate}", media_type.as_str());
+        let slug = format!("{slug_prefix}/{candidate}");
         let exists: i64 = match exclude_id {
             Some(eid) => {
                 sqlx::query_scalar("SELECT COUNT(*) FROM media_assets WHERE slug = $1 AND id <> $2")

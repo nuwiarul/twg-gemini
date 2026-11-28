@@ -30,6 +30,8 @@ pub struct MediaAssetUploadPayload {
     pub name: String,
     pub media_type: MediaAssetType,
     pub category: String,
+    /// Optional Operasi scope (`None` = global master asset, `Some(op)` = per-operasi Import asset)
+    pub operasi_id: Option<Uuid>,
     /// "crop" (center-crop to min(w,h)) or "resize" (fit to min(w,h)) for textures
     pub crop_mode: String,
     pub file_path: Option<PathBuf>,
@@ -39,6 +41,8 @@ pub struct MediaAssetUploadPayload {
 pub struct ModelAssetUploadPayload {
     pub name: String,
     pub category: String,
+    /// Optional Operasi scope (`None` = global master asset, `Some(op)` = per-operasi Import asset)
+    pub operasi_id: Option<Uuid>,
     pub model_type: ModelAssetType,
     pub default_height: f64,
     pub default_rot_x: f64,
@@ -70,6 +74,9 @@ pub enum ApiCommand {
         username: String,
         password: String,
         device_id: String,
+    },
+    RefreshCurrentUser {
+        auth: AuthCredentials,
     },
     UpdateProfile {
         auth: AuthCredentials,
@@ -348,6 +355,8 @@ pub enum ApiEvent {
     LoginErr(String),
     ProfileUpdated(UserDto),
     ProfileError(String),
+    CurrentUserRefreshed(UserDto),
+    CurrentUserRefreshFailed,
     PasswordChanged,
     PasswordError(String),
     OperasisLoaded(PaginatedResponse<Operasi>),
@@ -586,6 +595,13 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
                     Err(err) => ApiEvent::LoginErr(err),
                 },
                 Err(err) => ApiEvent::LoginErr(format!("Connection failed: {err}")),
+            }
+        }
+        ApiCommand::RefreshCurrentUser { auth } => {
+            let url = format!("{}/api/v1/auth/identify", base(&auth));
+            match authed_get::<UserDto>(client, &auth, &url).await {
+                Ok(u) => ApiEvent::CurrentUserRefreshed(u),
+                Err(_) => ApiEvent::CurrentUserRefreshFailed,
             }
         }
         ApiCommand::UpdateProfile { auth, req } => {
@@ -1291,6 +1307,9 @@ async fn build_media_multipart(payload: MediaAssetUploadPayload) -> Result<multi
         .text("media_type", payload.media_type.as_str().to_string())
         .text("category", payload.category)
         .text("crop_mode", payload.crop_mode);
+    if let Some(op_id) = payload.operasi_id {
+        form = form.text("operasi_id", op_id.to_string());
+    }
 
     if let Some(p) = payload.file_path {
         let part = read_file_part(&p).await?;
@@ -1309,6 +1328,9 @@ async fn build_model_multipart(payload: ModelAssetUploadPayload) -> Result<multi
         .text("default_rot_x", payload.default_rot_x.to_string())
         .text("default_rot_y", payload.default_rot_y.to_string())
         .text("default_rot_z", payload.default_rot_z.to_string());
+    if let Some(op_id) = payload.operasi_id {
+        form = form.text("operasi_id", op_id.to_string());
+    }
 
     if let Some(p) = payload.model_file_path {
         let part = read_file_part(&p).await?;

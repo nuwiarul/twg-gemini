@@ -516,6 +516,15 @@ fn process_net_events_system(
                 state.current_user = Some(updated_user);
                 state.status_banner = Some("Profil akun berhasil diperbarui".into());
             }
+            ApiEvent::CurrentUserRefreshed(refreshed_user) => {
+                state.current_user = Some(refreshed_user);
+                if let Some(sel) = state.selected_asset()
+                    && !state.is_model_asset_allowed(sel)
+                {
+                    state.selected_asset_id = None;
+                }
+            }
+            ApiEvent::CurrentUserRefreshFailed => {}
             ApiEvent::ProfileError(err) => {
                 state.profile_form.profile_submitting = false;
                 state.profile_form.profile_success = None;
@@ -946,6 +955,59 @@ fn process_net_events_system(
                 playback.active_anim_id = state.anims.first().map(|a| a.id);
                 playback.loop_anim = state.anims.first().is_none_or(|a| a.replay);
 
+                state.import_panel.close_preview();
+
+                // Hybrid Sync: non-blocking delta check when opening Plot / Tactical / Layar Besar,
+                // plus immediate PriorityDownload for any model or media used by this scenario that
+                // is not yet present on local disk.
+                if !state.offline_preview {
+                    let mut needed_files = Vec::new();
+                    let mut queued_paths = std::collections::HashSet::new();
+                    for marker in &state.markers {
+                        if marker.model_path.is_empty()
+                            || marker.model_path.starts_with("basic_mesh:")
+                        {
+                            continue;
+                        }
+                        if !state.available_model_paths.contains(&marker.model_path)
+                            && !state.assets_root.join(&marker.model_path).exists()
+                            && let Some(asset) = state
+                                .model_assets
+                                .iter()
+                                .find(|m| m.model_file.rel_path == marker.model_path)
+                        {
+                            for f in asset.all_files() {
+                                if queued_paths.insert(f.rel_path.clone()) {
+                                    needed_files.push(f.clone());
+                                }
+                            }
+                        }
+                    }
+                    for ma in &state.media_assets {
+                        if ma.operasi_id == Some(sk_op_id)
+                            && !state.available_model_paths.contains(&ma.active_file.rel_path)
+                            && !state.assets_root.join(&ma.active_file.rel_path).exists()
+                        {
+                            for f in ma.all_files() {
+                                if queued_paths.insert(f.rel_path.clone()) {
+                                    needed_files.push(f.clone());
+                                }
+                            }
+                        }
+                    }
+                    if !needed_files.is_empty() {
+                        sync_bridge.send(AssetSyncCommand::PriorityDownload {
+                            server_url: state.server_url.clone(),
+                            local_root: state.assets_root.clone(),
+                            files: needed_files,
+                        });
+                    }
+                    sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                        server_url: state.server_url.clone(),
+                        local_root: state.assets_root.clone(),
+                    });
+                }
+
                 if state.screen == AppScreen::LayarBesar {
                     // Layar Besar remote scenario load/reload
                     state.play_session_mode = PlaySessionMode::BigScreen;
@@ -1336,6 +1398,7 @@ fn process_net_events_system(
             }
             ApiEvent::ModelAssetCreated(dto) => {
                 let id = dto.id;
+                let is_op_import = dto.operasi_id.is_some();
                 let files: Vec<_> = dto.all_files().into_iter().cloned().collect();
                 state.model_assets.retain(|m| m.id != id);
                 state.model_assets.push(dto.clone());
@@ -1344,9 +1407,21 @@ fn process_net_events_system(
                 });
                 state.refresh_category_counts();
                 state.rebuild_catalog_from_assets();
-                state.select_asset(id);
-                state.asset_form.success =
-                    Some(format!("Model '{}' berhasil ditambahkan & dikonversi (LOD0 + LOD2)!", dto.name));
+                if is_op_import {
+                    state.import_panel.reset_upload_fields();
+                    state.import_panel.show_upload_form = false;
+                    state.import_panel.success = Some(format!(
+                        "Model 3D '{}' berhasil di-import untuk Operasi ini!",
+                        dto.name
+                    ));
+                    state.set_plot_import_preview_model(id);
+                } else {
+                    state.select_asset(id);
+                    state.asset_form.success = Some(format!(
+                        "Model '{}' berhasil ditambahkan & dikonversi (LOD0 + LOD2)!",
+                        dto.name
+                    ));
+                }
                 state.status_banner = Some(format!("Model '{}' ditambahkan ke server", dto.name));
                 state.preview_reload_nonce = state.preview_reload_nonce.wrapping_add(1);
                 sync_bridge.send(AssetSyncCommand::PriorityDownload {
@@ -1396,6 +1471,12 @@ fn process_net_events_system(
                 state.asset_form.submitting = false;
                 state.asset_form.confirm_delete_id = None;
                 state.asset_form_mode = AssetFormMode::Inspect;
+                state.import_panel.submitting = false;
+                state.import_panel.confirm_delete_id = None;
+                if state.import_panel.preview_model_id == Some(id) {
+                    state.import_panel.preview_model_id = None;
+                    state.import_panel.close_preview();
+                }
                 if state.selected_asset_id == Some(id) {
                     state.selected_asset_id = state.model_assets.first().map(|m| m.id);
                     if let Some(next) = state.selected_asset().cloned() {
@@ -1403,6 +1484,7 @@ fn process_net_events_system(
                     }
                 }
                 state.asset_form.success = Some("Model berhasil dihapus dari server.".into());
+                state.import_panel.success = Some("Model 3D berhasil dihapus.".into());
                 state.status_banner = Some("Model dihapus — menyinkronkan cache lokal".into());
                 sync_bridge.send(AssetSyncCommand::SyncWithServer {
                     server_url: state.server_url.clone(),
@@ -1412,6 +1494,8 @@ fn process_net_events_system(
             ApiEvent::ModelAssetError(err) => {
                 state.asset_form.submitting = false;
                 state.asset_form.error = Some(err.clone());
+                state.import_panel.submitting = false;
+                state.import_panel.error = Some(err.clone());
                 state.status_banner = Some(err);
             }
             ApiEvent::ModelCategoryCreated(dto) => {
@@ -1587,6 +1671,8 @@ fn process_net_events_system(
             }
             ApiEvent::MediaAssetCreated(dto) => {
                 let id = dto.id;
+                let is_op_import = dto.operasi_id.is_some();
+                let media_type = dto.media_type;
                 let files: Vec<_> = dto.all_files().into_iter().cloned().collect();
                 state.media_assets.retain(|m| m.id != id);
                 state.media_assets.push(dto.clone());
@@ -1596,12 +1682,23 @@ fn process_net_events_system(
                         .cmp(b.media_type.as_str())
                         .then_with(|| a.name.cmp(&b.name))
                 });
-                state.select_media(id);
-                state.media_form.success = Some(format!(
-                    "{} '{}' berhasil diunggah ke server!",
-                    dto.media_type.label(),
-                    dto.name
-                ));
+                if is_op_import {
+                    state.import_panel.reset_upload_fields();
+                    state.import_panel.show_upload_form = false;
+                    state.import_panel.success = Some(format!(
+                        "{} '{}' berhasil di-import untuk Operasi ini!",
+                        dto.media_type.label(),
+                        dto.name
+                    ));
+                    state.set_plot_import_preview_media(id, media_type);
+                } else {
+                    state.select_media(id);
+                    state.media_form.success = Some(format!(
+                        "{} '{}' berhasil diunggah ke server!",
+                        dto.media_type.label(),
+                        dto.name
+                    ));
+                }
                 state.status_banner = Some(format!("Media '{}' ditambahkan", dto.name));
                 state.media_reload_nonce = state.media_reload_nonce.wrapping_add(1);
                 sync_bridge.send(AssetSyncCommand::PriorityDownload {
@@ -1655,8 +1752,15 @@ fn process_net_events_system(
                 state.media_form.submitting = false;
                 state.media_form.confirm_delete_id = None;
                 state.media_form_mode = MediaFormMode::Inspect;
+                state.import_panel.submitting = false;
+                state.import_panel.confirm_delete_id = None;
+                if state.import_panel.preview_media_id == Some(id) {
+                    state.import_panel.preview_media_id = None;
+                    state.import_panel.close_preview();
+                }
                 state.ensure_media_selection_for_section();
                 state.media_form.success = Some("Media asset berhasil dihapus dari server.".into());
+                state.import_panel.success = Some("Media berhasil dihapus.".into());
                 state.status_banner = Some("Media dihapus — menyinkronkan cache lokal".into());
                 state.media_reload_nonce = state.media_reload_nonce.wrapping_add(1);
                 sync_bridge.send(AssetSyncCommand::SyncWithServer {
@@ -1667,6 +1771,8 @@ fn process_net_events_system(
             ApiEvent::MediaAssetError(err) => {
                 state.media_form.submitting = false;
                 state.media_form.error = Some(err.clone());
+                state.import_panel.submitting = false;
+                state.import_panel.error = Some(err.clone());
                 state.status_banner = Some(err);
             }
             ApiEvent::Error(err) => {
@@ -1693,6 +1799,30 @@ fn process_net_events_system(
             }
             WsInEvent::OnlineUsers(ops) => {
                 state.online_operators = ops;
+            }
+            WsInEvent::AssetsChanged {
+                operasi_id,
+                kind,
+                actor_username,
+                ..
+            } => {
+                if !state.offline_preview {
+                    sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                        server_url: state.server_url.clone(),
+                        local_root: state.assets_root.clone(),
+                    });
+                    let is_other_actor = state
+                        .current_user
+                        .as_ref()
+                        .is_none_or(|u| u.username != actor_username);
+                    if is_other_actor
+                        && (operasi_id.is_none() || operasi_id == state.active_operasi_id())
+                    {
+                        state.status_banner = Some(format!(
+                            "Aset ({kind}) diperbarui oleh @{actor_username} — sinkronisasi otomatis..."
+                        ));
+                    }
+                }
             }
             WsInEvent::Error(msg) => {
                 state.push_log("ws", "error", msg);

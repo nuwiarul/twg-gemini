@@ -1543,7 +1543,7 @@ pub fn draw_play_animation_panel(
                                     } else {
                                         let sep = match grp.mode {
                                             GroupAnimMode::Combine => " + ",
-                                            GroupAnimMode::Sequence => " → ",
+                                            GroupAnimMode::Sequence => " -> ",
                                         };
                                         let preview = if child_names.len() <= 3 {
                                             child_names.join(sep)

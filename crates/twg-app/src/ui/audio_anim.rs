@@ -140,7 +140,9 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
                 .show_ui(ui, |ui| {
                     let mut found = false;
                     for asset in &state.media_assets {
-                        if asset.media_type != MediaAssetType::Sound {
+                        if asset.media_type != MediaAssetType::Sound
+                            || !state.is_media_asset_allowed_in_active_operasi(asset)
+                        {
                             continue;
                         }
                         found = true;
@@ -148,10 +150,15 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
                             .duration_sec
                             .map(|d| format!(" · {d:.1} dtk"))
                             .unwrap_or_default();
+                        let tag = if asset.operasi_id.is_some() {
+                            "[Import] "
+                        } else {
+                            ""
+                        };
                         if ui
                             .selectable_label(
                                 cfg.asset_id == Some(asset.id),
-                                format!("{}{duration}", asset.name),
+                                format!("{tag}{}{duration}", asset.name),
                             )
                             .clicked()
                             && cfg.asset_id != Some(asset.id)
@@ -162,7 +169,7 @@ pub fn draw_inspector(ui: &mut egui::Ui, state: &mut AppState, anim: &mut Anim, 
                         }
                     }
                     if !found {
-                        ui.label("Belum ada Sound — upload di halaman Assets.");
+                        ui.label("Belum ada Sound — upload di Assets atau tab Import.");
                     }
                 });
             if let Some(asset) = selected {

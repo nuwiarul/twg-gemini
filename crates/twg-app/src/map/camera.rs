@@ -153,7 +153,7 @@ pub fn camera_control_system(
     };
 
     let in_preview = state.is_skenario_map_preview_active();
-    let in_plot = state.screen == AppScreen::PlotSkenario;
+    let in_plot = state.screen == AppScreen::PlotSkenario && !state.is_plot_import_preview_active();
     let in_big_screen = state.is_big_screen();
     let in_play_mode = in_plot && playback.play_test_mode;
 

@@ -12,6 +12,7 @@ pub(crate) mod video_recorder_ui;
 mod bottom_bar;
 mod formation_pad;
 mod graphics_page;
+mod import_panel;
 mod layar_besar_page;
 mod left_panel;
 mod login;
@@ -120,7 +121,7 @@ pub fn egui_root_system(
     {
         nav_bar::enter_layar_besar(&mut state, &mut playback, &ws);
     }
-    if state.screen == AppScreen::Assets && !state.is_super_admin() {
+    if state.screen == AppScreen::Assets && !state.can_view_assets_screen() {
         state.screen = AppScreen::Operasis;
     }
     if state.screen == AppScreen::Satkers && !state.can_manage_satkers() {
@@ -193,7 +194,7 @@ pub fn egui_root_system(
         return Ok(());
     }
 
-    if state.screen == AppScreen::Users {
+    if state.screen == AppScreen::Users && !state.is_user_assets_assign_preview_active() {
         user_page::draw_user_screen(
             &mut viewport_ui,
             ctx,
@@ -273,6 +274,38 @@ pub fn egui_root_system(
             || ctx.egui_wants_pointer_input()
             || ctx.is_pointer_over_egui();
         ui_state.wants_keyboard = state.preset_manager.open || ctx.egui_wants_keyboard_input();
+        return Ok(());
+    }
+
+    if state.is_user_assets_assign_preview_active() {
+        let insets = user_page::draw_user_assign_assets_screen(
+            &mut viewport_ui,
+            ctx,
+            &mut state,
+            &mut playback,
+            &mut preview_stage,
+            &api,
+            &ws,
+            &sync_bridge,
+        );
+        let center_rect = apply_camera_viewport(
+            &mut camera,
+            &window,
+            screen_rect,
+            insets.left,
+            insets.right,
+            insets.top,
+            insets.bottom,
+        );
+        ui_state.viewport_rect_logical = Some(center_rect);
+
+        let pointer_in_center = ctx
+            .pointer_latest_pos()
+            .is_some_and(|p| center_rect.contains(p));
+        ui_state.wants_pointer = !pointer_in_center
+            || ctx.egui_wants_pointer_input()
+            || ctx.is_pointer_over_egui();
+        ui_state.wants_keyboard = ctx.egui_wants_keyboard_input();
         return Ok(());
     }
 
@@ -376,6 +409,11 @@ pub fn egui_root_system(
             &sync_bridge,
         )
     };
+    if playback.play_test_mode && state.import_panel.preview_open {
+        media_player.stop_all_playback();
+        state.import_panel.close_preview();
+    }
+
     let bottom =
         bottom_bar::draw_bottom_bar(&mut viewport_ui, &mut state, &tcam, &mut playback, &ws);
     let (left, right) = if playback.play_test_mode {
@@ -398,26 +436,97 @@ pub fn egui_root_system(
             &mut state,
             &mut tcam,
             &mut playback,
-            &api,
-        );
-        let r = right_panel::draw_right_panel(
-            &mut viewport_ui,
-            ctx,
-            &mut state,
-            &mut tcam,
-            &mut playback,
-            &mut poly_edit,
-            &mut route_edit,
             &mut media_player,
             &api,
-            &ws,
         );
+        let r = if state.is_plot_import_preview_active() {
+            import_panel::draw_import_preview_right_panel(
+                &mut viewport_ui,
+                &mut state,
+                &mut preview_stage,
+                &tcam,
+                &playback,
+                &mut media_player,
+                &api,
+            )
+        } else {
+            right_panel::draw_right_panel(
+                &mut viewport_ui,
+                ctx,
+                &mut state,
+                &mut tcam,
+                &mut playback,
+                &mut poly_edit,
+                &mut route_edit,
+                &mut media_player,
+                &api,
+                &ws,
+            )
+        };
         (l, r)
     };
 
     let center_rect =
         apply_camera_viewport(&mut camera, &window, screen_rect, left, right, top, bottom);
     ui_state.viewport_rect_logical = Some(center_rect);
+
+    // Temporary Center Viewport Preview for Plot Editor Import tab (3D Model / Texture / Sound / Video)
+    if state.is_plot_import_preview_active() {
+        if let Some(media_type) = state.is_plot_import_media_preview_active() {
+            media_assets_ui::draw_media_center_preview(
+                ctx,
+                center_rect,
+                &mut state,
+                &mut media_player,
+                &sync_bridge,
+                media_type,
+            );
+            let mut close_preview = false;
+            egui::Area::new(egui::Id::new("import_media_back_to_map_btn"))
+                .fixed_pos(egui::pos2(
+                    (center_rect.right() - 164.0).max(center_rect.left() + 12.0),
+                    center_rect.top() + 14.0,
+                ))
+                .show(ctx, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("< Kembali ke Peta")
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(14, 116, 144))
+                            .min_size(egui::vec2(148.0, 28.0)),
+                        )
+                        .clicked()
+                    {
+                        close_preview = true;
+                    }
+                });
+            if close_preview {
+                media_player.stop_all_playback();
+                state.import_panel.close_preview();
+            }
+            draw_plot_exit_confirm_modal(ctx, &mut commands, &mut state, &mut playback, &api, &ws);
+            ui_state.wants_pointer = true;
+            ui_state.wants_keyboard = ctx.egui_wants_keyboard_input();
+            return Ok(());
+        } else {
+            import_panel::draw_import_3d_center_hud(ctx, center_rect, &mut state);
+            draw_plot_exit_confirm_modal(ctx, &mut commands, &mut state, &mut playback, &api, &ws);
+            let has_modal = state.pending_plot_exit.is_some();
+            let pointer_in_center = ctx
+                .pointer_latest_pos()
+                .is_some_and(|p| center_rect.contains(p));
+            ui_state.wants_pointer = has_modal
+                || !pointer_in_center
+                || ctx.egui_wants_pointer_input()
+                || ctx.is_pointer_over_egui();
+            ui_state.wants_keyboard = has_modal || ctx.egui_wants_keyboard_input();
+            return Ok(());
+        }
+    }
 
     overlays::draw_projected_labels(
         ctx,

@@ -51,6 +51,7 @@ pub fn draw_left_panel(
     state: &mut AppState,
     tcam: &mut TacticalCamera,
     playback: &mut PlaybackState,
+    media_player: &mut crate::scene::media_preview::MediaPreviewPlayer,
     api: &ApiClientBridge,
 ) -> f32 {
     egui::Panel::left("editor_left_dock")
@@ -65,57 +66,132 @@ pub fn draw_left_panel(
                 .inner_margin(egui::Margin::same(8)),
         )
         .show(viewport_ui, |ui| {
-            // Godot / Unity Dock Tab Bar: Layers | Catalog | Mesh | Animasi
+            // Sliding 4-slot Dock Tab Bar with < > buttons: Layers | Catalog | Mesh | Animasi | [Import]
+            const ALL_TABS: [(LeftTab, &str, egui::Color32); 5] = [
+                (
+                    LeftTab::Layers,
+                    "Layers",
+                    egui::Color32::from_rgb(14, 116, 144),
+                ),
+                (
+                    LeftTab::Catalog,
+                    "Catalog",
+                    egui::Color32::from_rgb(14, 116, 144),
+                ),
+                (
+                    LeftTab::BasicMesh,
+                    "Mesh",
+                    egui::Color32::from_rgb(109, 40, 217),
+                ),
+                (
+                    LeftTab::Animations,
+                    "Animasi",
+                    egui::Color32::from_rgb(5, 150, 105),
+                ),
+                (
+                    LeftTab::Import,
+                    "Import",
+                    egui::Color32::from_rgb(217, 119, 6),
+                ),
+            ];
+            let max_offset = ALL_TABS.len().saturating_sub(4);
+            state.left_tab_offset = state.left_tab_offset.min(max_offset);
+
             egui::Frame::new()
                 .fill(egui::Color32::from_rgb(12, 17, 27))
                 .corner_radius(5.0)
                 .inner_margin(egui::Margin::same(3))
                 .show(ui, |ui| {
-                    ui.columns(4, |cols| {
-                        for (idx, (tab, title, active_fill)) in [
-                            (
-                                LeftTab::Layers,
-                                "Layers",
-                                egui::Color32::from_rgb(14, 116, 144),
-                            ),
-                            (
-                                LeftTab::Catalog,
-                                "Catalog",
-                                egui::Color32::from_rgb(14, 116, 144),
-                            ),
-                            (
-                                LeftTab::BasicMesh,
-                                "Mesh",
-                                egui::Color32::from_rgb(109, 40, 217),
-                            ),
-                            (
-                                LeftTab::Animations,
-                                "Animasi",
-                                egui::Color32::from_rgb(5, 150, 105),
-                            ),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            let is_active = state.left_tab == tab;
-                            let btn = egui::Button::new(
-                                egui::RichText::new(title).size(10.5).strong().color(
-                                    if is_active {
-                                        egui::Color32::WHITE
-                                    } else {
-                                        egui::Color32::from_rgb(148, 163, 184)
-                                    },
-                                ),
-                            )
-                            .fill(if is_active {
-                                active_fill
+                    let can_left = state.left_tab_offset > 0;
+                    let can_right = state.left_tab_offset < max_offset;
+                    let arrow_w = 18.0_f32;
+                    let avail_w = ui.available_width();
+                    let tabs_w = (avail_w - arrow_w * 2.0 - 8.0).max(140.0);
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        let left_btn = egui::Button::new(
+                            egui::RichText::new("<").size(11.0).strong().color(if can_left {
+                                egui::Color32::from_rgb(186, 230, 253)
                             } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .min_size(egui::vec2(cols[idx].available_width(), 25.0));
-                            if cols[idx].add(btn).clicked() {
-                                state.left_tab = tab;
-                            }
+                                egui::Color32::from_rgb(71, 85, 105)
+                            }),
+                        )
+                        .fill(if can_left {
+                            egui::Color32::from_rgb(24, 34, 53)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .min_size(egui::vec2(arrow_w, 25.0));
+                        if ui
+                            .add_enabled(can_left, left_btn)
+                            .on_hover_text("Geser tab ke kiri (Layers)")
+                            .clicked()
+                        {
+                            state.left_tab_offset = state.left_tab_offset.saturating_sub(1);
+                        }
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(tabs_w, 25.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.columns(4, |cols| {
+                                    let visible =
+                                        &ALL_TABS[state.left_tab_offset..state.left_tab_offset + 4];
+                                    for (idx, &(tab, title, active_fill)) in
+                                        visible.iter().enumerate()
+                                    {
+                                        let is_active = state.left_tab == tab;
+                                        let btn = egui::Button::new(
+                                            egui::RichText::new(title).size(10.5).strong().color(
+                                                if is_active {
+                                                    egui::Color32::WHITE
+                                                } else if tab == LeftTab::Import {
+                                                    egui::Color32::from_rgb(253, 224, 71)
+                                                } else {
+                                                    egui::Color32::from_rgb(148, 163, 184)
+                                                },
+                                            ),
+                                        )
+                                        .fill(if is_active {
+                                            active_fill
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .min_size(egui::vec2(cols[idx].available_width(), 25.0));
+                                        if cols[idx].add(btn).clicked() {
+                                            state.left_tab = tab;
+                                            if tab != LeftTab::Import
+                                                && state.import_panel.preview_open
+                                            {
+                                                media_player.stop_all_playback();
+                                                state.import_panel.close_preview();
+                                            }
+                                        }
+                                    }
+                                });
+                            },
+                        );
+
+                        let right_btn = egui::Button::new(
+                            egui::RichText::new(">").size(11.0).strong().color(if can_right {
+                                egui::Color32::from_rgb(253, 224, 71)
+                            } else {
+                                egui::Color32::from_rgb(71, 85, 105)
+                            }),
+                        )
+                        .fill(if can_right {
+                            egui::Color32::from_rgb(24, 34, 53)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .min_size(egui::vec2(arrow_w, 25.0));
+                        if ui
+                            .add_enabled(can_right, right_btn)
+                            .on_hover_text("Geser tab ke kanan (tampilkan tab Import)")
+                            .clicked()
+                        {
+                            state.left_tab_offset = (state.left_tab_offset + 1).min(max_offset);
                         }
                     });
                 });
@@ -127,6 +203,14 @@ pub fn draw_left_panel(
                 LeftTab::Catalog => draw_catalog_tab(ui, state, tcam, playback, api),
                 LeftTab::BasicMesh => draw_basic_mesh_tab(ui, state, tcam, playback, api),
                 LeftTab::Animations => draw_animations_tab(ui, state, tcam, playback, api),
+                LeftTab::Import => crate::ui::import_panel::draw_import_tab(
+                    ui,
+                    state,
+                    tcam,
+                    playback,
+                    media_player,
+                    api,
+                ),
             }
         })
         .response
@@ -3402,6 +3486,19 @@ fn draw_catalog_tab(
                                                     .strong()
                                                     .color(tag_col),
                                             );
+                                            if entry.operasi_id.is_some() {
+                                                ui.label(
+                                                    egui::RichText::new("[IMP]")
+                                                        .size(9.5)
+                                                        .strong()
+                                                        .color(egui::Color32::from_rgb(
+                                                            253, 224, 71,
+                                                        )),
+                                                )
+                                                .on_hover_text(
+                                                    "Asset 3D hasil Import khusus Operasi ini",
+                                                );
+                                            }
                                             ui.add(
                                                 egui::Label::new(
                                                     egui::RichText::new(&entry.name)
@@ -5809,7 +5906,7 @@ fn draw_ordered_animation_list(
                             } else {
                                 let sep = match cfg.mode {
                                     GroupAnimMode::Combine => " + ",
-                                    GroupAnimMode::Sequence => " → ",
+                                    GroupAnimMode::Sequence => " -> ",
                                 };
                                 let preview = if names.len() <= 2 {
                                     names.join(sep)

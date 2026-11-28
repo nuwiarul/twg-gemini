@@ -35,6 +35,13 @@ pub enum WsInEvent {
     OnlineUsers(Vec<OnlineOperator>),
     Broadcast(TacticalCommandBroadcast),
     BigScreenState(BigScreenLiveState),
+    AssetsChanged {
+        operasi_id: Option<Uuid>,
+        kind: String,
+        #[allow(dead_code)]
+        asset_id: Uuid,
+        actor_username: String,
+    },
     Error(String),
 }
 
@@ -213,6 +220,19 @@ async fn run_ws_reconnect_loop(
                                     }
                                     WsServerMessage::BigScreenState(st) => {
                                         let _ = evt_tx.send(WsInEvent::BigScreenState(st));
+                                    }
+                                    WsServerMessage::AssetsChanged {
+                                        operasi_id,
+                                        kind,
+                                        asset_id,
+                                        actor_username,
+                                    } => {
+                                        let _ = evt_tx.send(WsInEvent::AssetsChanged {
+                                            operasi_id,
+                                            kind,
+                                            asset_id,
+                                            actor_username,
+                                        });
                                     }
                                     WsServerMessage::Error { message } => {
                                         let _ = evt_tx.send(WsInEvent::Error(message));

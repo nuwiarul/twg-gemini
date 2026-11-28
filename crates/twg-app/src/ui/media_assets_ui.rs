@@ -92,7 +92,7 @@ pub fn draw_media_left_panel_body(
         .media_assets
         .iter()
         .filter(|m| {
-            if m.media_type != media_type {
+            if m.operasi_id.is_some() || m.media_type != media_type {
                 return false;
             }
             if !needle.is_empty()
@@ -251,7 +251,7 @@ pub fn draw_media_center_preview(
     media_type: MediaAssetType,
 ) {
     let Some(asset) = state
-        .selected_media()
+        .active_preview_media()
         .cloned()
         .filter(|m| m.media_type == media_type)
     else {
@@ -1094,6 +1094,7 @@ fn draw_media_create_form(
                     name: state.media_form.name.trim().to_string(),
                     media_type,
                     category: state.media_form.category.trim().to_string(),
+                    operasi_id: None,
                     crop_mode: state.media_form.crop_mode.clone(),
                     file_path: state.media_form.file_path.clone(),
                 },
@@ -1109,7 +1110,7 @@ fn draw_media_inspect_and_edit(
     media_type: MediaAssetType,
 ) {
     let Some(asset) = state
-        .selected_media()
+        .active_preview_media()
         .cloned()
         .filter(|m| m.media_type == media_type)
     else {
@@ -1386,6 +1387,7 @@ fn draw_media_inspect_and_edit(
                     name: state.media_form.name.trim().to_string(),
                     media_type,
                     category: state.media_form.category.trim().to_string(),
+                    operasi_id: None,
                     crop_mode: state.media_form.crop_mode.clone(),
                     file_path: state.media_form.file_path.clone(),
                 },

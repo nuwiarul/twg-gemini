@@ -207,6 +207,8 @@ fn row_to_dto(row: &sqlx::postgres::PgRow) -> AppResult<ModelAssetDto> {
         name: row.try_get("name")?,
         category: row.try_get("category")?,
         model_type: ModelAssetType::from_db(&model_type_str),
+        operasi_id: row.try_get("operasi_id").ok().flatten(),
+        created_by: row.try_get("created_by").ok().flatten(),
         model_file: ModelFileMeta {
             download_url: file_download_url(&model_path),
             rel_path: model_path,
@@ -235,7 +237,7 @@ pub async fn fetch_all_models(db: &PgPool) -> AppResult<Vec<ModelAssetDto>> {
     let rows = sqlx::query(
         r#"
         SELECT
-            id, slug, name, category, model_type,
+            id, slug, name, category, model_type, operasi_id, created_by,
             model_path, model_sha256, model_size_bytes, model_tris,
             lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
             walk_path, walk_sha256, walk_size_bytes, walk_tris,
@@ -912,6 +914,9 @@ pub async fn get_sync_manifest(
     }
     for m in &models {
         manifest_hasher.update(m.id.as_bytes());
+        if let Some(op_id) = m.operasi_id {
+            manifest_hasher.update(op_id.as_bytes());
+        }
         manifest_hasher.update(m.version.to_le_bytes());
         manifest_hasher.update(m.updated_at.timestamp_millis().to_le_bytes());
         for f in m.all_files() {
@@ -923,6 +928,9 @@ pub async fn get_sync_manifest(
     }
     for ma in &media_assets {
         manifest_hasher.update(ma.id.as_bytes());
+        if let Some(op_id) = ma.operasi_id {
+            manifest_hasher.update(op_id.as_bytes());
+        }
         manifest_hasher.update(ma.version.to_le_bytes());
         manifest_hasher.update(ma.updated_at.timestamp_millis().to_le_bytes());
         for f in ma.all_files() {
@@ -989,11 +997,45 @@ pub async fn get_model_asset(
     Ok(Json(ApiResponse { data: dto }))
 }
 
+fn model_folder_prefix(operasi_id: Option<Uuid>, category: &str) -> String {
+    match operasi_id {
+        Some(op_id) => format!("models/operasi_{}/{category}", op_id.simple()),
+        None => format!("models/{category}"),
+    }
+}
+
+fn model_slug_prefix(operasi_id: Option<Uuid>, category: &str) -> String {
+    match operasi_id {
+        Some(op_id) => format!("op_{}/{category}", op_id.simple()),
+        None => category.to_string(),
+    }
+}
+
+async fn broadcast_model_assets_changed(
+    state: &AppState,
+    operasi_id: Option<Uuid>,
+    asset_id: Uuid,
+    actor_username: &str,
+) {
+    state
+        .ws_hub
+        .broadcast(
+            crate::ws::HubDelivery::All,
+            twg_shared::ws::WsServerMessage::AssetsChanged {
+                operasi_id,
+                kind: "model".into(),
+                asset_id,
+                actor_username: actor_username.to_string(),
+            },
+        )
+        .await;
+}
+
 async fn fetch_model_by_id(db: &PgPool, id: Uuid) -> AppResult<ModelAssetDto> {
     let row = sqlx::query(
         r#"
         SELECT
-            id, slug, name, category, model_type,
+            id, slug, name, category, model_type, operasi_id, created_by,
             model_path, model_sha256, model_size_bytes, model_tris,
             lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
             walk_path, walk_sha256, walk_size_bytes, walk_tris,
@@ -1058,9 +1100,21 @@ pub async fn create_model_asset(
     auth: AuthUser,
     multipart: Multipart,
 ) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let form = parse_model_multipart(multipart).await?;
+    let operasi_id = match form
+        .fields
+        .get("operasi_id")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(
+            Uuid::parse_str(raw)
+                .map_err(|_| AppError::BadRequest("operasi_id tidak valid".into()))?,
+        ),
+        None => None,
+    };
+    crate::auth::middleware::verify_operasi_asset_upload(&state, &auth, operasi_id).await?;
+
     let name = form
         .fields
         .get("name")
@@ -1101,8 +1155,10 @@ pub async fn create_model_asset(
     let default_rot_z = parse_f64(&form.fields, "default_rot_z", 0.0);
 
     let base_slug = sanitize_slug(&name);
-    let unique_base = make_unique_base_slug(&state.db, &category, &base_slug, None).await?;
-    let slug = format!("{category}/{unique_base}");
+    let slug_prefix = model_slug_prefix(operasi_id, &category);
+    let folder_prefix = model_folder_prefix(operasi_id, &category);
+    let unique_base = make_unique_base_slug(&state.db, &slug_prefix, &base_slug, None).await?;
+    let slug = format!("{slug_prefix}/{unique_base}");
 
     let assets_dir = &state.config.assets_dir;
     let id = Uuid::new_v4();
@@ -1129,8 +1185,8 @@ pub async fn create_model_asset(
                 })?;
             validate_gltf_extension(&file.filename)?;
 
-            let rel_lod0 = format!("models/{category}/{unique_base}.glb");
-            let rel_lod2 = format!("models/{category}/{unique_base}_lod2.glb");
+            let rel_lod0 = format!("{folder_prefix}/{unique_base}.glb");
+            let rel_lod2 = format!("{folder_prefix}/{unique_base}_lod2.glb");
             let (s0, s2) = convert_uploaded_model(
                 file,
                 &assets_dir.join(&rel_lod0),
@@ -1164,10 +1220,10 @@ pub async fn create_model_asset(
             validate_gltf_extension(&idle_file.filename)?;
             validate_gltf_extension(&walk_file.filename)?;
 
-            let rel_idle = format!("models/{category}/{unique_base}_idle.glb");
-            let rel_idle_lod2 = format!("models/{category}/{unique_base}_idle_lod2.glb");
-            let rel_walk = format!("models/{category}/{unique_base}_walk.glb");
-            let rel_walk_lod2 = format!("models/{category}/{unique_base}_walk_lod2.glb");
+            let rel_idle = format!("{folder_prefix}/{unique_base}_idle.glb");
+            let rel_idle_lod2 = format!("{folder_prefix}/{unique_base}_idle_lod2.glb");
+            let rel_walk = format!("{folder_prefix}/{unique_base}_walk.glb");
+            let rel_walk_lod2 = format!("{folder_prefix}/{unique_base}_walk_lod2.glb");
 
             let (i0, i2) = convert_uploaded_model(
                 idle_file,
@@ -1210,7 +1266,7 @@ pub async fn create_model_asset(
     sqlx::query(
         r#"
         INSERT INTO model_assets (
-            id, slug, name, category, model_type,
+            id, slug, name, category, model_type, operasi_id,
             model_path, model_sha256, model_size_bytes, model_tris,
             lod2_path, lod2_sha256, lod2_size_bytes, lod2_tris,
             walk_path, walk_sha256, walk_size_bytes, walk_tris,
@@ -1219,13 +1275,13 @@ pub async fn create_model_asset(
             version, created_by
         )
         VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9,
-            $10, $11, $12, $13,
-            $14, $15, $16, $17,
-            $18, $19, $20, $21,
-            $22, $23, $24, $25,
-            1, $26
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10,
+            $11, $12, $13, $14,
+            $15, $16, $17, $18,
+            $19, $20, $21, $22,
+            $23, $24, $25, $26,
+            1, $27
         )
         "#,
     )
@@ -1234,6 +1290,7 @@ pub async fn create_model_asset(
     .bind(&name)
     .bind(&category)
     .bind(model_type.as_str())
+    .bind(operasi_id)
     .bind(&model_path)
     .bind(&model_lod0.sha256)
     .bind(model_lod0.size_bytes)
@@ -1259,7 +1316,10 @@ pub async fn create_model_asset(
     .await?;
 
     let dto = fetch_model_by_id(&state.db, id).await?;
-    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    if operasi_id.is_none() {
+        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    }
+    broadcast_model_assets_changed(&state, operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -1269,9 +1329,14 @@ pub async fn update_model_asset(
     AxumPath(id): AxumPath<Uuid>,
     multipart: Multipart,
 ) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_model_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     let form = parse_model_multipart(multipart).await?;
 
     let name = form
@@ -1608,7 +1673,10 @@ pub async fn update_model_asset(
     }
 
     let dto = fetch_model_by_id(&state.db, id).await?;
-    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    if existing.operasi_id.is_none() {
+        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    }
+    broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -1618,9 +1686,14 @@ pub async fn upload_model_action(
     AxumPath(id): AxumPath<Uuid>,
     multipart: Multipart,
 ) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_model_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     if existing.model_type != ModelAssetType::Animated {
         return Err(AppError::BadRequest(
             "Animasi aksi tambahan hanya tersedia untuk model bertipe Animasi (Idle + Walk).".into(),
@@ -1651,19 +1724,14 @@ pub async fn upload_model_action(
     let action_slug = sanitize_slug(raw_slug);
     let model_base = existing
         .slug
-        .split('/')
-        .nth(1)
+        .rsplit('/')
+        .next()
         .unwrap_or("model")
         .to_string();
+    let folder_prefix = model_folder_prefix(existing.operasi_id, &existing.category);
 
-    let rel_lod0 = format!(
-        "models/{}/{}_act_{}.glb",
-        existing.category, model_base, action_slug
-    );
-    let rel_lod2 = format!(
-        "models/{}/{}_act_{}_lod2.glb",
-        existing.category, model_base, action_slug
-    );
+    let rel_lod0 = format!("{folder_prefix}/{model_base}_act_{action_slug}.glb");
+    let rel_lod2 = format!("{folder_prefix}/{model_base}_act_{action_slug}_lod2.glb");
     let assets_dir = &state.config.assets_dir;
     let abs_lod0 = assets_dir.join(&rel_lod0);
     let abs_lod2 = assets_dir.join(&rel_lod2);
@@ -1727,7 +1795,10 @@ pub async fn upload_model_action(
     }
 
     let dto = fetch_model_by_id(&state.db, id).await?;
-    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    if existing.operasi_id.is_none() {
+        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    }
+    broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -1736,9 +1807,14 @@ pub async fn delete_model_action(
     auth: AuthUser,
     AxumPath((id, action_slug)): AxumPath<(Uuid, String)>,
 ) -> AppResult<Json<ApiResponse<ModelAssetDto>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_model_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     let mut extra = existing.extra_animations.clone();
     let Some(pos) = extra.iter().position(|a| a.slug == action_slug) else {
         return Err(AppError::NotFound(format!(
@@ -1769,7 +1845,10 @@ pub async fn delete_model_action(
     }
 
     let dto = fetch_model_by_id(&state.db, id).await?;
-    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    if existing.operasi_id.is_none() {
+        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    }
+    broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
 }
 
@@ -1778,9 +1857,14 @@ pub async fn delete_model_asset(
     auth: AuthUser,
     AxumPath(id): AxumPath<Uuid>,
 ) -> AppResult<Json<ApiResponse<serde_json::Value>>> {
-    auth.require_super_admin_write()?;
-
     let existing = fetch_model_by_id(&state.db, id).await?;
+    crate::auth::middleware::verify_operasi_asset_mutation(
+        &state,
+        &auth,
+        existing.operasi_id,
+        existing.created_by,
+    )
+    .await?;
     sqlx::query("DELETE FROM model_assets WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -1791,7 +1875,10 @@ pub async fn delete_model_asset(
         remove_file_if_unreferenced(&state.db, assets_dir, &f.rel_path).await;
     }
 
-    let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    if existing.operasi_id.is_none() {
+        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+    }
+    broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse {
         data: serde_json::json!({ "deleted": true, "id": id }),
     }))
@@ -1857,6 +1944,7 @@ async fn write_catalog_snapshot(db: &PgPool, assets_dir: &Path) -> anyhow::Resul
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let snapshot: Vec<serde_json::Value> = models
         .iter()
+        .filter(|m| m.operasi_id.is_none())
         .map(|m| {
             serde_json::json!({
                 "id": m.id.to_string(),

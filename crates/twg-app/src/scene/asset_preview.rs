@@ -9,9 +9,7 @@ use twg_shared::models::{ModelAssetDto, ModelAssetType};
 use crate::{
     map::camera::TacticalCamera,
     net::asset_sync::{AssetSyncBridge, AssetSyncCommand},
-    state::{
-        AppScreen, AppState, AssetPreviewLod, AssetPreviewVariant, AssetsSection, UiPointerState,
-    },
+    state::{AppState, AssetPreviewLod, AssetPreviewVariant, UiPointerState},
 };
 
 #[derive(Component)]
@@ -160,7 +158,7 @@ pub fn asset_preview_stage_system(
     aabb_q: Query<(&Aabb, &GlobalTransform)>,
     mut anim_player_q: Query<(Entity, &mut AnimationPlayer)>,
 ) {
-    if state.screen != AppScreen::Assets || state.assets_section != AssetsSection::Models3d {
+    if !state.is_asset_3d_preview_active() {
         if let Ok((_, mut vis)) = floor_q.single_mut() {
             *vis = Visibility::Hidden;
         }
@@ -203,7 +201,7 @@ pub fn asset_preview_stage_system(
         Color::srgba(0.22, 0.74, 0.97, 0.55),
     );
 
-    let Some(asset) = state.selected_asset() else {
+    let Some(asset) = state.active_preview_asset() else {
         if let Some(ent) = stage.turntable_entity.take() {
             commands.entity(ent).despawn();
         }
@@ -404,7 +402,7 @@ pub fn asset_preview_camera_system(
     mut stage: ResMut<AssetPreviewStage>,
     mut cam_q: Query<&mut Transform, With<TacticalCamera>>,
 ) {
-    if state.screen != AppScreen::Assets || state.assets_section != AssetsSection::Models3d {
+    if !state.is_asset_3d_preview_active() {
         motion_ev.clear();
         wheel_ev.clear();
         return;

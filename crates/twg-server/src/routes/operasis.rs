@@ -322,6 +322,23 @@ pub async fn delete_operasi(
         .execute(&state.db)
         .await?;
 
+    // Best-effort cleanup of operasi-scoped imported asset folders on disk + broadcast sync
+    let op_folder = format!("operasi_{}", id.simple());
+    let _ = tokio::fs::remove_dir_all(state.config.assets_dir.join("models").join(&op_folder)).await;
+    let _ = tokio::fs::remove_dir_all(state.config.assets_dir.join("media").join(&op_folder)).await;
+    state
+        .ws_hub
+        .broadcast(
+            crate::ws::HubDelivery::All,
+            twg_shared::ws::WsServerMessage::AssetsChanged {
+                operasi_id: Some(id),
+                kind: "operasi_deleted".into(),
+                asset_id: id,
+                actor_username: auth.username.clone(),
+            },
+        )
+        .await;
+
     Ok(Json(ApiResponse {
         data: serde_json::json!({ "deleted": true }),
     }))

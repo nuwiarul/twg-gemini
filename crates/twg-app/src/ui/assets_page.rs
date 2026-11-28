@@ -69,6 +69,29 @@ pub fn draw_assets_screen(
     ws: &WsClientBridge,
     sync_bridge: &AssetSyncBridge,
 ) -> AssetsLayoutInsets {
+    let is_super_admin = state.is_super_admin();
+    if !is_super_admin {
+        state.assets_section = AssetsSection::Models3d;
+        state.asset_form_mode = AssetFormMode::Inspect;
+    }
+
+    // Ensure selected asset is permitted for the active user (auto-select first allowed asset)
+    let selection_valid = state
+        .selected_asset()
+        .is_some_and(|a| state.is_model_asset_allowed(a));
+    if !selection_valid {
+        let first_allowed = state
+            .model_assets
+            .iter()
+            .find(|m| state.is_model_asset_allowed(m))
+            .map(|m| m.id);
+        if let Some(id) = first_allowed {
+            state.select_asset(id);
+        } else {
+            state.selected_asset_id = None;
+        }
+    }
+
     let top = draw_assets_top_bar(viewport_ui, state, playback, api, ws, sync_bridge);
     let bottom = draw_assets_bottom_bar(viewport_ui, state);
     let left = draw_assets_left_panel(viewport_ui, state, media_player);
@@ -92,8 +115,23 @@ pub fn draw_assets_screen(
             sync_bridge,
             media_type,
         );
-    } else {
-        draw_viewport_hud(ctx, center_rect, state);
+    } else if let Some(asset) = state.active_preview_asset() {
+        let badge = if state.is_standard_user() {
+            Some((
+                "ASSETS SAYA (PREVIEW)",
+                egui::Color32::from_rgb(12, 74, 110),
+                egui::Color32::from_rgb(186, 230, 253),
+            ))
+        } else if !is_super_admin {
+            Some((
+                "MODE PREVIEW (READ-ONLY)",
+                egui::Color32::from_rgb(51, 65, 85),
+                egui::Color32::from_rgb(203, 213, 225),
+            ))
+        } else {
+            None
+        };
+        draw_asset_preview_viewport_hud(ctx, center_rect, state, asset, badge);
     }
 
     AssetsLayoutInsets {
@@ -151,6 +189,11 @@ fn draw_assets_top_bar(
                                 server_url: state.server_url.clone(),
                                 local_root: state.assets_root.clone(),
                             });
+                            if !state.offline_preview
+                                && let Some(auth) = current_auth(state)
+                            {
+                                api.send(ApiCommand::RefreshCurrentUser { auth });
+                            }
                         }
 
                         if state.sync_status.is_syncing {
@@ -221,109 +264,149 @@ fn draw_assets_left_panel(
                 .inner_margin(egui::Margin::same(10)),
         )
         .show(viewport_ui, |ui| {
-            // Top asset type switcher: 3D Models | Texture | Sound | Video
-            let prev_section = state.assets_section;
-            let tex_cnt = state
-                .media_assets
-                .iter()
-                .filter(|m| m.media_type == twg_shared::models::MediaAssetType::Texture)
-                .count();
-            let snd_cnt = state
-                .media_assets
-                .iter()
-                .filter(|m| m.media_type == twg_shared::models::MediaAssetType::Sound)
-                .count();
-            let vid_cnt = state
-                .media_assets
-                .iter()
-                .filter(|m| m.media_type == twg_shared::models::MediaAssetType::Video)
-                .count();
+            let is_super_admin = state.is_super_admin();
+            let is_standard_user = state.is_standard_user();
 
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(
-                    &mut state.assets_section,
-                    AssetsSection::Models3d,
-                    format!("3D ({})", state.model_assets.len()),
-                );
-                ui.selectable_value(
-                    &mut state.assets_section,
-                    AssetsSection::Texture,
-                    format!("Texture ({tex_cnt})"),
-                );
-                ui.selectable_value(
-                    &mut state.assets_section,
-                    AssetsSection::Sound,
-                    format!("Sound ({snd_cnt})"),
-                );
-                ui.selectable_value(
-                    &mut state.assets_section,
-                    AssetsSection::Video,
-                    format!("Video ({vid_cnt})"),
-                );
-            });
-            ui.separator();
+            if is_super_admin {
+                // Top asset type switcher: 3D Models | Texture | Sound | Video
+                let prev_section = state.assets_section;
+                let tex_cnt = state
+                    .media_assets
+                    .iter()
+                    .filter(|m| {
+                        m.operasi_id.is_none()
+                            && m.media_type == twg_shared::models::MediaAssetType::Texture
+                    })
+                    .count();
+                let snd_cnt = state
+                    .media_assets
+                    .iter()
+                    .filter(|m| {
+                        m.operasi_id.is_none()
+                            && m.media_type == twg_shared::models::MediaAssetType::Sound
+                    })
+                    .count();
+                let vid_cnt = state
+                    .media_assets
+                    .iter()
+                    .filter(|m| {
+                        m.operasi_id.is_none()
+                            && m.media_type == twg_shared::models::MediaAssetType::Video
+                    })
+                    .count();
+                let master_3d_cnt = state
+                    .model_assets
+                    .iter()
+                    .filter(|m| m.operasi_id.is_none())
+                    .count();
 
-            if state.assets_section != prev_section {
-                media_player.stop_all_playback();
-                state.ensure_media_selection_for_section();
-            }
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(
+                        &mut state.assets_section,
+                        AssetsSection::Models3d,
+                        format!("3D ({master_3d_cnt})"),
+                    );
+                    ui.selectable_value(
+                        &mut state.assets_section,
+                        AssetsSection::Texture,
+                        format!("Texture ({tex_cnt})"),
+                    );
+                    ui.selectable_value(
+                        &mut state.assets_section,
+                        AssetsSection::Sound,
+                        format!("Sound ({snd_cnt})"),
+                    );
+                    ui.selectable_value(
+                        &mut state.assets_section,
+                        AssetsSection::Video,
+                        format!("Video ({vid_cnt})"),
+                    );
+                });
+                ui.separator();
 
-            if let Some(media_type) = state.assets_section.media_type() {
-                draw_media_left_panel_body(ui, state, media_type, media_player);
-                return;
+                if state.assets_section != prev_section {
+                    media_player.stop_all_playback();
+                    state.ensure_media_selection_for_section();
+                }
+
+                if let Some(media_type) = state.assets_section.media_type() {
+                    draw_media_left_panel_body(ui, state, media_type, media_player);
+                    return;
+                }
             }
 
             ui.horizontal(|ui| {
-                ui.heading("3D Model Assets");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let add_btn = egui::Button::new(
-                        egui::RichText::new("+ Model")
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(14, 116, 144));
-                    if ui.add(add_btn).clicked() {
-                        let cat = if state.asset_category_filter == "all" {
-                            state
-                                .model_categories
-                                .first()
-                                .map(|c| c.category.clone())
-                                .unwrap_or_else(|| "units".to_string())
-                        } else {
-                            state.asset_category_filter.clone()
-                        };
-                        let supports_anim = state.category_supports_idle_walk(&cat);
-                        state.asset_form_mode = AssetFormMode::Create;
-                        state.asset_form.reset_for_create(&cat, supports_anim);
-                    }
+                if is_super_admin {
+                    ui.heading("3D Model Assets");
+                } else if is_standard_user {
+                    ui.heading("Assets 3D Saya");
+                } else {
+                    ui.heading("Katalog Assets 3D");
+                }
+                if is_super_admin {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let add_btn = egui::Button::new(
+                            egui::RichText::new("+ Model")
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(14, 116, 144));
+                        if ui.add(add_btn).clicked() {
+                            let cat = if state.asset_category_filter == "all" {
+                                state
+                                    .model_categories
+                                    .first()
+                                    .map(|c| c.category.clone())
+                                    .unwrap_or_else(|| "units".to_string())
+                            } else {
+                                state.asset_category_filter.clone()
+                            };
+                            let supports_anim = state.category_supports_idle_walk(&cat);
+                            state.asset_form_mode = AssetFormMode::Create;
+                            state.asset_form.reset_for_create(&cat, supports_anim);
+                        }
 
-                    let cat_active = state.asset_form_mode == AssetFormMode::Categories;
-                    let cat_btn =
-                        egui::Button::new(egui::RichText::new("+ Kategori").color(if cat_active {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::from_rgb(125, 211, 252)
-                        }))
+                        let cat_active = state.asset_form_mode == AssetFormMode::Categories;
+                        let cat_btn = egui::Button::new(
+                            egui::RichText::new("+ Kategori").color(if cat_active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(125, 211, 252)
+                            }),
+                        )
                         .fill(if cat_active {
                             egui::Color32::from_rgb(30, 64, 175)
                         } else {
                             egui::Color32::from_rgb(30, 41, 59)
                         });
-                    if ui.add(cat_btn).clicked() {
-                        state.asset_form_mode = AssetFormMode::Categories;
-                        state.category_form.error = None;
-                        state.category_form.success = None;
-                        let next_sort = state
-                            .model_categories
-                            .iter()
-                            .map(|c| c.sort_order)
-                            .max()
-                            .unwrap_or(70)
-                            + 10;
-                        state.category_form.new_sort_order = next_sort;
-                    }
-                });
+                        if ui.add(cat_btn).clicked() {
+                            state.asset_form_mode = AssetFormMode::Categories;
+                            state.category_form.error = None;
+                            state.category_form.success = None;
+                            let next_sort = state
+                                .model_categories
+                                .iter()
+                                .map(|c| c.sort_order)
+                                .max()
+                                .unwrap_or(70)
+                                + 10;
+                            state.category_form.new_sort_order = next_sort;
+                        }
+                    });
+                }
             });
+
+            if !is_super_admin {
+                ui.label(
+                    egui::RichText::new(if is_standard_user {
+                        "Daftar model 3D yang diberikan ke akun Anda. Klik item untuk melihat preview 3D."
+                    } else {
+                        "Mode Preview 3D (Read-Only). Klik item untuk melihat preview 3D."
+                    })
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+            }
 
             ui.add_space(6.0);
             let extra_filter_active =
@@ -340,6 +423,13 @@ fn draw_assets_left_panel(
             }
             ui.add_space(6.0);
 
+            let allowed_models: Vec<ModelAssetDto> = state
+                .model_assets
+                .iter()
+                .filter(|m| state.is_model_asset_allowed(m))
+                .cloned()
+                .collect();
+
             // Dynamic category filter pills (loaded from server DB / offline manifest)
             ui.label(
                 egui::RichText::new("Kategori Folder:")
@@ -347,7 +437,7 @@ fn draw_assets_left_panel(
                     .color(egui::Color32::from_rgb(148, 163, 184)),
             );
             ui.horizontal_wrapped(|ui| {
-                let total_all = state.model_assets.len();
+                let total_all = allowed_models.len();
                 let active_all = state.asset_category_filter == "all";
                 if ui
                     .selectable_label(active_all, format!("all ({total_all})"))
@@ -358,11 +448,13 @@ fn draw_assets_left_panel(
 
                 let categories_snapshot: Vec<ModelCategoryCount> = state.model_categories.clone();
                 for cat in &categories_snapshot {
-                    let cnt = state
-                        .model_assets
+                    let cnt = allowed_models
                         .iter()
                         .filter(|m| m.category == cat.category)
                         .count();
+                    if is_standard_user && cnt == 0 && state.asset_category_filter != cat.category {
+                        continue;
+                    }
                     let active = state.asset_category_filter == cat.category;
                     if ui
                         .selectable_label(active, format!("{} ({cnt})", cat.category))
@@ -408,8 +500,7 @@ fn draw_assets_left_panel(
             let cat_filter = state.asset_category_filter.clone();
             let type_filter = state.asset_type_filter.clone();
 
-            let filtered: Vec<ModelAssetDto> = state
-                .model_assets
+            let filtered: Vec<ModelAssetDto> = allowed_models
                 .iter()
                 .filter(|m| {
                     if cat_filter != "all" && m.category != cat_filter {
@@ -435,6 +526,31 @@ fn draw_assets_left_panel(
                     .color(egui::Color32::from_rgb(148, 163, 184)),
             );
             ui.add_space(4.0);
+
+            if allowed_models.is_empty() && is_standard_user {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(24, 33, 50))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(51, 65, 85)))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("Belum ada Assets 3D")
+                                .size(13.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(250, 204, 21)),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Belum ada Assets 3D yang diberikan ke akun Anda. Hubungi Admin atau Admin Satker untuk mendapatkan akses model 3D.",
+                            )
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(203, 213, 225)),
+                        );
+                    });
+                return;
+            }
 
             let mut clicked_id = None;
             egui::ScrollArea::vertical()
@@ -758,6 +874,7 @@ fn draw_create_form(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBrid
                 payload: ModelAssetUploadPayload {
                     name: state.asset_form.name.trim().to_string(),
                     category: state.asset_form.category.clone(),
+                    operasi_id: None,
                     model_type: state.asset_form.model_type,
                     default_height: state.asset_form.default_height,
                     default_rot_x: state.asset_form.default_rot_x,
@@ -787,25 +904,12 @@ fn draw_create_form(ui: &mut egui::Ui, state: &mut AppState, api: &ApiClientBrid
     }
 }
 
-fn draw_inspect_and_edit(
+pub(crate) fn draw_preview_controls_card(
     ui: &mut egui::Ui,
     state: &mut AppState,
     stage: &mut AssetPreviewStage,
-    api: &ApiClientBridge,
+    asset: &ModelAssetDto,
 ) {
-    let Some(asset) = state.selected_asset().cloned() else {
-        ui.heading("Preview & Detail Model 3D");
-        ui.separator();
-        ui.label("Pilih salah satu model 3D di daftar kiri untuk melihat preview 3D glTF, atau klik '+ Tambah Model'.");
-        return;
-    };
-
-    // Ensure edit form tracks selected asset
-    if state.asset_form.editing_id != Some(asset.id) {
-        state.asset_form.load_from_asset(&asset);
-    }
-
-    // --- Section 1: 3D Preview Controls ---
     ui.heading("Preview 3D glTF");
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(24, 33, 50))
@@ -908,10 +1012,9 @@ fn draw_inspect_and_edit(
                 .color(egui::Color32::from_rgb(148, 163, 184)),
             );
         });
+}
 
-    ui.add_space(8.0);
-
-    // --- Section 2: File & Optimization Stats ---
+pub(crate) fn draw_asset_file_stats_card(ui: &mut egui::Ui, asset: &ModelAssetDto) {
     ui.label(egui::RichText::new("Informasi File & LOD2").strong());
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(20, 29, 44))
@@ -977,9 +1080,48 @@ fn draw_inspect_and_edit(
                 );
             }
         });
+}
+
+fn draw_inspect_and_edit(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    stage: &mut AssetPreviewStage,
+    api: &ApiClientBridge,
+) {
+    let is_super_admin = state.is_super_admin();
+    let is_standard_user = state.is_standard_user();
+
+    let Some(asset) = state.active_preview_asset().cloned() else {
+        ui.heading("Preview & Detail Model 3D");
+        ui.separator();
+        let empty_msg = if is_super_admin {
+            "Pilih salah satu model 3D di daftar kiri untuk melihat preview 3D glTF, atau klik '+ Tambah Model'."
+        } else if is_standard_user {
+            "Belum ada model 3D yang dipilih atau diberikan ke akun Anda."
+        } else {
+            "Pilih salah satu model 3D di daftar kiri untuk melihat preview 3D glTF."
+        };
+        ui.label(empty_msg);
+        return;
+    };
+
+    // Ensure edit form tracks selected asset
+    if is_super_admin && state.asset_form.editing_id != Some(asset.id) {
+        state.asset_form.load_from_asset(&asset);
+    }
+
+    // --- Section 1: 3D Preview Controls ---
+    draw_preview_controls_card(ui, state, stage, &asset);
+
+    ui.add_space(8.0);
+
+    // --- Section 2: File & Optimization Stats ---
+    draw_asset_file_stats_card(ui, &asset);
 
     // --- Section 2B: Extra Action Animation Clips (Animated Models Only) ---
-    if asset.model_type == ModelAssetType::Animated {
+    if asset.model_type == ModelAssetType::Animated
+        && (is_super_admin || !asset.extra_animations.is_empty())
+    {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(
@@ -997,14 +1139,16 @@ fn draw_inspect_and_edit(
             .corner_radius(6.0)
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Upload file .glb animasi tambahan (contoh: Melambai, Menembak, Pingsan, Hormat) agar dapat dipicu melalui Animasi -> Lainnya -> Aksi Model 3D.",
-                    )
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(148, 163, 184)),
-                );
-                ui.add_space(6.0);
+                if is_super_admin {
+                    ui.label(
+                        egui::RichText::new(
+                            "Upload file .glb animasi tambahan (contoh: Melambai, Menembak, Pingsan, Hormat) agar dapat dipicu melalui Animasi -> Lainnya -> Aksi Model 3D.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add_space(6.0);
+                }
 
                 if asset.extra_animations.is_empty() {
                     ui.label(
@@ -1063,11 +1207,12 @@ fn draw_inspect_and_edit(
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            let confirming = state
-                                                .asset_form
-                                                .confirm_delete_action_slug
-                                                .as_deref()
-                                                == Some(act.slug.as_str());
+                                            let confirming = is_super_admin
+                                                && state
+                                                    .asset_form
+                                                    .confirm_delete_action_slug
+                                                    .as_deref()
+                                                    == Some(act.slug.as_str());
                                             if confirming {
                                                 if ui
                                                     .add_enabled(
@@ -1104,19 +1249,24 @@ fn draw_inspect_and_edit(
                                                         None;
                                                 }
                                             } else {
-                                                if ui
-                                                    .add_enabled(
-                                                        !state.asset_form.submitting,
-                                                        egui::Button::new(
-                                                            egui::RichText::new("Hapus")
-                                                                .size(10.5)
-                                                                .color(egui::Color32::from_rgb(
-                                                                    252, 165, 165,
-                                                                )),
+                                                if is_super_admin
+                                                    && ui
+                                                        .add_enabled(
+                                                            !state.asset_form.submitting,
+                                                            egui::Button::new(
+                                                                egui::RichText::new("Hapus")
+                                                                    .size(10.5)
+                                                                    .color(
+                                                                        egui::Color32::from_rgb(
+                                                                            252, 165, 165,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                            .fill(egui::Color32::from_rgb(
+                                                                69, 20, 26,
+                                                            )),
                                                         )
-                                                        .fill(egui::Color32::from_rgb(69, 20, 26)),
-                                                    )
-                                                    .clicked()
+                                                        .clicked()
                                                 {
                                                     state.asset_form.confirm_delete_action_slug =
                                                         Some(act.slug.clone());
@@ -1153,71 +1303,97 @@ fn draw_inspect_and_edit(
                     }
                 }
 
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("+ Tambah Aksi Baru (.glb / .gltf):")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(125, 211, 252)),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.asset_form.new_action_name)
-                        .hint_text("Nama aksi (mis. Melambai, Menembak, Pingsan)")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(4.0);
-                draw_file_picker_row(
-                    ui,
-                    "Pilih File Aksi (.glb/.gltf)...",
-                    &mut state.asset_form.new_action_file_path,
-                    None,
-                );
-                ui.add_space(6.0);
-                let up_lbl = if state.asset_form.submitting {
-                    "Mengunggah & Konversi Aksi..."
-                } else {
-                    "+ Upload Aksi ke Model"
-                };
-                if ui
-                    .add_enabled(
-                        !state.asset_form.submitting,
-                        egui::Button::new(
-                            egui::RichText::new(up_lbl)
-                                .strong()
-                                .color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::from_rgb(21, 128, 61)),
-                    )
-                    .clicked()
-                {
-                    let trimmed = state.asset_form.new_action_name.trim().to_string();
-                    if trimmed.is_empty() {
-                        state.asset_form.error =
-                            Some("Nama aksi wajib diisi (contoh: Melambai).".into());
-                    } else if let Some(path) = state.asset_form.new_action_file_path.clone() {
-                        if let Some(auth) = current_auth(state) {
-                            state.asset_form.submitting = true;
-                            state.asset_form.error = None;
-                            state.asset_form.success = None;
-                            api.send(ApiCommand::UploadModelAction {
-                                auth,
-                                model_id: asset.id,
-                                name: trimmed,
-                                file_path: path,
-                            });
-                        } else {
-                            state.asset_form.error = Some(
-                                "Harus login sebagai Admin untuk mengunggah aksi animasi.".into(),
-                            );
-                        }
+                if is_super_admin {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("+ Tambah Aksi Baru (.glb / .gltf):")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(125, 211, 252)),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.asset_form.new_action_name)
+                            .hint_text("Nama aksi (mis. Melambai, Menembak, Pingsan)")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(4.0);
+                    draw_file_picker_row(
+                        ui,
+                        "Pilih File Aksi (.glb/.gltf)...",
+                        &mut state.asset_form.new_action_file_path,
+                        None,
+                    );
+                    ui.add_space(6.0);
+                    let up_lbl = if state.asset_form.submitting {
+                        "Mengunggah & Konversi Aksi..."
                     } else {
-                        state.asset_form.error =
-                            Some("Pilih file .glb/.gltf animasi aksi terlebih dahulu.".into());
+                        "+ Upload Aksi ke Model"
+                    };
+                    if ui
+                        .add_enabled(
+                            !state.asset_form.submitting,
+                            egui::Button::new(
+                                egui::RichText::new(up_lbl)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(21, 128, 61)),
+                        )
+                        .clicked()
+                    {
+                        let trimmed = state.asset_form.new_action_name.trim().to_string();
+                        if trimmed.is_empty() {
+                            state.asset_form.error =
+                                Some("Nama aksi wajib diisi (contoh: Melambai).".into());
+                        } else if let Some(path) = state.asset_form.new_action_file_path.clone() {
+                            if let Some(auth) = current_auth(state) {
+                                state.asset_form.submitting = true;
+                                state.asset_form.error = None;
+                                state.asset_form.success = None;
+                                api.send(ApiCommand::UploadModelAction {
+                                    auth,
+                                    model_id: asset.id,
+                                    name: trimmed,
+                                    file_path: path,
+                                });
+                            } else {
+                                state.asset_form.error = Some(
+                                    "Harus login sebagai Admin untuk mengunggah aksi animasi."
+                                        .into(),
+                                );
+                            }
+                        } else {
+                            state.asset_form.error =
+                                Some("Pilih file .glb/.gltf animasi aksi terlebih dahulu.".into());
+                        }
                     }
                 }
             });
+    }
+
+    if !is_super_admin {
+        ui.add_space(10.0);
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(15, 30, 48))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 65, 96)))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let note = if is_standard_user {
+                    "Model 3D ini sudah diizinkan untuk akun Anda dan siap digunakan di Plot Skenario -> Tab Catalog."
+                } else {
+                    "Mode Preview (Read-Only). Untuk memberikan atau mengubah akses Assets 3D milik user, buka menu Users -> Assets."
+                };
+                ui.label(
+                    egui::RichText::new(note)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(186, 230, 253)),
+                );
+            });
+        return;
     }
 
     ui.add_space(8.0);
@@ -1350,6 +1526,7 @@ fn draw_inspect_and_edit(
                     payload: ModelAssetUploadPayload {
                         name: state.asset_form.name.trim().to_string(),
                         category: state.asset_form.category.clone(),
+                        operasi_id: asset.operasi_id,
                         model_type: state.asset_form.model_type,
                         default_height: state.asset_form.default_height,
                         default_rot_x: state.asset_form.default_rot_x,
@@ -1935,11 +2112,13 @@ fn draw_file_picker_row(
     }
 }
 
-fn draw_viewport_hud(ctx: &egui::Context, center_rect: egui::Rect, state: &AppState) {
-    let Some(asset) = state.selected_asset() else {
-        return;
-    };
-
+pub(crate) fn draw_asset_preview_viewport_hud(
+    ctx: &egui::Context,
+    center_rect: egui::Rect,
+    state: &AppState,
+    asset: &ModelAssetDto,
+    status_badge: Option<(&str, egui::Color32, egui::Color32)>,
+) {
     let target_rel = resolve_preview_file_path(asset, &state.preview_variant, state.preview_lod);
     let ready = state.available_model_paths.contains(&target_rel)
         || state.assets_root.join(&target_rel).exists();
@@ -1976,12 +2155,28 @@ fn draw_viewport_hud(ctx: &egui::Context, center_rect: egui::Rect, state: &AppSt
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(&asset.name)
-                            .size(15.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&asset.name)
+                                .size(15.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        );
+                        if let Some((badge_txt, badge_bg, badge_fg)) = status_badge {
+                            egui::Frame::new()
+                                .fill(badge_bg)
+                                .corner_radius(4.0)
+                                .inner_margin(egui::Margin::symmetric(7, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(badge_txt)
+                                            .size(10.0)
+                                            .strong()
+                                            .color(badge_fg),
+                                    );
+                                });
+                        }
+                    });
                     ui.label(
                         egui::RichText::new(format!("{} • {lod_tag}{var_tag}", asset.category))
                             .size(11.5)
@@ -2021,15 +2216,36 @@ fn draw_assets_bottom_bar(viewport_ui: &mut egui::Ui, state: &AppState) -> f32 {
                     .color(egui::Color32::from_rgb(148, 163, 184)),
                 );
                 ui.separator();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Total: {} model 3D • {} media • {} file lokal",
-                        state.model_assets.len(),
-                        state.media_assets.len(),
+                let summary = if state.is_standard_user() {
+                    let allowed_cnt = state
+                        .model_assets
+                        .iter()
+                        .filter(|m| state.is_model_asset_allowed(m))
+                        .count();
+                    format!(
+                        "Assets Saya: {allowed_cnt} model 3D • {} file lokal",
                         state.available_model_paths.len(),
-                    ))
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                    )
+                } else {
+                    let master_models = state
+                        .model_assets
+                        .iter()
+                        .filter(|m| m.operasi_id.is_none())
+                        .count();
+                    let master_media = state
+                        .media_assets
+                        .iter()
+                        .filter(|m| m.operasi_id.is_none())
+                        .count();
+                    format!(
+                        "Total: {master_models} model 3D • {master_media} media • {} file lokal",
+                        state.available_model_paths.len(),
+                    )
+                };
+                ui.label(
+                    egui::RichText::new(summary)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
                 );
                 if let Some(banner) = &state.status_banner {
                     ui.separator();

@@ -495,13 +495,17 @@ pub fn media_preview_audio_system(
     mut audio_sources: ResMut<Assets<AudioSource>>,
     mut sink_q: Query<(Entity, &mut AudioSink), With<PreviewAudioEntity>>,
 ) {
-    // Stop all playback if user leaves Assets screen or returns to 3D Models/Texture tabs
-    if state.screen != AppScreen::Assets
-        || matches!(
+    // Stop all playback if user is not viewing Sound or Video preview (in Assets or Plot Import)
+    let in_assets_av = state.screen == AppScreen::Assets
+        && matches!(
             state.assets_section,
-            AssetsSection::Models3d | AssetsSection::Texture
-        )
-    {
+            AssetsSection::Sound | AssetsSection::Video
+        );
+    let in_import_av = matches!(
+        state.is_plot_import_media_preview_active(),
+        Some(twg_shared::models::MediaAssetType::Sound | twg_shared::models::MediaAssetType::Video)
+    );
+    if !in_assets_av && !in_import_av {
         player.stop_all_playback();
     }
 
