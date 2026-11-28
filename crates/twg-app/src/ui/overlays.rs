@@ -861,7 +861,12 @@ pub fn draw_compass_and_telemetry_hud(
     let bearing = tcam.smooth_bearing.rem_euclid(360.0);
     let fps = state.smoothed_fps;
 
-    let hud_pos = egui::pos2(clip_rect.right() - 188.0, clip_rect.top() + 14.0);
+    let top_extra = if state.is_big_screen() {
+        crate::branding::layar_besar_compass_top_offset(ctx)
+    } else {
+        0.0
+    };
+    let hud_pos = egui::pos2(clip_rect.right() - 188.0, clip_rect.top() + 14.0 + top_extra);
 
     egui::Area::new(egui::Id::new("twg_compass_telemetry_hud"))
         .order(egui::Order::Foreground)

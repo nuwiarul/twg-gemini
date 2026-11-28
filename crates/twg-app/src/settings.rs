@@ -196,8 +196,22 @@ impl ServerProtocol {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerMode {
+    Public,
+    Local,
+}
+
+fn default_deserialized_server_mode() -> ServerMode {
+    // Backward compatibility: older `server_settings.json` files without `mode` stored Local host/port.
+    ServerMode::Local
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalServerSettings {
+    #[serde(default = "default_deserialized_server_mode")]
+    pub mode: ServerMode,
     pub protocol: ServerProtocol,
     pub host: String,
     /// Optional port string. Empty means protocol default (80 for HTTP, 443 for HTTPS).
@@ -208,6 +222,7 @@ pub struct LocalServerSettings {
 impl Default for LocalServerSettings {
     fn default() -> Self {
         Self {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Http,
             host: "127.0.0.1".to_string(),
             port: "8010".to_string(),
@@ -216,7 +231,11 @@ impl Default for LocalServerSettings {
 }
 
 impl LocalServerSettings {
-    /// Parses a full URL (or bare `host[:port]`) into protocol, host, and port fields.
+    pub fn is_public_mode(&self) -> bool {
+        self.mode == ServerMode::Public
+    }
+
+    /// Parses a full URL (or bare `host[:port]`) into protocol, host, and port fields in Local mode.
     pub fn from_url(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -236,6 +255,7 @@ impl LocalServerSettings {
             if let Some(host_str) = parsed.host_str() {
                 let port = parsed.port().map(|p| p.to_string()).unwrap_or_default();
                 return Self {
+                    mode: ServerMode::Local,
                     protocol,
                     host: host_str.to_string(),
                     port,
@@ -249,6 +269,9 @@ impl LocalServerSettings {
     /// If the user pasted a full URL (e.g. `https://twg.example.com:8443`) into the Host box,
     /// automatically splits it into `protocol`, `host`, and `port`.
     pub fn normalize_pasted_host(&mut self) {
+        if self.is_public_mode() {
+            return;
+        }
         let trimmed = self.host.trim();
         if trimmed.starts_with("http://")
             || trimmed.starts_with("https://")
@@ -266,8 +289,22 @@ impl LocalServerSettings {
         }
     }
 
-    /// Builds a normalized `http(s)://host[:port]` URL after validating host & port.
+    /// Resolves the active server URL:
+    /// - In `ServerMode::Public`, returns the compiled-in public server URL (never shown in UI).
+    /// - In `ServerMode::Local`, validates and builds `http(s)://host[:port]`.
     pub fn build_url(&self) -> Result<String, String> {
+        if self.mode == ServerMode::Public {
+            return crate::branding::public_server_url()
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "Server Publik belum dikonfigurasi pada build aplikasi ini.".to_string()
+                });
+        }
+        self.build_local_url()
+    }
+
+    /// Builds a normalized `http(s)://host[:port]` URL for Local mode after validating host & port.
+    pub fn build_local_url(&self) -> Result<String, String> {
         let raw_host = self.host.trim().trim_end_matches('/');
         if raw_host.is_empty() {
             return Err("Host server tidak boleh kosong.".into());
@@ -317,13 +354,25 @@ impl LocalServerSettings {
     }
 }
 
-/// Returns the default server settings from `TWG_API_URL` (when set by launcher/env) or localhost.
+/// Returns the default server settings:
+/// 1. `TWG_API_URL` env override (Local mode) if explicitly set at runtime.
+/// 2. `ServerMode::Public` when a public server URL was compiled into this build via packaging.
+/// 3. `ServerMode::Local` (`http://127.0.0.1:8010`) in development builds.
 pub fn default_server_settings() -> LocalServerSettings {
-    std::env::var("TWG_API_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(|u| LocalServerSettings::from_url(&u))
-        .unwrap_or_default()
+    if let Ok(raw) = std::env::var("TWG_API_URL")
+        && !raw.trim().is_empty()
+    {
+        return LocalServerSettings::from_url(&raw);
+    }
+
+    if crate::branding::has_public_server() {
+        return LocalServerSettings {
+            mode: ServerMode::Public,
+            ..LocalServerSettings::default()
+        };
+    }
+
+    LocalServerSettings::default()
 }
 
 /// Per-computer, per-user writable path for storing local server settings across Windows, macOS, and Linux.
@@ -436,6 +485,7 @@ mod tests {
     #[test]
     fn build_url_handles_http_https_custom_and_default_ports() {
         let s1 = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Http,
             host: "192.168.1.50".into(),
             port: "8010".into(),
@@ -443,6 +493,7 @@ mod tests {
         assert_eq!(s1.build_url().unwrap(), "http://192.168.1.50:8010");
 
         let s2 = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Https,
             host: "twg.polri.go.id".into(),
             port: String::new(),
@@ -450,6 +501,7 @@ mod tests {
         assert_eq!(s2.build_url().unwrap(), "https://twg.polri.go.id");
 
         let s3 = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Https,
             host: "twg.polri.go.id".into(),
             port: "443".into(),
@@ -457,6 +509,7 @@ mod tests {
         assert_eq!(s3.build_url().unwrap(), "https://twg.polri.go.id");
 
         let s4 = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Https,
             host: "10.0.0.5".into(),
             port: "8443".into(),
@@ -464,6 +517,7 @@ mod tests {
         assert_eq!(s4.build_url().unwrap(), "https://10.0.0.5:8443");
 
         let bad_port = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Http,
             host: "127.0.0.1".into(),
             port: "abc".into(),
@@ -471,6 +525,7 @@ mod tests {
         assert!(bad_port.build_url().is_err());
 
         let zero_port = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Http,
             host: "127.0.0.1".into(),
             port: "0".into(),
@@ -485,12 +540,14 @@ mod tests {
             ..Default::default()
         };
         s.normalize_pasted_host();
+        assert_eq!(s.mode, ServerMode::Local);
         assert_eq!(s.protocol, ServerProtocol::Https);
         assert_eq!(s.host, "tactical.example.id");
         assert_eq!(s.port, "9443");
         assert_eq!(s.build_url().unwrap(), "https://tactical.example.id:9443");
 
         let s_default = LocalServerSettings::from_url("https://twg.example.id");
+        assert_eq!(s_default.mode, ServerMode::Local);
         assert_eq!(s_default.protocol, ServerProtocol::Https);
         assert_eq!(s_default.host, "twg.example.id");
         assert_eq!(s_default.port, "");
@@ -503,6 +560,7 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         let orig = LocalServerSettings {
+            mode: ServerMode::Local,
             protocol: ServerProtocol::Https,
             host: "command.local.lan".into(),
             port: "8443".into(),
@@ -512,5 +570,13 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
         assert!(from_file);
         assert_eq!(loaded, orig);
+    }
+
+    #[test]
+    fn legacy_json_without_mode_defaults_to_local() {
+        let legacy_json = r#"{"protocol":"http","host":"192.168.10.5","port":"8010"}"#;
+        let parsed: LocalServerSettings = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.mode, ServerMode::Local);
+        assert_eq!(parsed.build_url().unwrap(), "http://192.168.10.5:8010");
     }
 }

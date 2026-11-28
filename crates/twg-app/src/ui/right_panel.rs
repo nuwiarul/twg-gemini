@@ -15215,6 +15215,8 @@ mod tests {
             autoplay: false,
             geom: vec![[115.216, -8.670, 0.0], [115.217, -8.671, 0.0]],
             data: serde_json::json!({}),
+            created_by: None,
+            allowed_user_ids: vec![],
             created_at: now,
             updated_at: now,
         };

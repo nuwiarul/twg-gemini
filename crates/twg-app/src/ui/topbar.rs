@@ -71,6 +71,7 @@ pub fn draw_top_bar(
                                 .strong()
                                 .color(egui::Color32::from_rgb(56, 189, 248)),
                         );
+                        crate::branding::draw_org_nav_badge(ui);
                         ui.separator();
 
                         // Back to Skenario List

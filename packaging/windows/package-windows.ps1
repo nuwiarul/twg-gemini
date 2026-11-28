@@ -1,5 +1,12 @@
 ﻿param(
-    [string]$ServerUrl = "https://twg.domain-anda.com",
+    [string]$Brand = "",
+    [Alias("ServerUrl")]
+    [string]$PublicServerUrl = "",
+    [string]$BrandDir = "",
+    [string]$LogosDir = "",
+    [string]$OrgName = "",
+    [string]$OrgSubtitle = "",
+    [string]$AppTitle = "",
     [string]$Version = "0.1.0",
     [switch]$SkipBuild,
     [switch]$IncludeOfflineSeed,
@@ -11,7 +18,47 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Push-Location $RepoRoot
 
+$SavedBrandEnv = @{
+    TWG_BRAND             = $env:TWG_BRAND
+    TWG_BRAND_DIR         = $env:TWG_BRAND_DIR
+    TWG_BRAND_LOGOS_DIR   = $env:TWG_BRAND_LOGOS_DIR
+    TWG_PUBLIC_SERVER_URL = $env:TWG_PUBLIC_SERVER_URL
+    TWG_ORG_NAME          = $env:TWG_ORG_NAME
+    TWG_ORG_SUBTITLE      = $env:TWG_ORG_SUBTITLE
+    TWG_APP_TITLE         = $env:TWG_APP_TITLE
+}
+
 try {
+    if ($Brand)           { $env:TWG_BRAND = $Brand }
+    if ($BrandDir)        { $env:TWG_BRAND_DIR = $BrandDir }
+    if ($LogosDir)        { $env:TWG_BRAND_LOGOS_DIR = $LogosDir }
+    if ($PublicServerUrl) { $env:TWG_PUBLIC_SERVER_URL = $PublicServerUrl }
+    if ($OrgName)         { $env:TWG_ORG_NAME = $OrgName }
+    if ($OrgSubtitle)     { $env:TWG_ORG_SUBTITLE = $OrgSubtitle }
+    if ($AppTitle)        { $env:TWG_APP_TITLE = $AppTitle }
+
+    $ResolvedBrandDir = if ($env:TWG_BRAND_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:TWG_BRAND_DIR)) { $env:TWG_BRAND_DIR } else { Join-Path $RepoRoot $env:TWG_BRAND_DIR }
+    } elseif ($env:TWG_BRAND) {
+        Join-Path $RepoRoot "packaging\brands\$($env:TWG_BRAND)"
+    } else {
+        Join-Path $RepoRoot "packaging\brands\polda-bali"
+    }
+    if (-not (Test-Path $ResolvedBrandDir)) {
+        throw "Brand profile folder not found: $ResolvedBrandDir (contoh: -Brand polda-bali atau -Brand polda-jateng)"
+    }
+
+    $ResolvedLogosDir = if ($env:TWG_BRAND_LOGOS_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:TWG_BRAND_LOGOS_DIR)) { $env:TWG_BRAND_LOGOS_DIR } else { Join-Path $RepoRoot $env:TWG_BRAND_LOGOS_DIR }
+    } else {
+        Join-Path $ResolvedBrandDir "logos"
+    }
+    $FoundLogos = @(1, 2, 3 | Where-Object { Test-Path (Join-Path $ResolvedLogosDir "$_.png") } | ForEach-Object { "$_.png" })
+
+    Write-Host "==> Branding Profile: $ResolvedBrandDir" -ForegroundColor Cyan
+    Write-Host "    Logos embedded  : $(if ($FoundLogos.Count -gt 0) { $FoundLogos -join ', ' } else { '(none)' })" -ForegroundColor Cyan
+    Write-Host "    Public Server   : $(if ($env:TWG_PUBLIC_SERVER_URL) { 'override via param (compiled into binary, hidden)' } else { 'from brand.env (compiled into binary, hidden)' })" -ForegroundColor Cyan
+
     if (-not $SkipBuild) {
         Write-Host "==> Building twg-app (release) for Windows x64..." -ForegroundColor Cyan
         cargo build --release -p twg-app
@@ -87,21 +134,6 @@ try {
         Write-Host "==> FFmpeg sidecar not bundled (pass -DownloadFfmpeg or -FfmpegBinDir to embed)." -ForegroundColor Yellow
     }
 
-    # Launcher batch script that configures writable per-user offline cache + server URL
-    $LauncherBat = @"
-@echo off
-setlocal
-if "%TWG_API_URL%"=="" set TWG_API_URL=$ServerUrl
-set "TWG_DATA_DIR=%LOCALAPPDATA%\TWG-3D"
-if "%TWG_LOCAL_ASSETS_DIR%"=="" set "TWG_LOCAL_ASSETS_DIR=%TWG_DATA_DIR%\offline_assets"
-if "%TWG_TILE_CACHE_DIR%"=="" set "TWG_TILE_CACHE_DIR=%TWG_DATA_DIR%\tile_cache"
-if not exist "%TWG_LOCAL_ASSETS_DIR%" mkdir "%TWG_LOCAL_ASSETS_DIR%"
-if not exist "%TWG_TILE_CACHE_DIR%" mkdir "%TWG_TILE_CACHE_DIR%"
-cd /d "%TWG_DATA_DIR%"
-start "" "%~dp0twg-app.exe" %*
-"@
-    Set-Content -Encoding ASCII -Path (Join-Path $StageDir "TWG-3D.bat") -Value $LauncherBat
-
     if ($IncludeOfflineSeed) {
         $SeedSrc = Join-Path $RepoRoot "client_assets"
         if (-not (Test-Path $SeedSrc)) {
@@ -126,19 +158,23 @@ Tactical Wall Game 3D (twg-app) v$Version — Windows x64
 =======================================================
 
 Cara Menjalankan:
-1. Klik dua kali TWG-3D.bat (atau jalankan twg-app.exe langsung).
-2. Saat pertama kali dibuka, aplikasi otomatis menghubungi server ($ServerUrl)
-   dan menyinkronkan seluruh model 3D glTF (LOD0 + LOD2) ke cache lokal:
+1. Klik dua kali twg-app.exe langsung (tidak memerlukan file .bat).
+2. Saat pertama kali dibuka, aplikasi otomatis terhubung ke Server Publik bawaan
+   dan menyinkronkan model 3D glTF (LOD0 + LOD2) ke folder data lokal:
    %LOCALAPPDATA%\TWG-3D\offline_assets
-3. Untuk mengubah URL server, edit langsung kolom Server URL pada layar Login
-   atau ubah variabel TWG_API_URL di dalam TWG-3D.bat.
+3. Untuk beralih antara mode Server Publik dan Server Lokal (LAN), buka
+   menu "Pengaturan server" pada bagian bawah halaman Login.
+4. (Opsional) Jika membutuhkan override environment khusus, letakkan file
+   twg-app.env (atau .env) di folder yang sama dengan twg-app.exe atau di
+   %LOCALAPPDATA%\TWG-3D\twg-app.env.
 
 Persyaratan:
 - Windows 10/11 64-bit dengan GPU support Vulkan atau DirectX 12.
 "@
     Set-Content -Encoding UTF8 -Path (Join-Path $StageDir "README.txt") -Value $ReadmeTxt
 
-    $ZipPath = Join-Path $DistRoot "twg-app-windows-x64-v$Version.zip"
+    $BrandSlug = Split-Path -Leaf $ResolvedBrandDir
+    $ZipPath = Join-Path $DistRoot "twg-app-$BrandSlug-windows-x64-v$Version.zip"
     Write-Host "==> Creating portable archive: $ZipPath" -ForegroundColor Cyan
     Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -Force
 
@@ -150,7 +186,7 @@ Persyaratan:
     $Iscc = $IsccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($Iscc) {
         Write-Host "==> Inno Setup detected ($Iscc) — building Windows Setup .exe..." -ForegroundColor Cyan
-        & $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "twg-app.iss")
+        & $Iscc "/DMyAppVersion=$Version" "/DMyBrandSlug=$BrandSlug" (Join-Path $PSScriptRoot "twg-app.iss")
         if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
     } else {
         Write-Host "==> Inno Setup not installed — skipped .exe installer (ZIP archive ready)." -ForegroundColor Yellow
@@ -158,5 +194,12 @@ Persyaratan:
 
     Write-Host "`nDone! Output artifacts in $DistRoot" -ForegroundColor Green
 } finally {
+    foreach ($k in $SavedBrandEnv.Keys) {
+        if ($null -eq $SavedBrandEnv[$k]) {
+            Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item "Env:$k" $SavedBrandEnv[$k]
+        }
+    }
     Pop-Location
 }

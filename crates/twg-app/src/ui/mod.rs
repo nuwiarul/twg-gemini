@@ -368,6 +368,7 @@ pub fn egui_root_system(
             &playback,
             time.elapsed_secs_f64(),
         );
+        crate::branding::draw_layar_besar_brand_hud(ctx, center_rect);
         overlays::draw_compass_and_telemetry_hud(
             ctx,
             center_rect,

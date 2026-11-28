@@ -68,9 +68,11 @@ pub struct AuthCredentials {
 pub enum ApiCommand {
     TestServerConnection {
         server_url: String,
+        hide_url: bool,
     },
     Login {
         server_url: String,
+        hide_url: bool,
         username: String,
         password: String,
         device_id: String,
@@ -494,11 +496,12 @@ impl ApiClientBridge {
     }
 }
 
-async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
+async fn test_server_connection(client: &Client, server_url: &str, hide_url: bool) -> ApiEvent {
     let base_url = server_url.trim_end_matches('/');
     let ready_url = format!("{base_url}/readyz");
     let timeout = std::time::Duration::from_secs(8);
     let started = std::time::Instant::now();
+    let target_label = if hide_url { "Server Publik" } else { "Server" };
 
     match client.get(&ready_url).timeout(timeout).send().await {
         Ok(resp) => {
@@ -511,14 +514,15 @@ async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
                     return ApiEvent::ServerTestResult {
                         ok: true,
                         message: format!(
-                            "Berhasil terhubung ({elapsed_ms} ms) • Server & Database siap."
+                            "Berhasil terhubung ke {target_label} ({elapsed_ms} ms) • Layanan siap."
                         ),
                     };
                 }
                 return ApiEvent::ServerTestResult {
                     ok: false,
-                    message: "Host merespons HTTP 200, tetapi bukan endpoint TWG Server yang valid."
-                        .into(),
+                    message: format!(
+                        "{target_label} merespons HTTP 200, tetapi bukan endpoint TWG Server yang valid."
+                    ),
                 };
             }
 
@@ -534,7 +538,9 @@ async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
                     let ms = health_start.elapsed().as_millis();
                     return ApiEvent::ServerTestResult {
                         ok: true,
-                        message: format!("Berhasil terhubung ({ms} ms) • TWG Server aktif."),
+                        message: format!(
+                            "Berhasil terhubung ke {target_label} ({ms} ms) • TWG Server aktif."
+                        ),
                     };
                 }
             }
@@ -542,13 +548,23 @@ async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
             ApiEvent::ServerTestResult {
                 ok: false,
                 message: format!(
-                    "Server merespons HTTP {} ({elapsed_ms} ms), tetapi layanan belum siap.",
+                    "{target_label} merespons HTTP {} ({elapsed_ms} ms), tetapi layanan belum siap.",
                     status.as_u16()
                 ),
             }
         }
         Err(err) => {
-            let detail = if err.is_timeout() {
+            let detail = if hide_url {
+                if err.is_timeout() {
+                    "Waktu koneksi ke Server Publik habis (timeout 8 detik). Periksa koneksi internet Anda."
+                        .to_string()
+                } else if err.is_connect() {
+                    "Tidak dapat terhubung ke Server Publik. Pastikan koneksi internet aktif dan layanan sedang beroperasi."
+                        .to_string()
+                } else {
+                    "Gagal terhubung ke Server Publik. Periksa koneksi jaringan Anda.".to_string()
+                }
+            } else if err.is_timeout() {
                 "Waktu koneksi habis (timeout 8 detik). Periksa host, port, atau firewall."
                     .to_string()
             } else if err.is_connect() {
@@ -568,11 +584,13 @@ async fn test_server_connection(client: &Client, server_url: &str) -> ApiEvent {
 
 async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
     match cmd {
-        ApiCommand::TestServerConnection { server_url } => {
-            test_server_connection(client, &server_url).await
-        }
+        ApiCommand::TestServerConnection {
+            server_url,
+            hide_url,
+        } => test_server_connection(client, &server_url, hide_url).await,
         ApiCommand::Login {
             server_url,
+            hide_url,
             username,
             password,
             device_id,
@@ -594,7 +612,14 @@ async fn handle_command(client: &Client, cmd: ApiCommand) -> ApiEvent {
                     Ok(login) => ApiEvent::LoginOk(login),
                     Err(err) => ApiEvent::LoginErr(err),
                 },
-                Err(err) => ApiEvent::LoginErr(format!("Connection failed: {err}")),
+                Err(err) => {
+                    let msg = if hide_url {
+                        "Gagal terhubung ke Server Publik. Periksa koneksi internet Anda.".into()
+                    } else {
+                        format!("Connection failed: {err}")
+                    };
+                    ApiEvent::LoginErr(msg)
+                }
             }
         }
         ApiCommand::RefreshCurrentUser { auth } => {

@@ -38,8 +38,7 @@ section = "graphics"
 priority = "optional"
 depends = "$auto, libvulkan1, libasound2 | libasound2t64, xdg-desktop-portal, ffmpeg"
 assets = [
-    ["target/release/twg-app", "usr/lib/twg-app/twg-app-bin", "755"],
-    ["packaging/linux/twg-app", "usr/bin/twg-app", "755"],
+    ["target/release/twg-app", "usr/bin/twg-app", "755"],
     ["packaging/linux/twg-app.desktop", "usr/share/applications/twg-app.desktop", "644"],
     ["packaging/icons/twg-app-256.png", "usr/share/pixmaps/twg-app.png", "644"],
     ["packaging/icons/twg-app-48.png", "usr/share/icons/hicolor/48x48/apps/twg-app.png", "644"],

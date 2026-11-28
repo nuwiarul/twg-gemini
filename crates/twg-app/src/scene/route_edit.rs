@@ -2199,6 +2199,8 @@ mod tests {
                 [115.22, -8.67, 0.0],
             ],
             data: serde_json::json!({}),
+            created_by: None,
+            allowed_user_ids: vec![],
             created_at: now,
             updated_at: now,
         });

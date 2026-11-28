@@ -6,8 +6,13 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      brand:
+        description: "Brand profile folder under packaging/brands/ (e.g. polda-bali, polda-jateng)"
+        required: true
+        default: "polda-bali"
+        type: string
       server_url:
-        description: "Default VPS API URL embedded in twg-app launchers"
+        description: "Public server URL compiled into twg-app binary (hidden from UI)"
         required: true
         default: "https://twg.domain-anda.com"
         type: string
@@ -27,6 +32,7 @@ jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
+      brand: ${{ steps.vars.outputs.brand }}
       version: ${{ steps.vars.outputs.version }}
       server_url: ${{ steps.vars.outputs.server_url }}
     steps:
@@ -37,7 +43,9 @@ jobs:
           else
             VER="${{ inputs.version || '0.1.0' }}"
           fi
+          BRAND="${{ inputs.brand || vars.TWG_DEFAULT_BRAND || 'polda-bali' }}"
           URL="${{ inputs.server_url || vars.TWG_DEFAULT_API_URL || 'https://twg.domain-anda.com' }}"
+          echo "brand=${BRAND}" >> "$GITHUB_OUTPUT"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "server_url=${URL}" >> "$GITHUB_OUTPUT"
 
@@ -76,15 +84,16 @@ jobs:
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File packaging/windows/package-windows.ps1 `
-            -ServerUrl "${{ needs.meta.outputs.server_url }}" `
+            -Brand "${{ needs.meta.outputs.brand }}" `
+            -PublicServerUrl "${{ needs.meta.outputs.server_url }}" `
             -Version "${{ needs.meta.outputs.version }}" `
             -DownloadFfmpeg
       - uses: actions/upload-artifact@v4
         with:
           name: twg-app-windows-x64
           path: |
-            dist/twg-app-windows-x64-*.zip
-            dist/TWG-3D-Setup-x64-*.exe
+            dist/twg-app-*-windows-x64-*.zip
+            dist/TWG-3D-*-Setup-x64-*.exe
 
   build-app-linux:
     needs: meta
@@ -107,14 +116,15 @@ jobs:
       - name: Build & package twg-app (Linux tar.gz + deb)
         run: |
           bash packaging/linux/package-linux.sh \
-            --server-url "${{ needs.meta.outputs.server_url }}" \
+            --brand "${{ needs.meta.outputs.brand }}" \
+            --public-server-url "${{ needs.meta.outputs.server_url }}" \
             --version "${{ needs.meta.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: twg-app-linux-x86_64
           path: |
-            dist/twg-app-linux-*.tar.gz
-            dist/twg-app_*.deb
+            dist/twg-app-*-linux-*.tar.gz
+            dist/twg-app-*.deb
 
   build-app-macos:
     needs: meta
@@ -138,13 +148,14 @@ jobs:
           FFMPEG_BIN_DIR: /tmp/twg-ffmpeg-bin
         run: |
           bash packaging/macos/package-macos.sh \
+            --brand "${{ needs.meta.outputs.brand }}" \
             --arch universal \
-            --server-url "${{ needs.meta.outputs.server_url }}" \
+            --public-server-url "${{ needs.meta.outputs.server_url }}" \
             --version "${{ needs.meta.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: twg-app-macos-universal
-          path: dist/TWG-3D-macOS-universal-*.dmg
+          path: dist/TWG-3D-*-macOS-universal-*.dmg
 
   publish-release:
     if: github.ref_type == 'tag'

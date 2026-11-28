@@ -2994,6 +2994,8 @@ mod tests {
             is_spawn: true,
             description: None,
             metadata: json!({}),
+            created_by: None,
+            allowed_user_ids: vec![],
             created_at: now,
             updated_at: now,
         }
@@ -3020,6 +3022,8 @@ mod tests {
             autoplay: false,
             geom: vec![],
             data,
+            created_by: None,
+            allowed_user_ids: vec![],
             created_at: now,
             updated_at: now,
         }

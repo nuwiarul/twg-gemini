@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod branding;
 mod map;
 mod net;
 mod scene;
@@ -79,6 +80,170 @@ use crate::{
 };
 use twg_shared::ws::{TacticalCommand, WsClientMode};
 
+/// Per-user writable data directory for packaged installs across Windows, macOS, and Linux.
+fn resolve_user_data_dir() -> PathBuf {
+    if let Ok(custom) = std::env::var("TWG_DATA_DIR")
+        && !custom.trim().is_empty()
+    {
+        return PathBuf::from(custom.trim());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data).join("TWG-3D");
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            return PathBuf::from(app_data).join("TWG-3D");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("TWG-3D");
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME")
+            && !xdg.is_empty()
+        {
+            return PathBuf::from(xdg).join("twg-app");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("twg-app");
+        }
+    }
+
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn load_env_file_if_present(path: &std::path::Path) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").map(str::trim).unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        let mut val = v.trim().to_string();
+        if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+        {
+            val = val[1..val.len() - 1].to_string();
+        }
+        if !val.is_empty() {
+            // SAFETY: Called once at the very beginning of `main()` before spawning any threads.
+            unsafe {
+                std::env::set_var(key, val);
+            }
+        }
+    }
+}
+
+fn copy_dir_recursive_missing(src: &std::path::Path, dst: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dst);
+    for entry in entries.flatten() {
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive_missing(&src_path, &dst_path);
+        } else if !dst_path.exists() {
+            let _ = std::fs::copy(&src_path, &dst_path);
+        }
+    }
+}
+
+/// Native startup bootstrap so the compiled binary runs directly on Windows, Linux, and macOS
+/// without any `.bat` or `.sh` wrapper script:
+/// 1. Reads optional `twg-app.env` / `.env` placed next to the executable, in macOS `.app/Contents/Resources/`,
+///    or in the per-user app data directory (process OS env vars always win).
+/// 2. For packaged runs (outside a Cargo workspace), ensures writable per-user `TWG_LOCAL_ASSETS_DIR`
+///    and `TWG_TILE_CACHE_DIR` and seeds bundled `offline_assets` on first launch if present.
+fn bootstrap_runtime_environment() {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from));
+    let is_dev_workspace = PathBuf::from("Cargo.toml").exists();
+
+    // 1. Load optional env files beside binary / app resources / user data dir
+    if let Some(dir) = &exe_dir {
+        load_env_file_if_present(&dir.join("twg-app.env"));
+        if !is_dev_workspace {
+            load_env_file_if_present(&dir.join(".env"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let res_dir = dir.join("..").join("Resources");
+            load_env_file_if_present(&res_dir.join("twg-app.env"));
+            load_env_file_if_present(&res_dir.join(".env"));
+        }
+    }
+
+    let data_dir = resolve_user_data_dir();
+    load_env_file_if_present(&data_dir.join("twg-app.env"));
+
+    // 2. For packaged runs, configure per-user writable asset & tile cache directories automatically
+    if !is_dev_workspace {
+        let _ = std::fs::create_dir_all(&data_dir);
+
+        if std::env::var_os("TWG_LOCAL_ASSETS_DIR")
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            let user_assets = data_dir.join("offline_assets");
+            let _ = std::fs::create_dir_all(&user_assets);
+            // If installer/archive shipped an offline_assets seed next to the executable, seed once
+            if let Some(dir) = &exe_dir {
+                let bundled_seed = dir.join("offline_assets");
+                if bundled_seed.join("models").is_dir() && !user_assets.join("models").is_dir() {
+                    copy_dir_recursive_missing(&bundled_seed, &user_assets);
+                }
+            }
+            // SAFETY: Still single-threaded at start of `main()`.
+            unsafe {
+                std::env::set_var("TWG_LOCAL_ASSETS_DIR", &user_assets);
+            }
+        }
+
+        if std::env::var_os("TWG_TILE_CACHE_DIR")
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            let tile_cache = data_dir.join("tile_cache");
+            let _ = std::fs::create_dir_all(&tile_cache);
+            // SAFETY: Still single-threaded at start of `main()`.
+            unsafe {
+                std::env::set_var("TWG_TILE_CACHE_DIR", &tile_cache);
+            }
+        }
+    }
+}
+
 fn resolve_client_assets_dir() -> PathBuf {
     let dir = std::env::var("TWG_LOCAL_ASSETS_DIR")
         .ok()
@@ -90,12 +255,8 @@ fn resolve_client_assets_dir() -> PathBuf {
             let cwd_workspace = PathBuf::from("client_assets");
             if PathBuf::from("Cargo.toml").exists() {
                 cwd_workspace
-            } else if let Ok(exe) = std::env::current_exe()
-                && let Some(parent) = exe.parent()
-            {
-                parent.join("offline_assets")
             } else {
-                cwd_workspace
+                resolve_user_data_dir().join("offline_assets")
             }
         });
 
@@ -116,6 +277,7 @@ fn clean_absolute_path(path: &std::path::Path) -> PathBuf {
 }
 
 fn main() {
+    bootstrap_runtime_environment();
     let assets_dir = resolve_client_assets_dir();
     let asset_path_str = assets_dir.to_string_lossy().into_owned();
     let initial_state = AppState::new(assets_dir.clone());
@@ -167,7 +329,7 @@ fn main() {
                 .set(WindowPlugin {
                     close_when_requested: false,
                     primary_window: Some(Window {
-                        title: "Tactical Wall Game 3D — Full Rust".into(),
+                        title: branding::window_title(),
                         name: Some("twg-app".into()),
                         resolution: (1440, 900).into(),
                         ..default()

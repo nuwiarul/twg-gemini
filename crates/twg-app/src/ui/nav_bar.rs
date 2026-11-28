@@ -983,6 +983,7 @@ pub fn draw_global_top_bar(
                                 .strong()
                                 .color(egui::Color32::from_rgb(56, 189, 248)),
                         );
+                        crate::branding::draw_org_nav_badge(ui);
                         ui.separator();
 
                         draw_screen_nav_tabs(ui, state, playback, api, ws);

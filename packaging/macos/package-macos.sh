@@ -2,19 +2,37 @@
 set -euo pipefail
 
 # Build & package twg-app for macOS (.app bundle + .dmg)
+# Direct native binary inside Contents/MacOS/twg-app — no shell launcher wrapper required.
 # Usage (run on macOS):
-#   bash packaging/macos/package-macos.sh [--arch arm64|x64|universal] [--server-url https://twg.domain-anda.com] [--version 0.1.0] [--sign-identity "-"] [--skip-build]
+#   bash packaging/macos/package-macos.sh \
+#     [--brand polda-bali] [--arch arm64|x64|universal] \
+#     [--public-server-url https://twg.domain-anda.com] \
+#     [--brand-dir packaging/brands/polda-bali] [--logos-dir ...] \
+#     [--org-name "POLDA BALI"] [--org-subtitle "Biro Ops • Bid TIK"] \
+#     [--app-title "Tactical Wall Game 3D"] [--version 0.1.0] [--sign-identity "-"] [--skip-build]
 
+BRAND=""
 ARCH="arm64"
-SERVER_URL="https://twg.domain-anda.com"
+PUBLIC_SERVER_URL=""
+BRAND_DIR=""
+LOGOS_DIR=""
+ORG_NAME=""
+ORG_SUBTITLE=""
+APP_TITLE=""
 VERSION="0.1.0"
 SIGN_IDENTITY="-"
 SKIP_BUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --brand) BRAND="$2"; shift 2 ;;
     --arch) ARCH="$2"; shift 2 ;;
-    --server-url) SERVER_URL="$2"; shift 2 ;;
+    --public-server-url|--server-url) PUBLIC_SERVER_URL="$2"; shift 2 ;;
+    --brand-dir) BRAND_DIR="$2"; shift 2 ;;
+    --logos-dir) LOGOS_DIR="$2"; shift 2 ;;
+    --org-name) ORG_NAME="$2"; shift 2 ;;
+    --org-subtitle) ORG_SUBTITLE="$2"; shift 2 ;;
+    --app-title) APP_TITLE="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --sign-identity) SIGN_IDENTITY="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
@@ -25,6 +43,27 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
+
+if [[ -n "$BRAND" ]]; then export TWG_BRAND="$BRAND"; fi
+if [[ -n "$BRAND_DIR" ]]; then export TWG_BRAND_DIR="$BRAND_DIR"; fi
+if [[ -n "$LOGOS_DIR" ]]; then export TWG_BRAND_LOGOS_DIR="$LOGOS_DIR"; fi
+if [[ -n "$PUBLIC_SERVER_URL" ]]; then export TWG_PUBLIC_SERVER_URL="$PUBLIC_SERVER_URL"; fi
+if [[ -n "$ORG_NAME" ]]; then export TWG_ORG_NAME="$ORG_NAME"; fi
+if [[ -n "$ORG_SUBTITLE" ]]; then export TWG_ORG_SUBTITLE="$ORG_SUBTITLE"; fi
+if [[ -n "$APP_TITLE" ]]; then export TWG_APP_TITLE="$APP_TITLE"; fi
+
+if [[ -n "${TWG_BRAND_DIR:-}" ]]; then
+  RESOLVED_BRAND_DIR="$TWG_BRAND_DIR"
+elif [[ -n "${TWG_BRAND:-}" ]]; then
+  RESOLVED_BRAND_DIR="$REPO_ROOT/packaging/brands/$TWG_BRAND"
+else
+  RESOLVED_BRAND_DIR="$REPO_ROOT/packaging/brands/polda-bali"
+fi
+if [[ ! -d "$RESOLVED_BRAND_DIR" ]]; then
+  echo "Brand profile folder not found: $RESOLVED_BRAND_DIR" >&2
+  exit 1
+fi
+BRAND_SLUG="$(basename "$RESOLVED_BRAND_DIR")"
 
 DIST_DIR="$REPO_ROOT/dist/macos"
 mkdir -p "$DIST_DIR"
@@ -67,9 +106,8 @@ APP_BUNDLE="$DIST_DIR/TWG-3D.app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
-install -m 0755 "$FINAL_BIN" "$APP_BUNDLE/Contents/MacOS/twg-app-bin"
-sed "s|__SERVER_URL__|${SERVER_URL}|g" "$SCRIPT_DIR/twg-app-launcher.sh" > "$APP_BUNDLE/Contents/MacOS/twg-app"
-chmod +x "$APP_BUNDLE/Contents/MacOS/twg-app"
+# Install native binary directly as CFBundleExecutable (no shell launcher script)
+install -m 0755 "$FINAL_BIN" "$APP_BUNDLE/Contents/MacOS/twg-app"
 
 # Bundle sidecar ffmpeg & ffprobe inside Contents/Resources/bin/ when available (auto-discovered by twg-app)
 FFMPEG_SRC="${FFMPEG_BIN_DIR:+${FFMPEG_BIN_DIR}/ffmpeg}"
@@ -132,7 +170,7 @@ if [[ -f "$APP_ICNS_DST" ]]; then
   fi
 fi
 
-DMG_PATH="$REPO_ROOT/dist/TWG-3D-macOS-${ARCH}-v${VERSION}.dmg"
+DMG_PATH="$REPO_ROOT/dist/TWG-3D-${BRAND_SLUG}-macOS-${ARCH}-v${VERSION}.dmg"
 rm -f "$DMG_PATH"
 echo "==> Creating DMG installer: $DMG_PATH"
 hdiutil create \
@@ -146,6 +184,6 @@ if [[ "$SIGN_IDENTITY" != "-" ]]; then
   codesign --force --sign "$SIGN_IDENTITY" "$DMG_PATH"
 fi
 
-echo "==> Done! macOS artifacts:"
+echo "==> Done! macOS artifacts [brand: $BRAND_SLUG]:"
 echo "    App Bundle : $APP_BUNDLE"
 echo "    DMG Image  : $DMG_PATH"

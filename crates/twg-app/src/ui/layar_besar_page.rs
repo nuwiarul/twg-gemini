@@ -209,6 +209,22 @@ pub fn draw_layar_besar_overlay(
                     .show(ui, |ui| {
                         ui.set_max_width(480.0);
                         ui.vertical_centered(|ui| {
+                            if let Some(org) = crate::branding::org_name() {
+                                ui.label(
+                                    egui::RichText::new(org)
+                                        .size(13.5)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                                );
+                                if let Some(sub) = crate::branding::org_subtitle() {
+                                    ui.label(
+                                        egui::RichText::new(sub)
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                                    );
+                                }
+                                ui.add_space(6.0);
+                            }
                             ui.label(
                                 egui::RichText::new("LAYAR BESAR — MODE TAMPILAN TERKUNCI")
                                     .size(15.0)

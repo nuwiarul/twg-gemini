@@ -1,11 +1,14 @@
 use bevy_egui::egui;
 
 use crate::{
+    branding,
     net::{
         asset_sync::{AssetSyncBridge, AssetSyncCommand},
         client::{ApiClientBridge, ApiCommand},
     },
-    settings::{ServerProtocol, reset_local_server_settings, save_local_server_settings},
+    settings::{
+        ServerMode, ServerProtocol, reset_local_server_settings, save_local_server_settings,
+    },
     state::AppState,
     ui::{app_icon::draw_app_brand_icon, password_input::draw_password_input},
 };
@@ -24,12 +27,20 @@ pub fn draw_login_screen(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
+                        let has_logos = branding::has_logos();
                         let top_pad = if state.show_server_settings {
-                            (ui.available_height() * 0.08).max(20.0)
+                            (ui.available_height() * 0.04).max(16.0)
+                        } else if has_logos {
+                            (ui.available_height() * 0.09).max(22.0)
                         } else {
                             (ui.available_height() * 0.16).max(32.0)
                         };
                         ui.add_space(top_pad);
+
+                        // Institutional distribution logos (1..=3 PNGs: 1.png, 2.png, 3.png left-to-right)
+                        if branding::draw_brand_logos_centered(ui, 60.0, 20.0) {
+                            ui.add_space(14.0);
+                        }
 
                         egui::Frame::new()
                             .fill(egui::Color32::from_rgb(17, 24, 39))
@@ -45,18 +56,38 @@ pub fn draw_login_screen(
                                     draw_app_brand_icon(ui, 44.0);
                                     ui.vertical(|ui| {
                                         ui.label(
-                                            egui::RichText::new("TACTICAL WALL GAME 3D")
-                                                .size(20.5)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(56, 189, 248)),
-                                        );
-                                        ui.label(
                                             egui::RichText::new(
-                                                "Full-Rust Desktop Edition • OSM & ArcGIS • glTF 3D",
+                                                branding::app_title().to_uppercase(),
                                             )
-                                            .size(11.5)
-                                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            .size(19.5)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(56, 189, 248)),
                                         );
+                                        if let Some(org) = branding::org_name() {
+                                            ui.label(
+                                                egui::RichText::new(org)
+                                                    .size(12.5)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(253, 224, 71)),
+                                            );
+                                            if let Some(sub) = branding::org_subtitle() {
+                                                ui.label(
+                                                    egui::RichText::new(sub)
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(
+                                                            148, 163, 184,
+                                                        )),
+                                                );
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Full-Rust Desktop Edition • OSM & ArcGIS • glTF 3D",
+                                                )
+                                                .size(11.5)
+                                                .color(egui::Color32::from_rgb(148, 163, 184)),
+                                            );
+                                        }
                                     });
                                 });
                                 ui.add_space(18.0);
@@ -108,6 +139,7 @@ pub fn draw_login_screen(
 
                                 if (login_btn.clicked() || submit_enter) && !state.loading {
                                     state.server_settings.normalize_pasted_host();
+                                    let hide_url = state.server_settings.is_public_mode();
                                     match state.server_settings.build_url() {
                                         Ok(url) => {
                                             state.server_url = url.clone();
@@ -115,6 +147,7 @@ pub fn draw_login_screen(
                                             state.login_error = None;
                                             api.send(ApiCommand::Login {
                                                 server_url: url,
+                                                hide_url,
                                                 username: state.username.clone(),
                                                 password: state.password.clone(),
                                                 device_id: state.device_id.clone(),
@@ -214,7 +247,7 @@ pub fn draw_login_screen(
                                         }
                                     });
 
-                                // Subtle, unobtrusive trigger to reveal local Server Host & Port settings (hidden by default)
+                                // Subtle, unobtrusive trigger to reveal Publik / Lokal server settings (hidden by default)
                                 ui.add_space(12.0);
                                 draw_hidden_server_settings_section(ui, state, api, sync_bridge);
                             });
@@ -231,6 +264,11 @@ fn draw_hidden_server_settings_section(
     api: &ApiClientBridge,
     sync_bridge: &AssetSyncBridge,
 ) {
+    let mode_badge = if state.server_settings.is_public_mode() {
+        "Publik"
+    } else {
+        "Lokal"
+    };
     let toggle_text = if state.show_server_settings {
         "Sembunyikan pengaturan server"
     } else {
@@ -249,6 +287,16 @@ fn draw_hidden_server_settings_section(
             )
             .sense(egui::Sense::click()),
         );
+        ui.label(
+            egui::RichText::new(format!("({mode_badge})"))
+                .size(10.0)
+                .color(if state.server_settings.is_public_mode() {
+                    egui::Color32::from_rgb(56, 189, 248)
+                } else {
+                    egui::Color32::from_rgb(148, 163, 184)
+                }),
+        );
+
         let hovered = icon_resp.hovered() || text_resp.hovered();
         let chevron_col = if hovered {
             egui::Color32::from_rgb(148, 163, 184)
@@ -279,10 +327,15 @@ fn draw_hidden_server_settings_section(
             );
         }
 
-        let hover_tip = format!(
-            "Server aktif: {} — klik untuk mengatur protokol, host & port",
-            state.server_url
-        );
+        // Never expose the compiled-in Public Server URL in tooltips!
+        let hover_tip = if state.server_settings.is_public_mode() {
+            "Mode aktif: Server Publik — klik untuk membuka pengaturan server".to_string()
+        } else {
+            format!(
+                "Mode aktif: Lokal ({}) — klik untuk mengatur protokol, host & port",
+                state.server_url
+            )
+        };
         let clicked = icon_resp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(&hover_tip)
@@ -309,27 +362,33 @@ fn draw_hidden_server_settings_section(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // Protocol selector (HTTP / HTTPS)
+            // Mode switcher: Publik vs Lokal
+            let tab_w = ((ui.available_width() - 6.0) * 0.5).max(110.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Protokol")
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
-                );
-                ui.add_space(6.0);
-                for (proto, label) in [
-                    (ServerProtocol::Http, "HTTP"),
-                    (ServerProtocol::Https, "HTTPS"),
-                ] {
-                    let selected = state.server_settings.protocol == proto;
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for (mode, label) in [(ServerMode::Public, "Publik"), (ServerMode::Local, "Lokal")]
+                {
+                    let selected = state.server_settings.mode == mode;
                     let fill = if selected {
-                        if proto == ServerProtocol::Https {
-                            egui::Color32::from_rgb(6, 95, 70)
-                        } else {
+                        if mode == ServerMode::Public {
                             egui::Color32::from_rgb(14, 116, 144)
+                        } else {
+                            egui::Color32::from_rgb(51, 65, 85)
                         }
                     } else {
-                        egui::Color32::from_rgb(30, 41, 59)
+                        egui::Color32::from_rgb(20, 30, 48)
+                    };
+                    let stroke = if selected {
+                        egui::Stroke::new(
+                            1.0,
+                            if mode == ServerMode::Public {
+                                egui::Color32::from_rgb(56, 189, 248)
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            },
+                        )
+                    } else {
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 52, 74))
                     };
                     let fg = if selected {
                         egui::Color32::WHITE
@@ -339,14 +398,16 @@ fn draw_hidden_server_settings_section(
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new(label).size(11.0).strong().color(fg),
+                                egui::RichText::new(label).size(11.5).strong().color(fg),
                             )
                             .fill(fill)
-                            .min_size(egui::vec2(58.0, 22.0)),
+                            .stroke(stroke)
+                            .min_size(egui::vec2(tab_w, 26.0)),
                         )
                         .clicked()
+                        && !selected
                     {
-                        state.server_settings.protocol = proto;
+                        state.server_settings.mode = mode;
                         state.server_settings_feedback = None;
                         if let Ok(url) = state.server_settings.build_url() {
                             state.server_url = url;
@@ -355,201 +416,366 @@ fn draw_hidden_server_settings_section(
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(10.0);
 
-            // Host & Port side-by-side
-            let total_w = ui.available_width();
-            let gap = 8.0_f32;
-            let port_w = 88.0_f32;
-            let host_w = (total_w - port_w - gap).max(140.0);
-
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-
-                ui.vertical(|ui| {
-                    ui.set_width(host_w);
+            if state.server_settings.is_public_mode() {
+                // PUBLIC MODE: intentionally shows NO URL / host / port inputs — only Test & Simpan!
+                let has_public = branding::has_public_server();
+                if has_public {
                     ui.label(
-                        egui::RichText::new("Host / IP / Domain")
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(203, 213, 225)),
-                    );
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut state.server_settings.host)
-                            .hint_text("127.0.0.1 / twg.domain.com")
-                            .desired_width(host_w),
-                    );
-                    if resp.changed() {
-                        state.server_settings.normalize_pasted_host();
-                        state.server_settings_feedback = None;
-                        if let Ok(url) = state.server_settings.build_url() {
-                            state.server_url = url;
-                        }
-                    }
-                });
-
-                ui.vertical(|ui| {
-                    ui.set_width(port_w);
-                    ui.label(
-                        egui::RichText::new("Port (opsional)")
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(203, 213, 225)),
-                    );
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut state.server_settings.port)
-                            .hint_text(state.server_settings.protocol.default_port().to_string())
-                            .desired_width(port_w),
-                    );
-                    if resp.changed() {
-                        // Keep digits only for port field
-                        state.server_settings.port.retain(|c| c.is_ascii_digit());
-                        state.server_settings_feedback = None;
-                        if let Ok(url) = state.server_settings.build_url() {
-                            state.server_url = url;
-                        }
-                    }
-                });
-            });
-
-            ui.add_space(6.0);
-            match state.server_settings.build_url() {
-                Ok(preview) => {
-                    ui.label(
-                        egui::RichText::new(format!("Alamat: {preview}"))
-                            .size(10.5)
-                            .monospace()
-                            .color(egui::Color32::from_rgb(125, 211, 252)),
-                    );
-                }
-                Err(err) => {
-                    ui.label(
-                        egui::RichText::new(err)
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(248, 113, 113)),
-                    );
-                }
-            }
-
-            if state.testing_server_connection {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Menguji koneksi ke server...")
-                        .size(10.5)
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
-                );
-            } else if let Some((ok, msg)) = &state.server_settings_feedback {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(msg).size(10.5).color(if *ok {
-                    egui::Color32::from_rgb(74, 222, 128)
-                } else {
-                    egui::Color32::from_rgb(248, 113, 113)
-                }));
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().item_spacing.y = 6.0;
-                if ui
-                    .add_enabled(
-                        !state.testing_server_connection,
-                        egui::Button::new(
-                            egui::RichText::new(if state.testing_server_connection {
-                                "Menguji..."
-                            } else {
-                                "Test Koneksi"
-                            })
-                            .size(11.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
+                        egui::RichText::new(
+                            "Terhubung menggunakan Server Publik bawaan aplikasi.",
                         )
-                        .fill(egui::Color32::from_rgb(14, 116, 144)),
-                    )
-                    .clicked()
-                {
-                    state.server_settings.normalize_pasted_host();
-                    match state.server_settings.build_url() {
-                        Ok(url) => {
-                            state.server_url = url.clone();
-                            state.testing_server_connection = true;
-                            state.server_settings_feedback = None;
-                            api.send(ApiCommand::TestServerConnection { server_url: url });
-                        }
-                        Err(err) => {
-                            state.server_settings_feedback = Some((false, err));
-                        }
-                    }
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(186, 230, 253)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Server Publik belum dikonfigurasi pada build ini (mode development). Isi PUBLIC_SERVER_URL saat packaging atau gunakan tab Lokal.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(250, 204, 21)),
+                    );
                 }
 
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("Simpan Lokal")
+                draw_server_feedback(ui, state);
+
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.y = 6.0;
+
+                    if ui
+                        .add_enabled(
+                            has_public && !state.testing_server_connection,
+                            egui::Button::new(
+                                egui::RichText::new(if state.testing_server_connection {
+                                    "Menguji..."
+                                } else {
+                                    "Test Koneksi"
+                                })
                                 .size(11.0)
                                 .strong()
                                 .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(14, 116, 144)),
                         )
-                        .fill(egui::Color32::from_rgb(5, 150, 105)),
-                    )
-                    .clicked()
-                {
-                    state.server_settings.normalize_pasted_host();
-                    match state.server_settings.build_url() {
-                        Ok(url) => match save_local_server_settings(&state.server_settings) {
-                            Ok(_path) => {
+                        .clicked()
+                    {
+                        match state.server_settings.build_url() {
+                            Ok(url) => {
                                 state.server_url = url.clone();
-                                state.server_settings_saved_locally = true;
-                                state.login_error = None;
-                                state.server_settings_feedback = Some((
-                                    true,
-                                    "Pengaturan server tersimpan di komputer ini.".into(),
-                                ));
-                                sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                                state.testing_server_connection = true;
+                                state.server_settings_feedback = None;
+                                api.send(ApiCommand::TestServerConnection {
                                     server_url: url,
-                                    local_root: state.assets_root.clone(),
+                                    hide_url: true,
                                 });
                             }
                             Err(err) => {
                                 state.server_settings_feedback = Some((false, err));
                             }
-                        },
-                        Err(err) => {
-                            state.server_settings_feedback = Some((false, err));
                         }
+                    }
+
+                    if ui
+                        .add_enabled(
+                            has_public,
+                            egui::Button::new(
+                                egui::RichText::new("Simpan")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105)),
+                        )
+                        .clicked()
+                    {
+                        match state.server_settings.build_url() {
+                            Ok(url) => match save_local_server_settings(&state.server_settings) {
+                                Ok(_path) => {
+                                    state.server_url = url.clone();
+                                    state.server_settings_saved_locally = true;
+                                    state.login_error = None;
+                                    state.server_settings_feedback = Some((
+                                        true,
+                                        "Mode Server Publik tersimpan di komputer ini.".into(),
+                                    ));
+                                    sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                                        server_url: url,
+                                        local_root: state.assets_root.clone(),
+                                    });
+                                }
+                                Err(err) => {
+                                    state.server_settings_feedback = Some((false, err));
+                                }
+                            },
+                            Err(err) => {
+                                state.server_settings_feedback = Some((false, err));
+                            }
+                        }
+                    }
+
+                    draw_reset_server_button(ui, state, sync_bridge);
+                });
+            } else {
+                // LOCAL MODE: Protocol (HTTP/HTTPS), Host/IP/Domain, Port, URL Preview, Test, Simpan, Reset
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Protokol")
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add_space(6.0);
+                    for (proto, label) in [
+                        (ServerProtocol::Http, "HTTP"),
+                        (ServerProtocol::Https, "HTTPS"),
+                    ] {
+                        let selected = state.server_settings.protocol == proto;
+                        let fill = if selected {
+                            if proto == ServerProtocol::Https {
+                                egui::Color32::from_rgb(6, 95, 70)
+                            } else {
+                                egui::Color32::from_rgb(14, 116, 144)
+                            }
+                        } else {
+                            egui::Color32::from_rgb(30, 41, 59)
+                        };
+                        let fg = if selected {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(148, 163, 184)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(label).size(11.0).strong().color(fg),
+                                )
+                                .fill(fill)
+                                .min_size(egui::vec2(58.0, 22.0)),
+                            )
+                            .clicked()
+                        {
+                            state.server_settings.protocol = proto;
+                            state.server_settings_feedback = None;
+                            if let Ok(url) = state.server_settings.build_url() {
+                                state.server_url = url;
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+
+                // Host & Port side-by-side
+                let total_w = ui.available_width();
+                let gap = 8.0_f32;
+                let port_w = 88.0_f32;
+                let host_w = (total_w - port_w - gap).max(140.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+
+                    ui.vertical(|ui| {
+                        ui.set_width(host_w);
+                        ui.label(
+                            egui::RichText::new("Host / IP / Domain")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(203, 213, 225)),
+                        );
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut state.server_settings.host)
+                                .hint_text("127.0.0.1 / 192.168.1.10")
+                                .desired_width(host_w),
+                        );
+                        if resp.changed() {
+                            state.server_settings.normalize_pasted_host();
+                            state.server_settings_feedback = None;
+                            if let Ok(url) = state.server_settings.build_url() {
+                                state.server_url = url;
+                            }
+                        }
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_width(port_w);
+                        ui.label(
+                            egui::RichText::new("Port (opsional)")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(203, 213, 225)),
+                        );
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut state.server_settings.port)
+                                .hint_text(state.server_settings.protocol.default_port().to_string())
+                                .desired_width(port_w),
+                        );
+                        if resp.changed() {
+                            state.server_settings.port.retain(|c| c.is_ascii_digit());
+                            state.server_settings_feedback = None;
+                            if let Ok(url) = state.server_settings.build_url() {
+                                state.server_url = url;
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+                match state.server_settings.build_url() {
+                    Ok(preview) => {
+                        ui.label(
+                            egui::RichText::new(format!("Alamat: {preview}"))
+                                .size(10.5)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(125, 211, 252)),
+                        );
+                    }
+                    Err(err) => {
+                        ui.label(
+                            egui::RichText::new(err)
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(248, 113, 113)),
+                        );
                     }
                 }
 
-                if state.server_settings_saved_locally
-                    && ui
-                        .add(
+                draw_server_feedback(ui, state);
+
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    if ui
+                        .add_enabled(
+                            !state.testing_server_connection,
                             egui::Button::new(
-                                egui::RichText::new("Reset")
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(203, 213, 225)),
+                                egui::RichText::new(if state.testing_server_connection {
+                                    "Menguji..."
+                                } else {
+                                    "Test Koneksi"
+                                })
+                                .size(11.0)
+                                .strong()
+                                .color(egui::Color32::WHITE),
                             )
-                            .fill(egui::Color32::from_rgb(30, 41, 59)),
+                            .fill(egui::Color32::from_rgb(14, 116, 144)),
                         )
                         .clicked()
-                {
-                    match reset_local_server_settings() {
-                        Ok(def) => {
-                            let url = def
-                                .build_url()
-                                .unwrap_or_else(|_| "http://127.0.0.1:8010".to_string());
-                            state.server_settings = def;
-                            state.server_url = url.clone();
-                            state.server_settings_saved_locally = false;
-                            state.server_settings_feedback =
-                                Some((true, "Pengaturan dikembalikan ke default.".into()));
-                            sync_bridge.send(AssetSyncCommand::SyncWithServer {
-                                server_url: url,
-                                local_root: state.assets_root.clone(),
-                            });
-                        }
-                        Err(err) => {
-                            state.server_settings_feedback = Some((false, err));
+                    {
+                        state.server_settings.normalize_pasted_host();
+                        match state.server_settings.build_url() {
+                            Ok(url) => {
+                                state.server_url = url.clone();
+                                state.testing_server_connection = true;
+                                state.server_settings_feedback = None;
+                                api.send(ApiCommand::TestServerConnection {
+                                    server_url: url,
+                                    hide_url: false,
+                                });
+                            }
+                            Err(err) => {
+                                state.server_settings_feedback = Some((false, err));
+                            }
                         }
                     }
-                }
-            });
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Simpan Lokal")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(5, 150, 105)),
+                        )
+                        .clicked()
+                    {
+                        state.server_settings.normalize_pasted_host();
+                        match state.server_settings.build_url() {
+                            Ok(url) => match save_local_server_settings(&state.server_settings) {
+                                Ok(_path) => {
+                                    state.server_url = url.clone();
+                                    state.server_settings_saved_locally = true;
+                                    state.login_error = None;
+                                    state.server_settings_feedback = Some((
+                                        true,
+                                        "Pengaturan server lokal tersimpan di komputer ini.".into(),
+                                    ));
+                                    sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                                        server_url: url,
+                                        local_root: state.assets_root.clone(),
+                                    });
+                                }
+                                Err(err) => {
+                                    state.server_settings_feedback = Some((false, err));
+                                }
+                            },
+                            Err(err) => {
+                                state.server_settings_feedback = Some((false, err));
+                            }
+                        }
+                    }
+
+                    draw_reset_server_button(ui, state, sync_bridge);
+                });
+            }
         });
+}
+
+fn draw_server_feedback(ui: &mut egui::Ui, state: &AppState) {
+    if state.testing_server_connection {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Menguji koneksi ke server...")
+                .size(10.5)
+                .color(egui::Color32::from_rgb(56, 189, 248)),
+        );
+    } else if let Some((ok, msg)) = &state.server_settings_feedback {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(msg).size(10.5).color(if *ok {
+            egui::Color32::from_rgb(74, 222, 128)
+        } else {
+            egui::Color32::from_rgb(248, 113, 113)
+        }));
+    }
+}
+
+fn draw_reset_server_button(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    sync_bridge: &AssetSyncBridge,
+) {
+    if state.server_settings_saved_locally
+        && ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("Reset")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                )
+                .fill(egui::Color32::from_rgb(30, 41, 59)),
+            )
+            .clicked()
+    {
+        match reset_local_server_settings() {
+            Ok(def) => {
+                let url = def
+                    .build_url()
+                    .unwrap_or_else(|_| "http://127.0.0.1:8010".to_string());
+                state.server_settings = def;
+                state.server_url = url.clone();
+                state.server_settings_saved_locally = false;
+                state.server_settings_feedback =
+                    Some((true, "Pengaturan dikembalikan ke default.".into()));
+                sync_bridge.send(AssetSyncCommand::SyncWithServer {
+                    server_url: url,
+                    local_root: state.assets_root.clone(),
+                });
+            }
+            Err(err) => {
+                state.server_settings_feedback = Some((false, err));
+            }
+        }
+    }
 }
