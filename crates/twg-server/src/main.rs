@@ -8,7 +8,7 @@ mod ws;
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -29,7 +29,14 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Arc::new(AppConfig::from_env()?);
-    tokio::fs::create_dir_all(&config.upload_dir).await?;
+    tokio::fs::create_dir_all(&config.upload_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create upload directory '{}'",
+                config.upload_dir.display()
+            )
+        })?;
 
     tracing::info!(addr = %config.bind_addr, "Connecting to PostgreSQL...");
     let db = PgPoolOptions::new()

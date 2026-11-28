@@ -45,7 +45,7 @@ impl IntoResponse for AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(err) => {
-                tracing::error!(?err, "unhandled internal error");
+                tracing::error!(err = %format!("{err:#}"), "unhandled internal error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };

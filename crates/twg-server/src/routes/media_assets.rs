@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 
+use anyhow::Context;
 use axum::{
     Json,
     extract::{Multipart, Path as AxumPath, Query, State},
@@ -619,11 +620,18 @@ pub async fn resize_media_texture(
     if let Some(parent) = new_active_abs.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| format!("failed to create media directory '{}'", parent.display()))
+            .map_err(AppError::Internal)?;
     }
     tokio::fs::write(&new_active_abs, &encoded)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| {
+            format!(
+                "failed to write resized texture '{}'",
+                new_active_abs.display()
+            )
+        })
+        .map_err(AppError::Internal)?;
 
     let new_sha = sha256_hex(&encoded);
     let new_size = encoded.len() as i64;
@@ -790,11 +798,15 @@ async fn process_and_store_media(
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| AppError::Internal(e.into()))?;
+                    .with_context(|| {
+                        format!("failed to create texture directory '{}'", parent.display())
+                    })
+                    .map_err(AppError::Internal)?;
             }
             tokio::fs::write(&abs, &encoded)
                 .await
-                .map_err(|e| AppError::Internal(e.into()))?;
+                .with_context(|| format!("failed to write texture asset '{}'", abs.display()))
+                .map_err(AppError::Internal)?;
 
             Ok(ProcessedMedia {
                 rel_path,
@@ -822,11 +834,15 @@ async fn process_and_store_media(
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| AppError::Internal(e.into()))?;
+                    .with_context(|| {
+                        format!("failed to create sound directory '{}'", parent.display())
+                    })
+                    .map_err(AppError::Internal)?;
             }
             tokio::fs::write(&abs, &upload.bytes)
                 .await
-                .map_err(|e| AppError::Internal(e.into()))?;
+                .with_context(|| format!("failed to write sound asset '{}'", abs.display()))
+                .map_err(AppError::Internal)?;
 
             let probe = probe_media_with_ffprobe(&abs).await;
 
@@ -856,11 +872,15 @@ async fn process_and_store_media(
             if let Some(parent) = abs.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| AppError::Internal(e.into()))?;
+                    .with_context(|| {
+                        format!("failed to create video directory '{}'", parent.display())
+                    })
+                    .map_err(AppError::Internal)?;
             }
             tokio::fs::write(&abs, &upload.bytes)
                 .await
-                .map_err(|e| AppError::Internal(e.into()))?;
+                .with_context(|| format!("failed to write video asset '{}'", abs.display()))
+                .map_err(AppError::Internal)?;
 
             let probe = probe_media_with_ffprobe(&abs).await;
 

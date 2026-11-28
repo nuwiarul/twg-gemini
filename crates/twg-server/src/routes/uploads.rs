@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     Json,
     extract::{Multipart, State},
@@ -21,7 +22,13 @@ pub async fn upload_file(
 ) -> AppResult<Json<ApiResponse<UploadResponse>>> {
     tokio::fs::create_dir_all(&state.config.upload_dir)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| {
+            format!(
+                "failed to create upload directory '{}'",
+                state.config.upload_dir.display()
+            )
+        })
+        .map_err(AppError::Internal)?;
 
     if let Some(field) = multipart
         .next_field()
@@ -50,7 +57,8 @@ pub async fn upload_file(
         let target = state.config.upload_dir.join(&filename);
         tokio::fs::write(&target, &data)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| format!("failed to write upload file '{}'", target.display()))
+            .map_err(AppError::Internal)?;
 
         return Ok(Json(ApiResponse {
             data: UploadResponse {

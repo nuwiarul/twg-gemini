@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use anyhow::Context;
 use axum::{
     Json,
     body::Body,
@@ -573,7 +574,9 @@ pub async fn repair_unnormalized_skin_weights_if_needed(
     }
 
     if updated_rows > 0 {
-        let _ = write_catalog_snapshot(db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(db, assets_dir).await {
+        tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+    }
         tracing::info!(
             repaired_files,
             repaired_vertices,
@@ -1317,7 +1320,9 @@ pub async fn create_model_asset(
 
     let dto = fetch_model_by_id(&state.db, id).await?;
     if operasi_id.is_none() {
-        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(&state.db, assets_dir).await {
+            tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+        }
     }
     broadcast_model_assets_changed(&state, operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
@@ -1674,7 +1679,9 @@ pub async fn update_model_asset(
 
     let dto = fetch_model_by_id(&state.db, id).await?;
     if existing.operasi_id.is_none() {
-        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(&state.db, assets_dir).await {
+            tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+        }
     }
     broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
@@ -1796,7 +1803,9 @@ pub async fn upload_model_action(
 
     let dto = fetch_model_by_id(&state.db, id).await?;
     if existing.operasi_id.is_none() {
-        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(&state.db, assets_dir).await {
+            tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+        }
     }
     broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
@@ -1846,7 +1855,9 @@ pub async fn delete_model_action(
 
     let dto = fetch_model_by_id(&state.db, id).await?;
     if existing.operasi_id.is_none() {
-        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(&state.db, assets_dir).await {
+            tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+        }
     }
     broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse { data: dto }))
@@ -1876,7 +1887,9 @@ pub async fn delete_model_asset(
     }
 
     if existing.operasi_id.is_none() {
-        let _ = write_catalog_snapshot(&state.db, assets_dir).await;
+        if let Err(err) = write_catalog_snapshot(&state.db, assets_dir).await {
+            tracing::warn!(err = %format!("{err:#}"), "failed to update catalog snapshot models.json");
+        }
     }
     broadcast_model_assets_changed(&state, existing.operasi_id, id, &auth.username).await;
     Ok(Json(ApiResponse {
@@ -1927,12 +1940,27 @@ async fn relocate_file_to_category(
     if let Some(parent) = new_abs.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| {
+                format!(
+                    "failed to create category directory '{}'",
+                    parent.display()
+                )
+            })
+            .map_err(AppError::Internal)?;
     }
-    if old_abs.exists() && tokio::fs::rename(&old_abs, &new_abs).await.is_err() {
+    if old_abs.exists()
+        && let Err(rename_err) = tokio::fs::rename(&old_abs, &new_abs).await
+    {
         tokio::fs::copy(&old_abs, &new_abs)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| {
+                format!(
+                    "failed to copy model '{}' to '{}' (after rename failed: {rename_err})",
+                    old_abs.display(),
+                    new_abs.display()
+                )
+            })
+            .map_err(AppError::Internal)?;
         let _ = tokio::fs::remove_file(&old_abs).await;
     }
     Ok(new_rel)
@@ -1978,11 +2006,23 @@ async fn write_catalog_snapshot(db: &PgPool, assets_dir: &Path) -> anyhow::Resul
 
     let catalog_path = assets_dir.join("catalog").join("models.json");
     if let Some(parent) = catalog_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create catalog directory '{}'", parent.display()))?;
     }
     let tmp = catalog_path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, serde_json::to_string_pretty(&snapshot)?).await?;
-    tokio::fs::rename(&tmp, &catalog_path).await?;
+    tokio::fs::write(&tmp, serde_json::to_string_pretty(&snapshot)?)
+        .await
+        .with_context(|| format!("failed to write catalog snapshot temp file '{}'", tmp.display()))?;
+    tokio::fs::rename(&tmp, &catalog_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to replace catalog snapshot '{}' from '{}'",
+                catalog_path.display(),
+                tmp.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -2147,17 +2187,32 @@ async fn convert_uploaded_model(
         "glb"
     };
 
-    let tmp_dir = std::env::temp_dir().join("twg-model-convert");
+    // Use a unique per-upload temp directory so concurrent uploads or different OS users
+    // (e.g. running once as root and later as systemd user `twg`) never collide on ownership.
+    let job_id = Uuid::new_v4();
+    let tmp_dir = std::env::temp_dir().join(format!("twg-model-convert-{job_id}"));
     tokio::fs::create_dir_all(&tmp_dir)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-    let tmp_in = tmp_dir.join(format!("{}.{ext}", Uuid::new_v4()));
-    tokio::fs::write(&tmp_in, &upload.bytes)
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| {
+            format!(
+                "failed to create model conversion temp directory '{}'",
+                tmp_dir.display()
+            )
+        })
+        .map_err(AppError::Internal)?;
+    let tmp_in = tmp_dir.join(format!("input.{ext}"));
+    if let Err(err) = tokio::fs::write(&tmp_in, &upload.bytes).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return Err(AppError::Internal(
+            anyhow::Error::new(err).context(format!(
+                "failed to write temporary upload file '{}'",
+                tmp_in.display()
+            )),
+        ));
+    }
 
-    let tmp_lod0 = tmp_dir.join(format!("{}_lod0.glb", Uuid::new_v4()));
-    let tmp_lod2 = tmp_dir.join(format!("{}_lod2.glb", Uuid::new_v4()));
+    let tmp_lod0 = tmp_dir.join("lod0.glb");
+    let tmp_lod2 = tmp_dir.join("lod2.glb");
 
     let result = if let Some(script_path) = find_converter_script() {
         let output = Command::new("node")
@@ -2212,42 +2267,50 @@ async fn convert_uploaded_model(
         rust_glb_fallback(&upload.bytes, &tmp_lod0, &tmp_lod2, expect_anim_mode).await
     };
 
-    let _ = tokio::fs::remove_file(&tmp_in).await;
-
-    match result {
+    let outcome = match result {
         Ok((mut s0, mut s2)) => {
             // Final pure-Rust safety net: guarantee both LOD0 and LOD2 have exact unit WEIGHTS_0
             // before publishing to assets_dir & PostgreSQL (covers both Node and Rust paths).
-            ensure_glb_file_normalized(&tmp_lod0, &mut s0).await?;
-            ensure_glb_file_normalized(&tmp_lod2, &mut s2).await?;
+            let res: AppResult<(ConverterFileStats, ConverterFileStats)> = async {
+                ensure_glb_file_normalized(&tmp_lod0, &mut s0).await?;
+                ensure_glb_file_normalized(&tmp_lod2, &mut s2).await?;
 
-            if let Some(p) = lod0_out.parent() {
-                tokio::fs::create_dir_all(p)
-                    .await
-                    .map_err(|e| AppError::Internal(e.into()))?;
+                for out_path in [lod0_out, lod2_out] {
+                    if let Some(p) = out_path.parent() {
+                        tokio::fs::create_dir_all(p)
+                            .await
+                            .with_context(|| {
+                                format!("failed to create model asset directory '{}'", p.display())
+                            })
+                            .map_err(AppError::Internal)?;
+                    }
+                }
+                move_file(&tmp_lod0, lod0_out).await?;
+                move_file(&tmp_lod2, lod2_out).await?;
+                Ok((s0, s2))
             }
-            move_file(&tmp_lod0, lod0_out).await?;
-            move_file(&tmp_lod2, lod2_out).await?;
-            Ok((s0, s2))
+            .await;
+            res
         }
-        Err(err) => {
-            let _ = tokio::fs::remove_file(&tmp_lod0).await;
-            let _ = tokio::fs::remove_file(&tmp_lod2).await;
-            Err(err)
-        }
-    }
+        Err(err) => Err(err),
+    };
+
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    outcome
 }
 
 async fn ensure_glb_file_normalized(path: &Path, stats: &mut ConverterFileStats) -> AppResult<()> {
     let bytes = tokio::fs::read(path)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| format!("failed to read converted GLB '{}'", path.display()))
+        .map_err(AppError::Internal)?;
     let (patched_opt, report) = twg_shared::glb_skin::normalize_glb_joint_weights(&bytes)
         .map_err(|e| AppError::BadRequest(format!("GLB skinning data tidak valid: {e}")))?;
     if let Some(patched) = patched_opt {
         tokio::fs::write(path, &patched)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| format!("failed to write normalized GLB '{}'", path.display()))
+            .map_err(AppError::Internal)?;
         let mut hasher = Sha256::new();
         hasher.update(&patched);
         stats.sha256 = hex::encode(hasher.finalize());
@@ -2262,10 +2325,17 @@ async fn ensure_glb_file_normalized(path: &Path, stats: &mut ConverterFileStats)
 }
 
 async fn move_file(src: &Path, dst: &Path) -> AppResult<()> {
-    if tokio::fs::rename(src, dst).await.is_err() {
+    if let Err(rename_err) = tokio::fs::rename(src, dst).await {
         tokio::fs::copy(src, dst)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+            .with_context(|| {
+                format!(
+                    "failed to copy converted model '{}' to '{}' (after rename failed: {rename_err})",
+                    src.display(),
+                    dst.display()
+                )
+            })
+            .map_err(AppError::Internal)?;
         let _ = tokio::fs::remove_file(src).await;
     }
     Ok(())
@@ -2331,10 +2401,12 @@ async fn rust_glb_fallback(
 
     tokio::fs::write(lod0_out, final_bytes)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| format!("failed to write fallback LOD0 GLB '{}'", lod0_out.display()))
+        .map_err(AppError::Internal)?;
     tokio::fs::write(lod2_out, final_bytes)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .with_context(|| format!("failed to write fallback LOD2 GLB '{}'", lod2_out.display()))
+        .map_err(AppError::Internal)?;
 
     let mut hasher = Sha256::new();
     hasher.update(final_bytes);

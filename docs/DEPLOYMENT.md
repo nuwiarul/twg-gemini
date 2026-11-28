@@ -306,7 +306,7 @@ PrivateTmp=false
 WantedBy=multi-user.target
 ```
 
-> **Penting:** `PrivateTmp=false` (atau `PrivateTmp=true` tidak masalah selama `/tmp` dapat ditulis user `twg`), karena konversi upload menggunakan direktori sementara `std::env::temp_dir()/twg-model-convert`. Pastikan `node` dan `npm` berada di `/usr/bin` atau `/usr/local/bin` (tercakup di `Environment=PATH=...`).
+> **Penting:** `PrivateTmp=false` (atau `PrivateTmp=true` tidak masalah selama `/tmp` dapat ditulis user `twg`), karena setiap konversi upload menggunakan direktori sementara unik `std::env::temp_dir()/twg-model-convert-<uuid>` yang otomatis dibersihkan setelah selesai. Pastikan `node` dan `npm` berada di `/usr/bin` atau `/usr/local/bin` (tercakup di `Environment=PATH=...`).
 
 Aktifkan dan jalankan service:
 

@@ -27,7 +27,7 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --create-home --shell /bin/bash "$SERVICE_USER"
 fi
 
-mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/assets/uploads"
+mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/assets/uploads" "$INSTALL_DIR/assets/models" "$INSTALL_DIR/assets/media" "$INSTALL_DIR/assets/catalog"
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
   echo "==> Building twg-server (release)..."
