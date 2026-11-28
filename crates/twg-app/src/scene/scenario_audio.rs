@@ -184,6 +184,8 @@ mod tests {
             duration_sec: Some(2.0),
             crop_mode: None,
             version: 1,
+            operasi_id: None,
+            created_by: None,
             created_at: now,
             updated_at: now,
         }];
@@ -201,6 +203,8 @@ mod tests {
             autoplay: false,
             geom: vec![],
             data: serde_json::json!({}),
+            created_by: None,
+            allowed_user_ids: vec![],
             created_at: now,
             updated_at: now,
         };
